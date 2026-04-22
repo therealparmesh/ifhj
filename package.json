@@ -1,0 +1,28 @@
+{
+  "name": "ifhj",
+  "version": "0.0.0",
+  "private": true,
+  "description": "i freaking have jira — a TUI for Jira",
+  "license": "MIT",
+  "bin": {
+    "ifhj": "src/index.tsx"
+  },
+  "type": "module",
+  "scripts": {
+    "compile": "bun build --compile --minify --external react-devtools-core src/index.tsx --outfile ifhj",
+    "dev": "bun --hot src/index.tsx",
+    "lint": "oxfmt && oxlint && tsc",
+    "start": "bun run src/index.tsx"
+  },
+  "dependencies": {
+    "ink": "^7.0.1",
+    "react": "^19.2.5"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.13",
+    "@types/react": "^19.2.14",
+    "oxfmt": "^0.46.0",
+    "oxlint": "^1.61.0",
+    "typescript": "^5.9.3"
+  }
+}
