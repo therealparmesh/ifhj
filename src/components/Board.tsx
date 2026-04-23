@@ -49,7 +49,7 @@ type Modal =
   | { kind: "help" }
   | { kind: "search" }
   | { kind: "card-action" }
-  | { kind: "move-picker" }
+  | { kind: "move-picker"; issueKey?: string }
   | { kind: "transition-picker"; transitions: Transition[]; issueKey: string }
   | { kind: "assignee-picker"; names: string[] }
   | { kind: "create"; types: IssueType[]; linkTypes: IssueLinkType[] }
@@ -309,8 +309,8 @@ export function BoardView({ cfg, board, onExit }: Props) {
   const moving = useRef(false);
 
   const moveToColumn = useCallback(
-    async (targetColIdx: number) => {
-      const issue = currentIssue;
+    async (targetColIdx: number, issueOverride?: Issue) => {
+      const issue = issueOverride ?? currentIssue;
       if (!issue || !conf) return;
       if (targetColIdx < 0 || targetColIdx >= conf.columns.length) return;
       /**
@@ -427,21 +427,28 @@ export function BoardView({ cfg, board, onExit }: Props) {
     }
   }, [currentIssue, cfg, flash, load]);
 
+  const openDetailForKey = useCallback(
+    async (key: string) => {
+      setModal({ kind: "detail", issueKey: key, detail: null, error: null });
+      try {
+        const detail = await getIssueDetail(cfg, key);
+        setModal((m) => (m.kind === "detail" && m.issueKey === key ? { ...m, detail } : m));
+      } catch (e) {
+        const msg = errorMessage(e);
+        setModal((m) => (m.kind === "detail" && m.issueKey === key ? { ...m, error: msg } : m));
+      }
+    },
+    [cfg],
+  );
+
   const openDetail = useCallback(async () => {
     const issue = currentIssue;
     if (!issue) {
       flash("no issue selected", "info");
       return;
     }
-    setModal({ kind: "detail", issueKey: issue.key, detail: null, error: null });
-    try {
-      const detail = await getIssueDetail(cfg, issue.key);
-      setModal((m) => (m.kind === "detail" && m.issueKey === issue.key ? { ...m, detail } : m));
-    } catch (e) {
-      const msg = errorMessage(e);
-      setModal((m) => (m.kind === "detail" && m.issueKey === issue.key ? { ...m, error: msg } : m));
-    }
-  }, [currentIssue, cfg, flash]);
+    await openDetailForKey(issue.key);
+  }, [currentIssue, flash, openDetailForKey]);
 
   const openIssueInBrowser = useCallback(async () => {
     const issue = currentIssue;
@@ -635,26 +642,47 @@ export function BoardView({ cfg, board, onExit }: Props) {
       />
     );
   }
-  if (modal.kind === "move-picker" && currentIssue) {
+  if (modal.kind === "move-picker") {
+    // Explicit issueKey (e.g. from detail modal after a just-created card)
+    // must resolve against the fresh issues list — falling back to
+    // currentIssue would silently move the wrong card.
+    const targetIssue = modal.issueKey
+      ? issues.find((i) => i.key === modal.issueKey)
+      : currentIssue;
+    if (targetIssue) {
+      const currentColIdx = conf.columns.findIndex((c) =>
+        c.statusIds.includes(targetIssue.statusId),
+      );
+      return (
+        <FilterPicker
+          title={`Move ${targetIssue.key} to…`}
+          items={conf.columns.map((c, i) => ({ id: String(i), label: c.name }))}
+          {...(currentColIdx >= 0 ? { currentId: String(currentColIdx) } : {})}
+          onCancel={closeModal}
+          onPick={(id) => {
+            closeModal();
+            const idx = Number(id);
+            const col = conf.columns[idx];
+            if (!col) return;
+            if (col.statusIds.includes(targetIssue.statusId)) {
+              flash("already in that column", "info");
+              return;
+            }
+            void moveToColumn(idx, targetIssue);
+          }}
+        />
+      );
+    }
+    // Issue not in the current issues list yet — likely a just-created card
+    // mid-reload. Render the picker in a loading state; it resolves on its
+    // own once issues update, and esc still cancels via FilterPicker.
     return (
-      <ListPicker
-        title={`Move ${currentIssue.key} to…`}
-        items={conf.columns.map((c, i) => ({
-          id: String(i),
-          label: c.statusIds.includes(currentIssue.statusId) ? `${c.name}  (current)` : c.name,
-        }))}
+      <FilterPicker
+        title={`Move ${modal.issueKey ?? "issue"} to…`}
+        items={[]}
+        loading
         onCancel={closeModal}
-        onPick={(id) => {
-          closeModal();
-          const idx = Number(id);
-          const col = conf.columns[idx];
-          if (!col) return;
-          if (col.statusIds.includes(currentIssue.statusId)) {
-            flash("already in that column", "info");
-            return;
-          }
-          void moveToColumn(idx);
-        }}
+        onPick={() => {}}
       />
     );
   }
@@ -674,6 +702,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
           void doEditDescription();
         }}
         onOpenWeb={() => void openIssueInBrowser()}
+        onMove={() => setModal({ kind: "move-picker", issueKey: modal.issueKey })}
       />
     );
   }
@@ -737,8 +766,10 @@ export function BoardView({ cfg, board, onExit }: Props) {
           const headline = `created ${key}: ${title}`;
           flash(linkSummary ? `${headline} · ${linkSummary}` : headline, "ok");
           pendingFocusKey.current = key;
-          closeModal();
+          // Reload in the background so the new card shows up on the board
+          // beneath the detail view — the user closes detail and lands on it.
           void load();
+          void openDetailForKey(key);
         }}
         onError={(msg) => {
           flash(msg, "err");

@@ -108,6 +108,7 @@ You'll get a board picker. Pick one. From there, everything's keyboard.
 | g / G     | top / end                |
 | PgUp/PgDn | page up / down           |
 | e / E     | edit title / description |
+| m         | move to column           |
 | o         | open in browser          |
 | esc / q   | close                    |
 

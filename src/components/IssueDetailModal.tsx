@@ -83,6 +83,7 @@ export function IssueDetailModal({
   onEditTitle,
   onEditDesc,
   onOpenWeb,
+  onMove,
 }: {
   issueKey: string;
   detail: IssueDetail | null;
@@ -91,6 +92,7 @@ export function IssueDetailModal({
   onEditTitle: () => void;
   onEditDesc: () => void;
   onOpenWeb: () => void;
+  onMove: () => void;
 }) {
   const { cols: termCols, rows: termRows } = useDimensions();
   const [scroll, setScroll] = useState(0);
@@ -99,6 +101,7 @@ export function IssueDetailModal({
     if (input === "e") return onEditTitle();
     if (input === "E") return onEditDesc();
     if (input === "o") return onOpenWeb();
+    if (input === "m") return onMove();
     if (key.downArrow || input === "j") setScroll((s) => s + 1);
     else if (key.upArrow || input === "k") setScroll((s) => Math.max(0, s - 1));
     else if (key.pageDown) setScroll((s) => s + 10);
@@ -271,6 +274,7 @@ export function IssueDetailModal({
           <Hint k="g G" label="top / end" />
           <Hint k="e" label="title" />
           <Hint k="E" label="desc" />
+          <Hint k="m" label="move" />
           <Hint k="o" label="web" />
           <Hint k="esc" label="close" />
         </Box>
