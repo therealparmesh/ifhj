@@ -52,7 +52,7 @@ export JIRA_API_TOKEN="<token>"
 
 ### Configuration
 
-ifhj also needs your Jira **server** and **login email**. Either set them as environment variables, or drop them in a yaml file.
+ifhj also needs your Jira **server** and **login email**. Either set them as environment variables, or drop them in a TOML file.
 
 **Environment variables:**
 
@@ -61,12 +61,12 @@ export JIRA_SERVER="https://your-company.atlassian.net"
 export JIRA_LOGIN="you@your-company.com"    # or JIRA_EMAIL
 ```
 
-**Or `~/.config/.jira/.config.yml`** (the [jira-cli](https://github.com/ankitpokhrel/jira-cli) default — if you already use that CLI, ifhj picks up its config for free):
+**Or `~/.config/.jira/.config.toml`** (also checks `~/.config/jira/.config.toml`):
 
-```yaml
-server: https://your-company.atlassian.net
-login: you@your-company.com
-max_columns: 6  # visible board columns (default 4)
+```toml
+server = "https://your-company.atlassian.net"
+login = "you@your-company.com"
+max_columns = 6  # visible board columns (default 4)
 ```
 
 Environment variables win when both are set.

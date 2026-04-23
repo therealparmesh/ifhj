@@ -40,7 +40,14 @@ function App() {
     );
 
   if (!board) return <BoardPicker cfg={cfg.jira} onPick={setBoard} onQuit={() => exit()} />;
-  return <BoardView cfg={cfg.jira} board={board} maxVisibleCols={cfg.maxVisibleCols} onExit={() => setBoard(null)} />;
+  return (
+    <BoardView
+      cfg={cfg.jira}
+      board={board}
+      maxVisibleCols={cfg.maxVisibleCols}
+      onExit={() => setBoard(null)}
+    />
+  );
 }
 
 render(<App />);
