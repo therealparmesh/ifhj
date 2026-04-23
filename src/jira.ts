@@ -118,14 +118,30 @@ export async function getBoardConfig(cfg: JiraConfig, boardId: number): Promise<
 function adfToText(node: any): string {
   if (!node) return "";
   if (typeof node === "string") return node;
-  if (node.type === "text") return node.text ?? "";
+  // Tabs desync Ink's column math with terminal width — normalize to spaces.
+  if (node.type === "text") return (node.text ?? "").replaceAll("\t", "  ");
+  if (node.type === "hardBreak") return "\n";
+  if (node.type === "mention") return `@${node.attrs?.text ?? node.attrs?.displayName ?? ""}`;
+  if (node.type === "emoji") return node.attrs?.text ?? node.attrs?.shortName ?? "";
+  if (node.type === "inlineCard") return node.attrs?.url ?? "";
+  if (node.type === "media" || node.type === "mediaSingle" || node.type === "mediaGroup")
+    return "[media]\n";
+  if (node.type === "rule") return "\n───\n";
+  // Fence code blocks so line structure survives and the reader can tell
+  // code from prose — otherwise it all flattens into one run.
+  if (node.type === "codeBlock") {
+    const lang = node.attrs?.language ?? "";
+    const body = Array.isArray(node.content) ? node.content.map(adfToText).join("") : "";
+    return `\n\`\`\`${lang}\n${body}\n\`\`\`\n`;
+  }
   const children = Array.isArray(node.content) ? node.content.map(adfToText).join("") : "";
+  if (node.type === "listItem") return `• ${children.trim()}\n`;
   const block =
     node.type === "paragraph" ||
     node.type === "heading" ||
     node.type === "bulletList" ||
     node.type === "orderedList" ||
-    node.type === "listItem";
+    node.type === "blockquote";
   return block ? children + "\n" : children;
 }
 

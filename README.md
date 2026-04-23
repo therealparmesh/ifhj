@@ -36,43 +36,39 @@ mv ifhj /usr/local/bin/
 
 ### Neovim
 
-ifhj shells out to `nvim` for every text edit (title, description, create). It's assumed to be on `$PATH`.
+ifhj shells out to `nvim` for every text edit (title, description, create). Assumed to be on `$PATH`.
 
 ```sh
-# macOS
-brew install neovim
-
-# Debian / Ubuntu
-apt install neovim
-
-# Arch
-pacman -S neovim
+mise use -g neovim
 ```
 
 ### Jira API token
 
-Generate one at <https://id.atlassian.com/manage-profile/security/api-tokens>. You'll need it exported as `JIRA_API_TOKEN`.
+Generate one at <https://id.atlassian.com/manage-profile/security/api-tokens> and export it. The token always comes from an environment variable — it never lives on disk.
+
+```sh
+export JIRA_API_TOKEN="<token>"
+```
 
 ### Configuration
 
-ifhj reads configuration from environment variables first, then from `~/.config/.jira/.config.yml` (the [jira-cli](https://github.com/ankitpokhrel/jira-cli) default — if you already use that CLI, ifhj picks up its configuration for free).
+ifhj also needs your Jira **server** and **login email**. Either set them as environment variables, or drop them in a yaml file.
 
 **Environment variables:**
 
 ```sh
 export JIRA_SERVER="https://your-company.atlassian.net"
 export JIRA_LOGIN="you@your-company.com"    # or JIRA_EMAIL
-export JIRA_API_TOKEN="<token>"
 ```
 
-**Or `~/.config/.jira/.config.yml`:**
+**Or `~/.config/.jira/.config.yml`** (the [jira-cli](https://github.com/ankitpokhrel/jira-cli) default — if you already use that CLI, ifhj picks up its config for free):
 
 ```yaml
 server: https://your-company.atlassian.net
 login: you@your-company.com
 ```
 
-(token still comes from `JIRA_API_TOKEN` — it doesn't live in the yaml.)
+Environment variables win when both are set.
 
 ## Usage
 

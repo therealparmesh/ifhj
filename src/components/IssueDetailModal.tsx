@@ -25,6 +25,15 @@ type DetailLine = { text: string; color: string; bold?: boolean };
 function renderDetailLines(detail: IssueDetail, mainWidth: number): DetailLine[] {
   const out: DetailLine[] = [];
   const push = (text: string, color = theme.fg, bold = false) => out.push({ text, color, bold });
+  // Soft-wrap long lines so code, URLs, and stack traces aren't clipped at
+  // the edge. One row per DetailLine keeps the scroll math honest.
+  const pushLine = (text: string, color = theme.fg) => {
+    if (text.length === 0) {
+      push("", color);
+      return;
+    }
+    for (let i = 0; i < text.length; i += mainWidth) push(text.slice(i, i + mainWidth), color);
+  };
   const pushSection = (label: string) => {
     push("");
     push(label.toUpperCase(), theme.pink, true);
@@ -32,7 +41,7 @@ function renderDetailLines(detail: IssueDetail, mainWidth: number): DetailLine[]
   };
 
   pushSection("description");
-  for (const ln of (detail.description || "—").split(/\n/)) push(ln);
+  for (const ln of (detail.description || "—").split(/\n/)) pushLine(ln);
 
   if (detail.subtasks.length > 0) {
     pushSection(`sub-tasks (${detail.subtasks.length})`);
@@ -55,7 +64,7 @@ function renderDetailLines(detail: IssueDetail, mainWidth: number): DetailLine[]
     if (i > 0) push("·".repeat(Math.min(mainWidth, 20)), theme.accentDim);
     push(c.author, theme.cyan, true);
     push(formatShortDate(c.created), theme.muted);
-    for (const ln of (c.body || "").split(/\n/)) push(` ${ln}`);
+    for (const ln of (c.body || "").split(/\n/)) pushLine(` ${ln}`);
   });
   return out;
 }
