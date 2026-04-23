@@ -27,6 +27,11 @@ describe("parseFlatToml", () => {
     expect(result).toEqual({ name: "foo # bar" });
   });
 
+  test("strips inline comments after closing quote", () => {
+    const result = parseFlatToml(`server = "https://example.com" # my server`);
+    expect(result).toEqual({ server: "https://example.com" });
+  });
+
   test("skips full-line comments", () => {
     const result = parseFlatToml(`# this is a comment\nkey = "val"`);
     expect(result).toEqual({ key: "val" });

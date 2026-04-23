@@ -20,15 +20,19 @@ export function parseFlatToml(text: string): Record<string, string | number> {
     if (eq === -1) continue;
     const key = line.slice(0, eq).trim();
     const val = line.slice(eq + 1).trim();
-    if (val.length >= 2 && ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'")))) {
-      result[key] = val.slice(1, -1);
-    } else {
-      const bare = val.replace(/#.*$/, "").trim();
-      if (bare !== "" && Number.isFinite(Number(bare)))
-        result[key] = Number(bare);
-      else
-        result[key] = bare;
+    if (val.startsWith('"') || val.startsWith("'")) {
+      const quote = val[0]!;
+      const close = val.indexOf(quote, 1);
+      if (close !== -1) {
+        result[key] = val.slice(1, close);
+        continue;
+      }
     }
+    const bare = val.replace(/#.*$/, "").trim();
+    if (bare !== "" && Number.isFinite(Number(bare)))
+      result[key] = Number(bare);
+    else
+      result[key] = bare;
   }
   return result;
 }
