@@ -129,9 +129,11 @@ You'll get a board picker. Pick one. From there, everything's keyboard.
 | ⌃x  | clear (assignee) |
 | esc | cancel           |
 
-## How comments work
+## How descriptions and comments work
 
-ifhj shows comments on the detail view (`v` on a card) in chronological order with a thin divider between each one.
+ifhj shows descriptions and comments on the detail view (`v` on a card). Long lines soft-wrap to the column width — code blocks, URLs, and stack traces render in full, not clipped. Comments appear in chronological order with a thin divider between each one.
+
+**ADF rendering.** Jira stores rich content as ADF (Atlassian Document Format). ifhj flattens it to plain text: paragraphs, headings, lists (`•` / children), code blocks (fenced with ``` and language tag), mentions (`@name`), emoji, inline links, and hard breaks. Tables, panels, and media render as best-effort placeholders.
 
 **No threading.** Jira Cloud's `/rest/api/3/issue/{key}/comment` endpoint on Software/Agile boards returns a flat list — Jira's "reply to a comment" feature in the web UI is an ADF/`@mention` convention, not structured in the REST response. Service Desk tickets have threading fields but that's a different product. So: flat, oldest-first, read-only for now.
 
