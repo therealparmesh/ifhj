@@ -96,38 +96,33 @@ export function IssueDetailModal({
 }) {
   const { cols: termCols, rows: termRows } = useDimensions();
   const [scroll, setScroll] = useState(0);
+
+  const innerHeight = Math.max(10, termRows - 4);
+  const innerWidth = Math.max(60, termCols - 4);
+  const sideWidth = Math.min(Math.max(26, Math.floor(innerWidth * 0.34)), innerWidth - 30);
+  const mainWidth = innerWidth - sideWidth;
+  const bodyHeight = innerHeight - 4;
+
+  const mainLines = useMemo(
+    () => (detail ? renderDetailLines(detail, mainWidth) : []),
+    [detail, mainWidth],
+  );
+
+  const maxScroll = Math.max(0, mainLines.length - bodyHeight);
+
   useInput((input, key) => {
     if (key.escape || input === "q" || (key.ctrl && input === "c")) return onClose();
     if (input === "e") return onEditTitle();
     if (input === "E") return onEditDesc();
     if (input === "o") return onOpenWeb();
     if (input === "m") return onMove();
-    if (key.downArrow || input === "j") setScroll((s) => s + 1);
+    if (key.downArrow || input === "j") setScroll((s) => Math.min(s + 1, maxScroll));
     else if (key.upArrow || input === "k") setScroll((s) => Math.max(0, s - 1));
-    else if (key.pageDown) setScroll((s) => s + 10);
+    else if (key.pageDown) setScroll((s) => Math.min(s + 10, maxScroll));
     else if (key.pageUp) setScroll((s) => Math.max(0, s - 10));
     else if (input === "g") setScroll(0);
-    // `G` scrolls past the end; the render-time clamp pins to maxScroll.
-    else if (input === "G") setScroll(Number.MAX_SAFE_INTEGER);
+    else if (input === "G") setScroll(maxScroll);
   });
-
-  const innerHeight = Math.max(10, termRows - 4);
-  const innerWidth = Math.max(60, termCols - 4);
-  /**
-   * Cap the side panel so the main column always gets at least 30 cols —
-   * narrow terminals otherwise starve the body.
-   */
-  const sideWidth = Math.min(Math.max(26, Math.floor(innerWidth * 0.34)), innerWidth - 30);
-  const mainWidth = innerWidth - sideWidth;
-
-  /**
-   * Memo before the early returns — hook order must stay stable across
-   * loading → loaded transitions (Rules of Hooks).
-   */
-  const mainLines = useMemo(
-    () => (detail ? renderDetailLines(detail, mainWidth) : []),
-    [detail, mainWidth],
-  );
 
   if (error) {
     return (
@@ -168,8 +163,6 @@ export function IssueDetailModal({
   }
 
   const typeColor = typeColors[detail.issueType] ?? theme.fg;
-  const bodyHeight = innerHeight - 4; // minus header (3) + footer (1)
-  const maxScroll = Math.max(0, mainLines.length - bodyHeight);
   const clampedScroll = Math.min(scroll, maxScroll);
   const visibleMain = mainLines.slice(clampedScroll, clampedScroll + bodyHeight);
 

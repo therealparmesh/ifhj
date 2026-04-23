@@ -3,8 +3,10 @@ import { Box, Text, useInput } from "ink";
 import { theme } from "../ui";
 
 const HELP_BINDINGS: { keys: string; desc: string }[] = [
-  { keys: "← →", desc: "move between columns" },
-  { keys: "↑ ↓", desc: "move within column" },
+  { keys: "← → h l", desc: "move between columns" },
+  { keys: "↑ ↓ j k", desc: "move within column" },
+  { keys: "g / G", desc: "top / bottom of column" },
+  { keys: "PgUp PgDn", desc: "page within column" },
   { keys: "⏎", desc: "card action menu (edit / move / transition)" },
   { keys: "v", desc: "view full issue details" },
   { keys: "m", desc: "move card to any column (picker)" },

@@ -100,9 +100,10 @@ export function Footer({
          * reference. Conditional hints surface only when actionable.
          */
         <Box flexWrap="wrap">
-          <Hint k="↑↓←→" label="nav" />
+          <Hint k="↑↓←→/hjkl" label="nav" />
           <Hint k="⏎" label="actions" />
           <Hint k="v" label="view" />
+          <Hint k="m" label="move" />
           <Hint k="< >" label="± col" />
           <Hint k="c" label="create" />
           <Hint k="/" label="search" />
@@ -114,6 +115,7 @@ export function Footer({
             />
           ) : null}
           {assigneeFilter ? <Hint k="A" label="clear filter" /> : null}
+          <Hint k="r" label="refresh" />
           <Hint k="?" label="help" />
           <Hint k="q" label="quit" />
         </Box>

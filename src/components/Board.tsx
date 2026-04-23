@@ -533,10 +533,21 @@ export function BoardView({ cfg, board, onExit }: Props) {
       if (input === "?") return setModal({ kind: "help" });
 
       // Navigation
-      if (key.leftArrow) return nudgeCol(-1);
-      if (key.rightArrow) return nudgeCol(1);
-      if (key.upArrow) return nudgeRow(-1);
-      if (key.downArrow) return nudgeRow(1);
+      if (key.leftArrow || input === "h") return nudgeCol(-1);
+      if (key.rightArrow || input === "l") return nudgeCol(1);
+      if (key.upArrow || input === "k") return nudgeRow(-1);
+      if (key.downArrow || input === "j") return nudgeRow(1);
+      if (input === "g") {
+        setActiveRowAt(activeCol, 0);
+        return;
+      }
+      if (input === "G") {
+        const col = columns[activeCol];
+        if (col) setActiveRowAt(activeCol, Math.max(0, col.issues.length - 1));
+        return;
+      }
+      if (key.pageUp) return nudgeRow(-cardsVisible);
+      if (key.pageDown) return nudgeRow(cardsVisible);
 
       // Actions on current card
       if (key.return) {

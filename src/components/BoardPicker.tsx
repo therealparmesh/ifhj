@@ -79,6 +79,13 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
       setIndex((i) => clamp(i + viewportHeight, 0, Math.max(0, filtered.length - 1)));
   });
 
+  useInput(
+    (_input, key) => {
+      if (key.escape) onQuit();
+    },
+    { isActive: !!error },
+  );
+
   if (error) {
     return (
       <Box flexDirection="column" padding={1}>

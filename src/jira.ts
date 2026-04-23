@@ -321,11 +321,10 @@ export async function updateDescription(
 export async function getIssueTypes(cfg: JiraConfig, projectKey: string): Promise<IssueType[]> {
   const data = await jget(
     cfg,
-    `/rest/api/3/issue/createmeta?projectKeys=${encodeURIComponent(projectKey)}`,
+    `/rest/api/3/issue/createmeta/${encodeURIComponent(projectKey)}/issuetypes`,
   );
-  const project = data.projects?.[0];
-  return (project?.issuetypes ?? []).map((t: any) => ({
-    id: t.id,
+  return (data.issueTypes ?? data.values ?? []).map((t: any) => ({
+    id: String(t.id),
     name: t.name,
     subtask: !!t.subtask,
   }));
