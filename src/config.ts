@@ -11,26 +11,39 @@ export type AppConfig = {
   maxVisibleCols: number;
 };
 
-function parseFlatToml(text: string): Record<string, string | number> {
+export function parseFlatToml(text: string): Record<string, string | number> {
   const result: Record<string, string | number> = {};
   for (const raw of text.split("\n")) {
     const line = raw.trim();
-    if (!line || line.startsWith("#")) continue;
+    if (!line || line.startsWith("#") || line.startsWith("[")) continue;
     const eq = line.indexOf("=");
     if (eq === -1) continue;
     const key = line.slice(0, eq).trim();
-    let val = line.slice(eq + 1).trim();
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'")))
+    const val = line.slice(eq + 1).trim();
+    if (val.length >= 2 && ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'")))) {
       result[key] = val.slice(1, -1);
-    else if (val !== "" && Number.isFinite(Number(val)))
-      result[key] = Number(val);
-    else
-      result[key] = val;
+    } else {
+      const bare = val.replace(/#.*$/, "").trim();
+      if (bare !== "" && Number.isFinite(Number(bare)))
+        result[key] = Number(bare);
+      else
+        result[key] = bare;
+    }
   }
   return result;
 }
 
 async function readConfigToml(): Promise<{ server?: string; login?: string; maxColumns?: number }> {
+  const legacyPaths = [
+    join(homedir(), ".config", ".jira", ".config.yml"),
+    join(homedir(), ".config", "jira", ".config.yml"),
+  ];
+  for (const p of legacyPaths) {
+    if (await Bun.file(p).exists()) {
+      console.warn(`Warning: found legacy YAML config at ${p} — rename to .config.toml (TOML format)`);
+      break;
+    }
+  }
   const paths = [
     join(homedir(), ".config", ".jira", ".config.toml"),
     join(homedir(), ".config", "jira", ".config.toml"),
@@ -43,7 +56,7 @@ async function readConfigToml(): Promise<{ server?: string; login?: string; maxC
     if (typeof parsed["server"] === "string") out.server = parsed["server"];
     if (typeof parsed["login"] === "string") out.login = parsed["login"];
     if (typeof parsed["max_columns"] === "number" && parsed["max_columns"] >= 1) {
-      out.maxColumns = Math.trunc(parsed["max_columns"]);
+      out.maxColumns = Math.min(Math.trunc(parsed["max_columns"]), 20);
     }
     return out;
   }
