@@ -733,8 +733,10 @@ export function BoardView({ cfg, board, onExit }: Props) {
         types={modal.types}
         linkTypes={modal.linkTypes}
         onCancel={closeModal}
-        onDone={(msg) => {
-          flash(msg, "ok");
+        onDone={({ key, title, linkSummary }) => {
+          const headline = `created ${key}: ${title}`;
+          flash(linkSummary ? `${headline} · ${linkSummary}` : headline, "ok");
+          pendingFocusKey.current = key;
           closeModal();
           void load();
         }}

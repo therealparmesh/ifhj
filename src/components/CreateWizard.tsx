@@ -95,7 +95,7 @@ export function CreateWizard({
   types: IssueType[];
   linkTypes: IssueLinkType[];
   onCancel: () => void;
-  onDone: (msg: string) => void;
+  onDone: (result: { key: string; title: string; linkSummary?: string }) => void;
   onError: (msg: string) => void;
 }) {
   const [form, setForm] = useState<FormState>({
@@ -177,8 +177,12 @@ export function CreateWizard({
           if (target && link && !isParent) {
             await createIssueLink(cfg, link.name, created.key, target.key, link.direction);
           }
-          const tail = target && link ? ` · ${link.label} ${target.key}` : "";
-          onDone(`created ${created.key}${tail}`);
+          const linkSummary = target && link ? `${link.label} ${target.key}` : undefined;
+          onDone({
+            key: created.key,
+            title,
+            ...(linkSummary ? { linkSummary } : {}),
+          });
         } catch (e) {
           onError(errorMessage(e));
         }
