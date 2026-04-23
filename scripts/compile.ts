@@ -6,14 +6,23 @@
  * the real package pulls ~16MB; `--external` leaves a runtime-unresolvable
  * import that crashes the binary. We stub it at build time instead — zero
  * runtime cost, no devtools dep, safe regardless of shell state.
+ *
+ * Optional first arg is a cross-compile target (e.g. `bun-linux-arm64`) — the
+ * release workflow passes one per matrix entry. Omit for host-native builds.
  */
 import { resolve } from "node:path";
 
+type CompileTarget = NonNullable<
+  Extract<Parameters<typeof Bun.build>[0]["compile"], object>["target"]
+>;
+
 const repoRoot = resolve(import.meta.dir, "..");
+const outfile = resolve(repoRoot, "ifhj");
+const target = process.argv[2] as CompileTarget | undefined;
 
 const result = await Bun.build({
   entrypoints: [resolve(repoRoot, "src/index.tsx")],
-  compile: { outfile: resolve(repoRoot, "ifhj") },
+  compile: target ? { outfile, target } : { outfile },
   minify: true,
   plugins: [
     {
