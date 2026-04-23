@@ -66,6 +66,7 @@ export JIRA_LOGIN="you@your-company.com"    # or JIRA_EMAIL
 ```yaml
 server: https://your-company.atlassian.net
 login: you@your-company.com
+max_columns: 6  # visible board columns (default 4)
 ```
 
 Environment variables win when both are set.
