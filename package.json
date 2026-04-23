@@ -9,7 +9,7 @@
   },
   "type": "module",
   "scripts": {
-    "compile": "./scripts/compile.ts",
+    "compile": "DEV=false bun build --compile --minify src/index.tsx --outfile ifhj",
     "dev": "bun --hot src/index.tsx",
     "lint": "oxfmt && oxlint && tsc",
     "start": "bun run src/index.tsx"
@@ -23,6 +23,7 @@
     "@types/react": "^19.2.14",
     "oxfmt": "^0.46.0",
     "oxlint": "^1.61.0",
+    "react-devtools-core": "^7.0.1",
     "typescript": "^5.9.3"
   }
 }
