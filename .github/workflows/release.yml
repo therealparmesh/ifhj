@@ -44,7 +44,9 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
-      - run: DEV=false bun build --compile --minify --target=${{ matrix.target }} --outfile=ifhj src/index.tsx
+      - run: bun run compile
+        env:
+          TARGET: ${{ matrix.target }}
 
       - name: pack
         run: |
