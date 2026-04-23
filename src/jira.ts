@@ -355,22 +355,22 @@ export type IssueSearchResult = {
   issueType: string;
 };
 
-// Search issues across the project — matches on summary or key, up to limit.
+/**
+ * Search issues across the project — matches on summary or key, up to limit.
+ *
+ * Uses POST /rest/api/3/search/jql (Atlassian's current endpoint). The older
+ * GET /rest/api/3/search returns empty arrays on newer tenants where it's
+ * been throttled or partially retired.
+ */
 export async function searchIssues(
   cfg: JiraConfig,
   projectKey: string,
   query: string,
   limit = 25,
 ): Promise<IssueSearchResult[]> {
-  /**
-   * Strip quotes and backslashes — backslash is JQL's escape prefix, and
-   * stray "foo\bar" either errors or searches for the wrong thing.
-   */
+  // Strip quotes / backslashes so stray input can't break out of the JQL string.
   const q = query.trim().replaceAll(/["\\]/g, "");
-  /**
-   * `issuekey = X` only works when X looks like a real key (PROJ-123).
-   * Without this guard the whole JQL errors out.
-   */
+  // `issuekey = X` only works when X looks like a real key (PROJ-123).
   const looksLikeKey = /^[A-Za-z][A-Za-z0-9]*-\d+$/.test(q);
   const match = q
     ? looksLikeKey
@@ -378,10 +378,12 @@ export async function searchIssues(
       : ` AND summary ~ "${q}*"`
     : "";
   const jql = `project = "${projectKey}"${match} ORDER BY updated DESC`;
-  const data = await jget(
-    cfg,
-    `/rest/api/3/search?jql=${encodeURIComponent(jql)}&fields=summary,issuetype&maxResults=${limit}`,
-  );
+  const res = await jf(cfg, `/rest/api/3/search/jql`, {
+    method: "POST",
+    body: JSON.stringify({ jql, fields: ["summary", "issuetype"], maxResults: limit }),
+  });
+  if (!res.ok) throw new Error(`search ${res.status}: ${await res.text()}`);
+  const data = (await res.json()) as any;
   return (data.issues ?? []).map((i: any) => ({
     key: i.key,
     summary: i.fields?.summary ?? "",
