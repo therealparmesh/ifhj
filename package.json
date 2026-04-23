@@ -9,7 +9,7 @@
   },
   "type": "module",
   "scripts": {
-    "compile": "DEV=false bun build --compile --minify src/index.tsx --outfile ifhj",
+    "compile": "./scripts/compile.ts",
     "dev": "bun --hot src/index.tsx",
     "lint": "oxfmt && oxlint && tsc",
     "start": "bun run src/index.tsx"
