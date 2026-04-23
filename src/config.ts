@@ -1,8 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { parse as parseToml } from "smol-toml";
-
 export type JiraConfig = {
   server: string;
   authHeader: string;
@@ -13,6 +11,25 @@ export type AppConfig = {
   maxVisibleCols: number;
 };
 
+function parseFlatToml(text: string): Record<string, string | number> {
+  const result: Record<string, string | number> = {};
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq === -1) continue;
+    const key = line.slice(0, eq).trim();
+    let val = line.slice(eq + 1).trim();
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'")))
+      result[key] = val.slice(1, -1);
+    else if (val !== "" && Number.isFinite(Number(val)))
+      result[key] = Number(val);
+    else
+      result[key] = val;
+  }
+  return result;
+}
+
 async function readConfigToml(): Promise<{ server?: string; login?: string; maxColumns?: number }> {
   const paths = [
     join(homedir(), ".config", ".jira", ".config.toml"),
@@ -21,8 +38,7 @@ async function readConfigToml(): Promise<{ server?: string; login?: string; maxC
   for (const p of paths) {
     const f = Bun.file(p);
     if (!(await f.exists())) continue;
-    const text = await f.text();
-    const parsed = parseToml(text);
+    const parsed = parseFlatToml(await f.text());
     const out: { server?: string; login?: string; maxColumns?: number } = {};
     if (typeof parsed["server"] === "string") out.server = parsed["server"];
     if (typeof parsed["login"] === "string") out.login = parsed["login"];
