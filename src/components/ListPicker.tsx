@@ -4,8 +4,10 @@ import { useState } from "react";
 import { bg, clamp, theme } from "../ui";
 import { Hint } from "./Hint";
 
-// Simple vertical picker for short, fixed lists. No filtering — see
-// FilterPicker for the searchable variant.
+/**
+ * Simple vertical picker for short, fixed lists. No filtering — see
+ * FilterPicker for the searchable variant.
+ */
 export function ListPicker({
   title,
   items,

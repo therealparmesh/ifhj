@@ -20,13 +20,17 @@ function formatShortDate(iso: string | undefined): string {
 // A single body line in the detail modal's main column.
 type DetailLine = { text: string; color: string; bold?: boolean };
 
-// Flatten the detail document into renderable lines: description → sub-tasks
-// → comments. Each section gets a pink bold header and a thin divider.
+/**
+ * Flatten the detail document into renderable lines: description → sub-tasks
+ * → comments. Each section gets a pink bold header and a thin divider.
+ */
 function renderDetailLines(detail: IssueDetail, mainWidth: number): DetailLine[] {
   const out: DetailLine[] = [];
   const push = (text: string, color = theme.fg, bold = false) => out.push({ text, color, bold });
-  // Soft-wrap long lines so code, URLs, and stack traces aren't clipped at
-  // the edge. One row per DetailLine keeps the scroll math honest.
+  /**
+   * Soft-wrap long lines so code, URLs, and stack traces aren't clipped at
+   * the edge. One row per DetailLine keeps the scroll math honest.
+   */
   const pushLine = (text: string, color = theme.fg) => {
     if (text.length === 0) {
       push("", color);
@@ -57,9 +61,11 @@ function renderDetailLines(detail: IssueDetail, mainWidth: number): DetailLine[]
     push("no comments yet", theme.muted);
     return out;
   }
-  // Jira Cloud's /comment endpoint on Software boards returns a flat list —
-  // threading isn't in the response shape. Render chronologically with an
-  // author/date header per comment and a hair divider between entries.
+  /**
+   * Jira Cloud's /comment endpoint on Software boards returns a flat list —
+   * threading isn't in the response shape. Render chronologically with an
+   * author/date header per comment and a hair divider between entries.
+   */
   detail.comments.forEach((c, i) => {
     if (i > 0) push("·".repeat(Math.min(mainWidth, 20)), theme.accentDim);
     push(c.author, theme.cyan, true);
@@ -104,13 +110,17 @@ export function IssueDetailModal({
 
   const innerHeight = Math.max(10, termRows - 4);
   const innerWidth = Math.max(60, termCols - 4);
-  // Cap the side panel so the main column always gets at least 30 cols —
-  // narrow terminals otherwise starve the body.
+  /**
+   * Cap the side panel so the main column always gets at least 30 cols —
+   * narrow terminals otherwise starve the body.
+   */
   const sideWidth = Math.min(Math.max(26, Math.floor(innerWidth * 0.34)), innerWidth - 30);
   const mainWidth = innerWidth - sideWidth;
 
-  // Memo before the early returns — hook order must stay stable across
-  // loading → loaded transitions (Rules of Hooks).
+  /**
+   * Memo before the early returns — hook order must stay stable across
+   * loading → loaded transitions (Rules of Hooks).
+   */
   const mainLines = useMemo(
     () => (detail ? renderDetailLines(detail, mainWidth) : []),
     [detail, mainWidth],

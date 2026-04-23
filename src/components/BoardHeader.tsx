@@ -2,8 +2,10 @@ import { Box, Text } from "ink";
 
 import { theme } from "../ui";
 
-// Top-of-screen status line: board name, project, issue count, active
-// column, assignee filter badge, and a committed-search summary on the right.
+/**
+ * Top-of-screen status line: board name, project, issue count, active
+ * column, assignee filter badge, and a committed-search summary on the right.
+ */
 export function BoardHeader({
   boardName,
   projectKey,

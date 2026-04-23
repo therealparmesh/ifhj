@@ -57,8 +57,10 @@ type Modal =
 
 type CellRef = { col: number; row: number };
 
-// Bucket issues into columns by statusId. Issues with a status not mapped
-// by the board config get dropped — Jira sometimes returns stale ones.
+/**
+ * Bucket issues into columns by statusId. Issues with a status not mapped
+ * by the board config get dropped — Jira sometimes returns stale ones.
+ */
 function buildColumns(colDefs: BoardColumn[], issues: Issue[]): Column[] {
   const cols: Column[] = colDefs.map((c) => ({ ...c, issues: [] }));
   const statusToCol = new Map<string, number>();
@@ -136,8 +138,10 @@ export function BoardView({ cfg, board, onExit }: Props) {
   const assigneeNames = useMemo(() => {
     const set = new Set<string>();
     for (const i of issues) set.add(i.assignee ?? "Unassigned");
-    // Pin "Unassigned" to the top regardless of alphabetical order — it's
-    // the special bucket, not a real person.
+    /**
+     * Pin "Unassigned" to the top regardless of alphabetical order — it's
+     * the special bucket, not a real person.
+     */
     return Array.from(set).toSorted((a, b) => {
       if (a === "Unassigned") return -1;
       if (b === "Unassigned") return 1;
@@ -169,8 +173,10 @@ export function BoardView({ cfg, board, onExit }: Props) {
     void load();
   }, [load]);
 
-  // While the search bar is open, highlights should track what the user is
-  // typing. Otherwise they track the committed query.
+  /**
+   * While the search bar is open, highlights should track what the user is
+   * typing. Otherwise they track the committed query.
+   */
   const liveQuery = modal.kind === "search" ? searchBuffer : query;
   const matches = useMemo(() => {
     if (!liveQuery.trim()) return [] as CellRef[];
@@ -229,8 +235,10 @@ export function BoardView({ cfg, board, onExit }: Props) {
     [matches, matchIdx, flash, query, setActiveRowAt],
   );
 
-  // Layout math. The grid fits `MAX_VISIBLE_COLS` columns; everything beyond
-  // that requires ←/→ paging.
+  /**
+   * Layout math. The grid fits `MAX_VISIBLE_COLS` columns; everything beyond
+   * that requires ←/→ paging.
+   */
   const footerRows = modal.kind === "search" ? 6 : status ? 5 : 4;
   const columnHeight = Math.max(6, termRows - 2 - footerRows);
   const columnInnerHeight = columnHeight - 2; // minus border top/bottom
@@ -246,8 +254,10 @@ export function BoardView({ cfg, board, onExit }: Props) {
   const hasColsLeft = colWindowStart > 0;
   const hasColsRight = colWindowEnd < columns.length;
 
-  // Clamp each column's active row into bounds when columns shrink (e.g.
-  // toggling the assignee filter) so the cursor doesn't sit past the last card.
+  /**
+   * Clamp each column's active row into bounds when columns shrink (e.g.
+   * toggling the assignee filter) so the cursor doesn't sit past the last card.
+   */
   useEffect(() => {
     if (columns.length === 0) return;
     setActiveRows((prev) => {
@@ -265,9 +275,11 @@ export function BoardView({ cfg, board, onExit }: Props) {
     });
   }, [columns]);
 
-  // Keep each column's scroll offset in sync with its active row so the
-  // cursor never scrolls off screen. Returns prev unchanged when nothing
-  // shifted so we don't trigger pointless re-renders.
+  /**
+   * Keep each column's scroll offset in sync with its active row so the
+   * cursor never scrolls off screen. Returns prev unchanged when nothing
+   * shifted so we don't trigger pointless re-renders.
+   */
   useEffect(() => {
     if (columns.length === 0) return;
     setScrolls((prev) => {
@@ -301,8 +313,10 @@ export function BoardView({ cfg, board, onExit }: Props) {
       const issue = currentIssue;
       if (!issue || !conf) return;
       if (targetColIdx < 0 || targetColIdx >= conf.columns.length) return;
-      // Reject rapid re-entry while a move is in flight — spamming `<` / `>`
-      // otherwise stacks transitions and races the focus snap.
+      /**
+       * Reject rapid re-entry while a move is in flight — spamming `<` / `>`
+       * otherwise stacks transitions and races the focus snap.
+       */
       if (moving.current) {
         flash("transition in progress…", "info");
         return;
@@ -336,10 +350,12 @@ export function BoardView({ cfg, board, onExit }: Props) {
     [currentIssue, conf, cfg, flash, load],
   );
 
-  // After a reload, snap activeRows to wherever the tracked card ended up.
-  // Only clear the marker once we actually find the card — pre-reload
-  // column changes (e.g. toggling the assignee filter mid-flight)
-  // shouldn't consume it.
+  /**
+   * After a reload, snap activeRows to wherever the tracked card ended up.
+   * Only clear the marker once we actually find the card — pre-reload
+   * column changes (e.g. toggling the assignee filter mid-flight)
+   * shouldn't consume it.
+   */
   useEffect(() => {
     const key = pendingFocusKey.current;
     if (!key) return;
@@ -395,8 +411,10 @@ export function BoardView({ cfg, board, onExit }: Props) {
     if (!issue) return;
     try {
       const raw = await editInNeovim(issue.description, `${issue.key}-desc.md`);
-      // Compare trimmed — a stray trailing newline from Neovim shouldn't
-      // trigger a spurious round-trip.
+      /**
+       * Compare trimmed — a stray trailing newline from Neovim shouldn't
+       * trigger a spurious round-trip.
+       */
       if (raw.trim() === issue.description.trim()) {
         flash("no change", "info");
         return;
@@ -442,8 +460,10 @@ export function BoardView({ cfg, board, onExit }: Props) {
   const openBoardInBrowser = useCallback(async () => {
     if (!conf) return;
     try {
-      // Team-managed / next-gen URL. Classic projects use
-      // /secure/RapidBoard.jspa?rapidView=… — Jira usually redirects anyway.
+      /**
+       * Team-managed / next-gen URL. Classic projects use
+       * /secure/RapidBoard.jspa?rapidView=… — Jira usually redirects anyway.
+       */
       await openInBrowser(
         `${cfg.server}/jira/software/projects/${conf.projectKey}/boards/${board.id}`,
       );
@@ -566,8 +586,10 @@ export function BoardView({ cfg, board, onExit }: Props) {
   );
 
   if (!conf) {
-    // First-load states only — spinner or fatal error. Once `conf` lands,
-    // reload errors surface as a toast so the grid stays up.
+    /**
+     * First-load states only — spinner or fatal error. Once `conf` lands,
+     * reload errors surface as a toast so the grid stays up.
+     */
     if (loadError) {
       return (
         <Box flexDirection="column" padding={1}>
@@ -789,9 +811,11 @@ export function BoardView({ cfg, board, onExit }: Props) {
           closeModal();
         }}
         onSearchCancel={() => {
-          // Escape closes the search bar but keeps the committed query — the
-          // user may have hit `/` just to peek. Use ⌃u inside the buffer
-          // to actually clear it.
+          /**
+           * Escape closes the search bar but keeps the committed query — the
+           * user may have hit `/` just to peek. Use ⌃u inside the buffer
+           * to actually clear it.
+           */
           closeModal();
         }}
       />

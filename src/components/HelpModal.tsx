@@ -20,8 +20,10 @@ const HELP_BINDINGS: { keys: string; desc: string }[] = [
 ];
 
 export function HelpModal({ onClose }: { onClose: () => void }) {
-  // Specific close keys only — "any key closes" turns accidental ↑/↓/tab
-  // presses into a dismissal.
+  /**
+   * Specific close keys only — "any key closes" turns accidental ↑/↓/tab
+   * presses into a dismissal.
+   */
   useInput((input, key) => {
     if (key.escape || key.return || input === "q" || input === "?") onClose();
   });

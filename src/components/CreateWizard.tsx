@@ -16,9 +16,11 @@ import { bg, errorMessage, theme, truncate } from "../ui";
 import { FilterPicker } from "./FilterPicker";
 import { Hint } from "./Hint";
 
-// Parent linking (epic child, sub-task) uses the `parent` field at create
-// time; every other link is a post-create POST to /issueLink. The sentinel
-// on `LinkChoice.name` flags the parent path.
+/**
+ * Parent linking (epic child, sub-task) uses the `parent` field at create
+ * time; every other link is a post-create POST to /issueLink. The sentinel
+ * on `LinkChoice.name` flags the parent path.
+ */
 const PARENT_SENTINEL = "__parent__";
 const LABEL_COL_WIDTH = 14;
 
@@ -39,9 +41,11 @@ type FormState = {
 
 type FieldId = "title" | "description" | "type" | "link" | "target" | "submit";
 
-// Form is in `browse` most of the time. Activating a row flips us into one
-// of the transient modes below — a Neovim editor, a filter picker, or the
-// final POST.
+/**
+ * Form is in `browse` most of the time. Activating a row flips us into one
+ * of the transient modes below — a Neovim editor, a filter picker, or the
+ * final POST.
+ */
 type Mode =
   | { kind: "browse" }
   | { kind: "nvim-title" }
@@ -113,15 +117,19 @@ export function CreateWizard({
   const canSubmit =
     form.title.trim() !== "" && form.type !== null && (form.link === null || form.target !== null);
 
-  // Pick "no relationship" after a target is set → target row vanishes.
-  // Re-anchor focus so we're not pointing at a gone row.
+  /**
+   * Pick "no relationship" after a target is set → target row vanishes.
+   * Re-anchor focus so we're not pointing at a gone row.
+   */
   useEffect(() => {
     if (!fields.includes(focused)) setFocused("submit");
   }, [fields, focused]);
 
-  // Each mode transition fires its side-effect (Neovim or network) exactly
-  // once per entry. Without the ref, a parent rerender recomputing deps
-  // would double-spawn.
+  /**
+   * Each mode transition fires its side-effect (Neovim or network) exactly
+   * once per entry. Without the ref, a parent rerender recomputing deps
+   * would double-spawn.
+   */
   const modeFired = useRef<string>("");
   useEffect(() => {
     if (modeFired.current === mode.kind) return;
@@ -416,8 +424,10 @@ function FormRow({
   const labelColor = focused ? theme.accent : theme.muted;
   const valueColor = isEmpty ? theme.muted : focused ? theme.fg : theme.fgDim;
   const valueText = isEmpty ? "(empty, ⏎ to edit)" : value;
-  // Fixed label column, star sits outside it so required/optional labels
-  // line up on the value side.
+  /**
+   * Fixed label column, star sits outside it so required/optional labels
+   * line up on the value side.
+   */
   const baseLabel = FIELD_LABELS[field];
   const labelPadded = baseLabel.padEnd(LABEL_COL_WIDTH - 2);
   const valueMax = Math.max(4, width - 2 - LABEL_COL_WIDTH - 1);
@@ -456,9 +466,11 @@ function displayValue(field: FieldId, form: FormState): string {
 
 type LinkChoiceOption = { id: string; choice: LinkChoice | null; label: string; hint: string };
 
-// Relationship picker menu. Two synthetic options on top — "skip" and
-// "parent" (atomic `parent` field at create time) — then each link-type's
-// two directions.
+/**
+ * Relationship picker menu. Two synthetic options on top — "skip" and
+ * "parent" (atomic `parent` field at create time) — then each link-type's
+ * two directions.
+ */
 function buildLinkChoices(linkTypes: IssueLinkType[]): LinkChoiceOption[] {
   const out: LinkChoiceOption[] = [
     { id: "skip", choice: null, label: "(no relationship)", hint: "create standalone" },
@@ -497,8 +509,10 @@ function findCurrentLinkId(choices: LinkChoiceOption[], current: LinkChoice | nu
   );
 }
 
-// Spinner while the form POSTs. Esc detaches — we can't cancel the fetch
-// in flight, so the promise may still settle but onDone/onError goes nowhere.
+/**
+ * Spinner while the form POSTs. Esc detaches — we can't cancel the fetch
+ * in flight, so the promise may still settle but onDone/onError goes nowhere.
+ */
 function SubmittingBanner({ onEscape }: { onEscape: () => void }) {
   useInput((_input, key) => {
     if (key.escape) onEscape();

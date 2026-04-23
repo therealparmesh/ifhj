@@ -3,8 +3,10 @@ import { useEffect, useState } from "react";
 
 import { theme } from "../ui";
 
-// Always used in controlled mode — the caller owns `value` and updates it
-// through `onChange`. The only local state is the cursor position.
+/**
+ * Always used in controlled mode — the caller owns `value` and updates it
+ * through `onChange`. The only local state is the cursor position.
+ */
 type Props = {
   value: string;
   placeholder?: string;

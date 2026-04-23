@@ -5,8 +5,10 @@ import { assigneeColor, bg, initials, theme, truncate, typeColors, typeGlyph } f
 
 export type Column = BoardColumn & { issues: Issue[] };
 
-// Single kanban column: header (name + count), optional ▲/▼ hidden-count
-// indicators, and the visible card slice.
+/**
+ * Single kanban column: header (name + count), optional ▲/▼ hidden-count
+ * indicators, and the visible card slice.
+ */
 export function ColumnView({
   column,
   width,
@@ -92,8 +94,10 @@ export function PagingArrow({
   );
 }
 
-// Single kanban card. `innerWidth` is the width of the content column —
-// to the right of the left color bar.
+/**
+ * Single kanban card. `innerWidth` is the width of the content column —
+ * to the right of the left color bar.
+ */
 function Card({
   issue,
   innerWidth,
@@ -116,8 +120,10 @@ function Card({
     .join(" · ");
   // Selected wins over match for the row background.
   const rowBg = selected ? theme.accentDim : isMatch ? theme.matchBg : undefined;
-  // Pad summary + meta so the bg fills evenly — otherwise the highlight is
-  // ragged on shorter lines.
+  /**
+   * Pad summary + meta so the bg fills evenly — otherwise the highlight is
+   * ragged on shorter lines.
+   */
   const summaryText = truncate(issue.summary, Math.max(4, innerWidth)).padEnd(innerWidth);
   const metaText = truncate(meta, Math.max(4, innerWidth)).padEnd(innerWidth);
   return (

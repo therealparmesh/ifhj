@@ -1,13 +1,15 @@
 #!/usr/bin/env bun
-// Cut a release. Runs from anywhere — paths resolve relative to this file.
-//
-//   ./scripts/release.ts patch   # 0.1.0 → 0.1.1
-//   ./scripts/release.ts minor   # 0.1.0 → 0.2.0
-//   ./scripts/release.ts major   # 0.1.0 → 1.0.0
-//   ./scripts/release.ts 1.2.3   # explicit
-//
-// Bumps package.json, resyncs bun.lock, commits, tags v<version>, pushes —
-// the `release` workflow picks up the tag and publishes the binaries.
+/**
+ * Cut a release. Runs from anywhere — paths resolve relative to this file.
+ *
+ *   ./scripts/release.ts patch   # 0.1.0 → 0.1.1
+ *   ./scripts/release.ts minor   # 0.1.0 → 0.2.0
+ *   ./scripts/release.ts major   # 0.1.0 → 1.0.0
+ *   ./scripts/release.ts 1.2.3   # explicit
+ *
+ * Bumps package.json, resyncs bun.lock, commits, tags v<version>, pushes —
+ * the `release` workflow picks up the tag and publishes the binaries.
+ */
 
 import { resolve } from "node:path";
 

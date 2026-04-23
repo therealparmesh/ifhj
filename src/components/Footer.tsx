@@ -95,8 +95,10 @@ export function Footer({
           </Box>
         </Box>
       ) : (
-        // Compact hint strip — high-traffic keys only, `?` opens the full
-        // reference. Conditional hints surface only when actionable.
+        /**
+         * Compact hint strip — high-traffic keys only, `?` opens the full
+         * reference. Conditional hints surface only when actionable.
+         */
         <Box flexWrap="wrap">
           <Hint k="↑↓←→" label="nav" />
           <Hint k="⏎" label="actions" />

@@ -1,7 +1,9 @@
 import type { JiraConfig } from "./config";
 
-// Jira Cloud's default custom-field IDs. Tenants can remap these, but the
-// defaults cover the vast majority.
+/**
+ * Jira Cloud's default custom-field IDs. Tenants can remap these, but the
+ * defaults cover the vast majority.
+ */
 const CF_EPIC_LINK = "customfield_10014";
 const CF_SPRINT = "customfield_10020";
 const CF_STORY_POINTS = "customfield_10016";
@@ -127,8 +129,10 @@ function adfToText(node: any): string {
   if (node.type === "media" || node.type === "mediaSingle" || node.type === "mediaGroup")
     return "[media]\n";
   if (node.type === "rule") return "\n───\n";
-  // Fence code blocks so line structure survives and the reader can tell
-  // code from prose — otherwise it all flattens into one run.
+  /**
+   * Fence code blocks so line structure survives and the reader can tell
+   * code from prose — otherwise it all flattens into one run.
+   */
   if (node.type === "codeBlock") {
     const lang = node.attrs?.language ?? "";
     const body = Array.isArray(node.content) ? node.content.map(adfToText).join("") : "";
@@ -358,11 +362,15 @@ export async function searchIssues(
   query: string,
   limit = 25,
 ): Promise<IssueSearchResult[]> {
-  // Strip quotes and backslashes — backslash is JQL's escape prefix, and
-  // stray "foo\bar" either errors or searches for the wrong thing.
+  /**
+   * Strip quotes and backslashes — backslash is JQL's escape prefix, and
+   * stray "foo\bar" either errors or searches for the wrong thing.
+   */
   const q = query.trim().replaceAll(/["\\]/g, "");
-  // `issuekey = X` only works when X looks like a real key (PROJ-123).
-  // Without this guard the whole JQL errors out.
+  /**
+   * `issuekey = X` only works when X looks like a real key (PROJ-123).
+   * Without this guard the whole JQL errors out.
+   */
   const looksLikeKey = /^[A-Za-z][A-Za-z0-9]*-\d+$/.test(q);
   const match = q
     ? looksLikeKey
@@ -381,9 +389,11 @@ export async function searchIssues(
   }));
 }
 
-// Link two issues. `direction` picks which side of the link-type the new
-// issue sits on — for "blocks" (outward) / "is blocked by" (inward),
-// outwardIssue blocks inwardIssue.
+/**
+ * Link two issues. `direction` picks which side of the link-type the new
+ * issue sits on — for "blocks" (outward) / "is blocked by" (inward),
+ * outwardIssue blocks inwardIssue.
+ */
 export async function createIssueLink(
   cfg: JiraConfig,
   linkTypeName: string,
@@ -418,9 +428,11 @@ export async function createIssue(
     summary,
   };
   if (description) fields.description = textToAdf(description);
-  // `parent` is canonical for epic-child and sub-task links in Jira Cloud.
-  // The legacy `customfield_10014` ("Epic Link") is deliberately not set —
-  // team-managed projects reject it with "cannot be set on this issue type".
+  /**
+   * `parent` is canonical for epic-child and sub-task links in Jira Cloud.
+   * The legacy `customfield_10014` ("Epic Link") is deliberately not set —
+   * team-managed projects reject it with "cannot be set on this issue type".
+   */
   if (parentKey) fields.parent = { key: parentKey };
   const res = await jf(cfg, `/rest/api/3/issue`, {
     method: "POST",

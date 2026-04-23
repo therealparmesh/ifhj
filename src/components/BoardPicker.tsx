@@ -69,8 +69,10 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
     setScroll(0);
   }, [query]);
 
-  // PgUp/PgDn only — text entry, arrow nav, and esc-to-quit live inside
-  // <TextInput/>.
+  /**
+   * PgUp/PgDn only — text entry, arrow nav, and esc-to-quit live inside
+   * <TextInput/>.
+   */
   useInput((_input, key) => {
     if (key.pageUp) setIndex((i) => clamp(i - viewportHeight, 0, Math.max(0, filtered.length - 1)));
     else if (key.pageDown)

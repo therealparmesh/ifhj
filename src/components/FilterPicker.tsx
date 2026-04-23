@@ -10,9 +10,11 @@ type FilterItem = { id: string; label: string; hint?: string };
 // Keep the picker compact — beyond this the user should filter instead.
 const MAX_PICKER_ROWS = 15;
 
-// Filterable picker. Items are either supplied up-front (small lists like
-// issue types) or lazy-loaded per keystroke (async search). Esc cancels,
-// enter picks.
+/**
+ * Filterable picker. Items are either supplied up-front (small lists like
+ * issue types) or lazy-loaded per keystroke (async search). Esc cancels,
+ * enter picks.
+ */
 export function FilterPicker({
   title,
   items,
@@ -30,8 +32,10 @@ export function FilterPicker({
   items: FilterItem[];
   loading?: boolean;
   placeholder?: string;
-  // If provided, the picker treats `items` as server-supplied and debounces
-  // keystrokes before calling back. Otherwise it filters locally.
+  /**
+   * If provided, the picker treats `items` as server-supplied and debounces
+   * keystrokes before calling back. Otherwise it filters locally.
+   */
   onQueryChange?: (q: string) => void;
   debounceMs?: number;
   onPick: (id: string) => void;
@@ -43,8 +47,10 @@ export function FilterPicker({
   borderColor?: string;
 }) {
   const [q, setQ] = useState("");
-  // Seed the cursor onto the current selection so reopening a picker for a
-  // field that's already set doesn't land on row 0.
+  /**
+   * Seed the cursor onto the current selection so reopening a picker for a
+   * field that's already set doesn't land on row 0.
+   */
   const initialIdx = currentId
     ? Math.max(
         0,
@@ -52,8 +58,10 @@ export function FilterPicker({
       )
     : 0;
   const [idx, setIdx] = useState(initialIdx);
-  // Seed scroll too, otherwise there's a one-frame flash of the wrong window
-  // when `currentId` sits deep in the list.
+  /**
+   * Seed scroll too, otherwise there's a one-frame flash of the wrong window
+   * when `currentId` sits deep in the list.
+   */
   const [scroll, setScroll] = useState(() =>
     initialIdx >= MAX_PICKER_ROWS ? initialIdx - MAX_PICKER_ROWS + 1 : 0,
   );
@@ -75,9 +83,11 @@ export function FilterPicker({
     setIdx((i) => Math.min(i, Math.max(0, filtered.length - 1)));
   }, [filtered]);
 
-  // Sticky scroll: only shift the window when the cursor hits an edge.
-  // Avoids the jittery center-on-cursor behavior where one keystroke
-  // snaps the list by half the viewport.
+  /**
+   * Sticky scroll: only shift the window when the cursor hits an edge.
+   * Avoids the jittery center-on-cursor behavior where one keystroke
+   * snaps the list by half the viewport.
+   */
   useEffect(() => {
     setScroll((s) => {
       if (idx < s) return idx;
@@ -89,10 +99,12 @@ export function FilterPicker({
     });
   }, [idx, filtered.length]);
 
-  // Debounce keystrokes when the caller owns filtering. The callback goes
-  // through a ref so the timer effect depends only on `q` / `debounceMs` —
-  // otherwise every parent rerender restarts the timer and fires a
-  // duplicate request for the same query.
+  /**
+   * Debounce keystrokes when the caller owns filtering. The callback goes
+   * through a ref so the timer effect depends only on `q` / `debounceMs` —
+   * otherwise every parent rerender restarts the timer and fires a
+   * duplicate request for the same query.
+   */
   const latestQueryChange = useRef(onQueryChange);
   useEffect(() => {
     latestQueryChange.current = onQueryChange;
@@ -157,8 +169,10 @@ export function FilterPicker({
   );
 }
 
-// Windowed row slice with ▲/▼ hidden-count indicators. Split out to keep
-// the FilterPicker body readable.
+/**
+ * Windowed row slice with ▲/▼ hidden-count indicators. Split out to keep
+ * the FilterPicker body readable.
+ */
 function PickerRows({
   filtered,
   idx,

@@ -1,7 +1,9 @@
-// Synthwave '84 palette (Robb Owen) — out of the box. Jira, but neon.
-// https://github.com/robb0wen/synthwave-vscode — lifted from the canonical
-// theme JSON and README. Every hex below maps to a real token/chrome color
-// from the theme, not a fan interpretation.
+/**
+ * Synthwave '84 palette (Robb Owen) — out of the box. Jira, but neon.
+ * https://github.com/robb0wen/synthwave-vscode — lifted from the canonical
+ * theme JSON and README. Every hex below maps to a real token/chrome color
+ * from the theme, not a fan interpretation.
+ */
 export const theme = {
   // Chrome / surfaces
   bg: "#262335", // editor.background
@@ -20,8 +22,11 @@ export const theme = {
   warn: "#fede5d", // keywords
   orange: "#f97e72", // cursor / badge — the signature coral
   err: "#fe4450", // language keywords (red)
-  violet: "#b893ce", // lavender — not a canonical token, but the only
-  // readable Synthwave purple for foreground text (Epics, parent links).
+  /**
+   * lavender — not a canonical token, but the only readable Synthwave purple
+   * for foreground text (Epics, parent links).
+   */
+  violet: "#b893ce",
 
   // Derived roles
   accent: "#ff7edb", // alias for pink — the focus/selection color
