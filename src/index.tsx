@@ -6,7 +6,7 @@ import { BoardView } from "./components/Board";
 import { BoardPicker } from "./components/BoardPicker";
 import { loadConfig, type JiraConfig } from "./config";
 import type { Board } from "./jira";
-import { errorMessage, theme } from "./ui";
+import { errorMessage, setTheme, theme } from "./ui";
 
 function App() {
   const { exit } = useApp();
@@ -17,7 +17,9 @@ function App() {
   useEffect(() => {
     (async () => {
       try {
-        setCfg(await loadConfig());
+        const c = await loadConfig();
+        setTheme(c.theme);
+        setCfg(c);
       } catch (e) {
         setErr(errorMessage(e));
       }

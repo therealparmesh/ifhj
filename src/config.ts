@@ -1,9 +1,12 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import type { ThemeName } from "./ui";
+
 export type JiraConfig = {
   server: string;
   authHeader: string;
+  theme: ThemeName;
 };
 
 // Strip matching single or double quotes around a YAML scalar.
@@ -14,7 +17,7 @@ function unquote(s: string): string {
   return t;
 }
 
-async function readConfigYaml(): Promise<{ server?: string; login?: string }> {
+async function readConfigYaml(): Promise<{ server?: string; login?: string; theme?: string }> {
   const paths = [
     join(homedir(), ".config", ".jira", ".config.yml"),
     join(homedir(), ".config", "jira", ".config.yml"),
@@ -23,11 +26,13 @@ async function readConfigYaml(): Promise<{ server?: string; login?: string }> {
     const f = Bun.file(p);
     if (!(await f.exists())) continue;
     const text = await f.text();
-    const out: { server?: string; login?: string } = {};
+    const out: { server?: string; login?: string; theme?: string } = {};
     const server = /^server:\s*(.+)$/m.exec(text)?.[1];
     const login = /^login:\s*(.+)$/m.exec(text)?.[1];
+    const theme = /^theme:\s*(.+)$/m.exec(text)?.[1];
     if (server) out.server = unquote(server);
     if (login) out.login = unquote(login);
+    if (theme) out.theme = unquote(theme);
     return out;
   }
   return {};
@@ -44,6 +49,13 @@ export async function loadConfig(): Promise<JiraConfig> {
   if (!email)
     throw new Error("Missing Jira login email (set JIRA_LOGIN or ~/.config/.jira/.config.yml)");
   if (!token) throw new Error("Missing JIRA_API_TOKEN environment variable");
+  const themeRaw = env["IFHJ_THEME"] || yaml.theme || "synthwave";
+  if (themeRaw !== "synthwave" && themeRaw !== "terminal") {
+    throw new Error(
+      `Invalid theme "${themeRaw}" (IFHJ_THEME or theme: in config). Expected: synthwave | terminal`,
+    );
+  }
+  const theme: ThemeName = themeRaw;
   const authHeader = "Basic " + Buffer.from(`${email}:${token}`).toString("base64");
-  return { server: server.replace(/\/$/, ""), authHeader };
+  return { server: server.replace(/\/$/, ""), authHeader, theme };
 }
