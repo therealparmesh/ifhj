@@ -27,15 +27,25 @@ function App() {
   if (err)
     return (
       <Box flexDirection="column" padding={1}>
-        <Text color={theme.err}>{err}</Text>
+        <Text color={theme.accent} bold>
+          ifhj
+        </Text>
+        <Box marginTop={1}>
+          <Text color={theme.err}>{err}</Text>
+        </Box>
       </Box>
     );
 
   if (!cfg)
     return (
-      <Box padding={1}>
-        <Text color={theme.accent}>◴ </Text>
-        <Text color={theme.fg}>loading config…</Text>
+      <Box flexDirection="column" padding={1}>
+        <Text color={theme.accent} bold>
+          ifhj
+        </Text>
+        <Box marginTop={1}>
+          <Text color={theme.cyan}>◴ </Text>
+          <Text color={theme.muted}>loading…</Text>
+        </Box>
       </Box>
     );
 

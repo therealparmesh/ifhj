@@ -114,9 +114,9 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
     <Box flexDirection="column" padding={1}>
       <Box>
         <Text color={theme.accent} bold>
-          ▎JIRA{" "}
+          ifhj{" "}
         </Text>
-        <Text color={theme.fgDim}>— pick a board</Text>
+        <Text color={theme.muted}>— pick a board</Text>
       </Box>
 
       <Box marginTop={1}>
