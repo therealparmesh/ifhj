@@ -729,7 +729,18 @@ export function BoardView({ cfg, board, onExit }: Props) {
   }
 
   // Modal overlays. Each branch is a discrete, full-screen-ish component.
-  if (modal.kind === "nvim") return <Box />;
+  if (modal.kind === "nvim") {
+    return (
+      <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.accent}>
+        <Text color={theme.accent} bold>
+          editing in Neovim
+        </Text>
+        <Box marginTop={1}>
+          <Text color={theme.muted}>save & quit to return</Text>
+        </Box>
+      </Box>
+    );
+  }
   if (modal.kind === "help") return <HelpModal onClose={closeModal} />;
   if (modal.kind === "card-action" && currentIssue) {
     return (

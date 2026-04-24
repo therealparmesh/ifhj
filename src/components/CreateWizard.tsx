@@ -227,14 +227,13 @@ export function CreateWizard({
 
   // Neovim banner — editor takes over the TTY while running.
   if (mode.kind === "nvim-title" || mode.kind === "nvim-desc") {
-    const what = mode.kind === "nvim-title" ? "title" : "description";
     return (
       <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.accent}>
         <Text color={theme.accent} bold>
-          edit {what}
+          editing in Neovim
         </Text>
         <Box marginTop={1}>
-          <Text color={theme.muted}>opening Neovim… save & quit to return to the form.</Text>
+          <Text color={theme.muted}>save & quit to return</Text>
         </Box>
       </Box>
     );
