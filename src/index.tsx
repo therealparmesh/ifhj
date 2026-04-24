@@ -36,18 +36,7 @@ function App() {
       </Box>
     );
 
-  if (!cfg)
-    return (
-      <Box flexDirection="column" padding={1}>
-        <Text color={theme.accent} bold>
-          ifhj
-        </Text>
-        <Box marginTop={1}>
-          <Text color={theme.cyan}>◴ </Text>
-          <Text color={theme.muted}>loading…</Text>
-        </Box>
-      </Box>
-    );
+  if (!cfg) return null;
 
   if (!board) return <BoardPicker cfg={cfg} onPick={setBoard} onQuit={() => exit()} />;
   return <BoardView cfg={cfg} board={board} onExit={() => setBoard(null)} />;

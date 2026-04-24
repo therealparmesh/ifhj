@@ -89,8 +89,12 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
   if (error) {
     return (
       <Box flexDirection="column" padding={1}>
-        <Text color={theme.err}>Error loading boards:</Text>
-        <Text color={theme.fg}>{error}</Text>
+        <Text color={theme.accent} bold>
+          ifhj
+        </Text>
+        <Box marginTop={1}>
+          <Text color={theme.err}>{error}</Text>
+        </Box>
         <Box marginTop={1}>
           <Text color={theme.muted}>press esc or ⌃c to quit</Text>
         </Box>
@@ -100,9 +104,14 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
 
   if (!boards) {
     return (
-      <Box padding={1}>
-        <Text color={theme.accent}>◴ </Text>
-        <Text color={theme.fg}>loading boards…</Text>
+      <Box flexDirection="column" padding={1}>
+        <Text color={theme.accent} bold>
+          ifhj
+        </Text>
+        <Box marginTop={1}>
+          <Text color={theme.cyan}>◴ </Text>
+          <Text color={theme.muted}>loading boards…</Text>
+        </Box>
       </Box>
     );
   }
