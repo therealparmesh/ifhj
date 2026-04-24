@@ -1,14 +1,12 @@
 # ifhj
 
-**i freaking have jira** — a fast, keyboard-driven TUI for Jira. If I have to live inside a board all day I'd rather not do it in a browser tab.
+**i freaking have jira** - a TUI for Jira. Kanban board, issue editing, field management, comments, transitions, filters, the whole thing from the terminal.
 
-Pick a board, arrow-key around, open issues, edit summaries and descriptions in Neovim, transition cards across columns, create new issues from a form, search, filter by assignee, open anything in the browser when you actually need the web view.
+I don't want to context-switch to a browser tab to move a card. This is the fix.
 
 ## Install
 
 ### mise (recommended)
-
-Pulls a prebuilt binary straight from GitHub releases.
 
 ```sh
 mise use -g github:therealparmesh/ifhj
@@ -16,13 +14,13 @@ mise use -g github:therealparmesh/ifhj
 
 ### Download the binary
 
-Grab the tarball for your OS/arch from the [latest release](https://github.com/therealparmesh/ifhj/releases), extract, drop on `$PATH`. Each release has a `checksums.txt` covering every asset.
+Grab the tarball for your OS/arch from the [latest release](https://github.com/therealparmesh/ifhj/releases), extract, drop on `$PATH`.
 
 Assets are named `ifhj_<version>_<darwin|linux>_<amd64|arm64>.tar.gz`.
 
 ### From source
 
-Needs [bun](https://bun.sh) ≥ 1.3.
+Needs [bun](https://bun.sh) >= 1.3.
 
 ```sh
 git clone https://github.com/therealparmesh/ifhj
@@ -36,7 +34,7 @@ mv ifhj /usr/local/bin/
 
 ### Neovim
 
-ifhj shells out to `nvim` for every text edit (title, description, create). Assumed to be on `$PATH`.
+ifhj shells out to `nvim` for descriptions, comments, and the create form. Needs to be on `$PATH`.
 
 ```sh
 mise use -g neovim
@@ -44,31 +42,31 @@ mise use -g neovim
 
 ### Jira API token
 
-Generate one at <https://id.atlassian.com/manage-profile/security/api-tokens> and export it. The token always comes from an environment variable — it never lives on disk.
+Generate one at <https://id.atlassian.com/manage-profile/security/api-tokens>.
 
 ```sh
 export JIRA_API_TOKEN="<token>"
 ```
 
-### Configuration
+### Server and login
 
-ifhj also needs your Jira **server** and **login email**. Either set them as environment variables, or drop them in a yaml file.
+Either env vars or a yaml file.
 
-**Environment variables:**
+**Env vars:**
 
 ```sh
 export JIRA_SERVER="https://your-company.atlassian.net"
-export JIRA_LOGIN="you@your-company.com"    # or JIRA_EMAIL
+export JIRA_LOGIN="you@your-company.com"
 ```
 
-**Or `~/.config/.jira/.config.yml`** (the [jira-cli](https://github.com/ankitpokhrel/jira-cli) default — if you already use that CLI, ifhj picks up its config for free):
+**Or `~/.config/.jira/.config.yml`** (same format as [jira-cli](https://github.com/ankitpokhrel/jira-cli) - if you already use that, ifhj picks it up for free):
 
 ```yaml
 server: https://your-company.atlassian.net
 login: you@your-company.com
 ```
 
-Environment variables win when both are set.
+Env vars win when both are set.
 
 ## Usage
 
@@ -76,67 +74,73 @@ Environment variables win when both are set.
 ifhj
 ```
 
-You'll get a board picker. Pick one. From there, everything's keyboard.
+Pick a board. Everything's keyboard from there.
 
 ## Keybindings
 
-### Board view
+### Board
 
-| Key       | Action                                                    |
-| --------- | --------------------------------------------------------- |
-| ↑ ↓ ← →   | move cursor (up/down within col, left/right between cols) |
-| ⏎         | open card action menu                                     |
-| v         | view full issue details                                   |
-| m         | move card to any column (picker)                          |
-| `<` / `>` | transition to prev / next column                          |
-| e / E     | edit summary / description in Neovim                      |
-| c         | create a new issue (form)                                 |
-| o / O     | open current card / board in browser                      |
-| /         | search                                                    |
-| n / N     | next / prev match                                         |
-| a / A     | filter by assignee / clear filter                         |
-| r         | refresh                                                   |
-| ?         | help                                                      |
-| q         | back to board picker                                      |
-| ⌃c        | exit                                                      |
+| Key                 | Action                                            |
+| ------------------- | ------------------------------------------------- |
+| `← → h l`           | move between columns                              |
+| `↑ ↓ j k`           | move within column                                |
+| `g` / `G`           | top / bottom of column                            |
+| `PgUp` / `PgDn`     | page within column                                |
+| `Enter`             | card action menu                                  |
+| `v`                 | view issue details                                |
+| `e`                 | edit title (inline)                               |
+| `E`                 | edit description (Neovim)                         |
+| `t`                 | transition to any status                          |
+| `m`                 | move to any column                                |
+| `< >`               | transition to prev / next column                  |
+| `Ctrl+,` / `Ctrl+.` | rerank card up / down                             |
+| `i`                 | assign to me                                      |
+| `y` / `Y`           | yank issue key / URL                              |
+| `o` / `O`           | open card / board in browser                      |
+| `c`                 | create issue                                      |
+| `/`                 | search                                            |
+| `n` / `N`           | next / prev search match                          |
+| `f`                 | filter menu (assignee, type, sprint, label, epic) |
+| `F`                 | clear all filters                                 |
+| `R`                 | recent issues                                     |
+| `J`                 | JQL query view                                    |
+| `r`                 | refresh                                           |
+| `?`                 | help                                              |
+| `q`                 | back to board picker                              |
 
-### Detail modal
+### Detail view
 
-| Key       | Action                   |
-| --------- | ------------------------ |
-| ↑ ↓ / j k | scroll                   |
-| g / G     | top / end                |
-| PgUp/PgDn | page up / down           |
-| e / E     | edit title / description |
-| m         | move to column           |
-| o         | open in browser          |
-| esc / q   | close                    |
+| Key             | Action                          |
+| --------------- | ------------------------------- |
+| `Tab`           | switch pane (body / fields)     |
+| `↑ ↓ j k`       | scroll body / move field cursor |
+| `g` / `G`       | top / bottom                    |
+| `PgUp` / `PgDn` | page scroll                     |
+| `Enter`         | edit field or open comment      |
+| `x`             | clear field                     |
+| `[ ]`           | prev / next comment             |
+| `c`             | add comment (Neovim)            |
+| `C`             | create subtask                  |
+| `e`             | edit title (inline)             |
+| `E`             | edit description (Neovim)       |
+| `t`             | transition to status            |
+| `m`             | move to column                  |
+| `w`             | toggle watch / unwatch          |
+| `y` / `Y`       | yank issue key / URL            |
+| `o`             | open in browser                 |
+| `Esc` / `q`     | close                           |
 
-### Create form
+### Editable fields
 
-| Key       | Action                                   |
-| --------- | ---------------------------------------- |
-| ↑ ↓ / j k | move between fields                      |
-| ⏎         | edit focused field (Neovim or picker)    |
-| s         | submit (when required fields are filled) |
-| esc       | cancel                                   |
+Assignee, priority, parent, story points, labels, components, fix versions, due date. Tab to the fields pane, Enter to edit, `x` to clear. Array fields (labels, components, fix versions) give you add/remove/clear options.
 
-### Any picker (card-action, assignee, type, relationship, target)
+### Markdown
 
-| Key | Action           |
-| --- | ---------------- |
-| ↑ ↓ | nav              |
-| ⏎   | pick             |
-| ⌃x  | clear (assignee) |
-| esc | cancel           |
+Descriptions and comments round-trip as Markdown. Write Markdown in Neovim, it gets converted to Jira's ADF format on save. ADF from Jira gets converted back to Markdown for display.
 
-## How descriptions and comments work
+### Caching
 
-ifhj shows descriptions and comments on the detail view (`v` on a card). Long lines soft-wrap to the column width — code blocks, URLs, and stack traces render in full, not clipped. Comments appear in chronological order with a thin divider between each one.
-
-**ADF rendering.** Jira stores rich content as ADF (Atlassian Document Format). ifhj flattens it to plain text: paragraphs, headings, lists (`•` / children), code blocks (fenced with ``` and language tag), mentions (`@name`), emoji, inline links, and hard breaks. Tables, panels, and media render as best-effort placeholders.
-
-**No threading.** Jira Cloud's `/rest/api/3/issue/{key}/comment` endpoint on Software/Agile boards returns a flat list — Jira's "reply to a comment" feature in the web UI is an ADF/`@mention` convention, not structured in the REST response. Service Desk tickets have threading fields but that's a different product. So: flat, oldest-first, read-only for now.
+Board state is cached at `~/.cache/ifhj/` for instant startup. Stale after 10 minutes. Fresh data loads in the background and replaces the cache.
 
 ## Development
 
@@ -144,7 +148,7 @@ ifhj shows descriptions and comments on the detail view (`v` on a card). Long li
 bun install
 bun run dev            # hot reload
 bun run lint           # oxfmt + oxlint + tsc
-bun run compile        # native binary for this host
+bun run compile        # native binary
 ```
 
 ### Cutting a release
@@ -153,21 +157,7 @@ bun run compile        # native binary for this host
 ./scripts/release.ts patch  # or: minor | major | 1.2.3
 ```
 
-Runs from anywhere in the repo. Bumps `package.json`, resyncs `bun.lock`, commits, tags `vX.Y.Z`, pushes. The `release` workflow cross-compiles binaries for darwin/linux × amd64/arm64, tars them with SHA-256 checksums, and publishes a GitHub Release.
-
-First release only: the `release` workflow has to be on the default branch before the tag push, or there's nothing to trigger. Push to `main` first, then cut.
-
-## Troubleshooting
-
-**"Missing Jira server" / "Missing Jira login email" / "Missing JIRA_API_TOKEN"** — you haven't set up the configuration. See [Prerequisites](#prerequisites).
-
-**401 Unauthorized on every request** — your token is wrong, expired, or your login email doesn't match the account the token was issued for.
-
-**Neovim doesn't open** — ifhj assumes `nvim` is on `$PATH`. Install it (see [Prerequisites](#prerequisites)). If you prefer a different editor, file an issue — I'd consider supporting `$EDITOR` if there's demand.
-
-**The "Open Board" shortcut (`O`) 404s** — ifhj uses the team-managed project URL. Classic / RapidBoard projects use a different path; Jira usually redirects in-browser anyway. File an issue with your project style if it's broken.
-
-**Custom fields aren't showing up** — ifhj assumes the Jira Cloud defaults: `customfield_10014` (Epic Link), `customfield_10020` (Sprint), `customfield_10016` (Story Points). If your tenant remapped those, file an issue.
+Bumps version, commits, tags, pushes. GitHub Actions cross-compiles for darwin/linux x amd64/arm64.
 
 ## Author
 

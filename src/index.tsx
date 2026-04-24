@@ -53,4 +53,6 @@ function App() {
   return <BoardView cfg={cfg} board={board} onExit={() => setBoard(null)} />;
 }
 
-render(<App />);
+process.stdout.write("\x1b[?1049h\x1b[H\x1b[2J");
+const inst = render(<App />);
+inst.waitUntilExit().then(() => process.stdout.write("\x1b[?1049l"));
