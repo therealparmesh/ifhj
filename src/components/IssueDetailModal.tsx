@@ -20,14 +20,17 @@ import {
   getProjectComponents,
   getProjectVersions,
   searchIssues,
+  unwatchIssue,
   updateComment,
   updateDescription,
   updateIssueField,
   updateSummary,
+  watchIssue,
 } from "../jira";
 import {
   bg,
   clamp,
+  copyToClipboard,
   errorMessage,
   openInBrowser,
   theme,
@@ -80,6 +83,15 @@ function renderDetailLines(detail: IssueDetail, mainWidth: number): DetailLine[]
     for (const s of detail.subtasks)
       push(
         `${s.key} · ${s.statusName} · ${truncate(s.summary, mainWidth - s.key.length - 16)}`,
+        theme.fgDim,
+      );
+  }
+
+  if (detail.links.length > 0) {
+    pushSection(`linked issues (${detail.links.length})`);
+    for (const l of detail.links)
+      push(
+        `${l.direction} ${l.key} · ${l.statusName} · ${truncate(l.summary, mainWidth - l.key.length - l.direction.length - 16)}`,
         theme.fgDim,
       );
   }
@@ -183,6 +195,7 @@ export function IssueDetailModal({
   onClose,
   onMove,
   onTransition,
+  onCreateSubtask,
   onRefresh,
 }: {
   cfg: JiraConfig;
@@ -191,6 +204,7 @@ export function IssueDetailModal({
   onClose: () => void;
   onMove: () => void;
   onTransition: () => void;
+  onCreateSubtask: (parentKey: string) => void;
   onRefresh: () => void;
 }) {
   const { cols: termCols, rows: termRows } = useDimensions();
@@ -306,29 +320,10 @@ export function IssueDetailModal({
   const currentField = ALL_FIELDS[fieldIdx];
   const isEditable = currentField ? EDITABLE_FIELDS.includes(currentField) : false;
 
-  const doEditTitle = useCallback(async () => {
+  const doEditTitle = useCallback(() => {
     if (!detail) return;
-    setOverlay({ kind: "nvim" });
-    try {
-      const raw = await editInNeovim(detail.summary, `${detail.key}-title.md`);
-      const next = (raw.split(/\n/, 1)[0] ?? "").trim();
-      if (!next) {
-        showFlash("summary empty, not saved");
-        setOverlay({ kind: "none" });
-        return;
-      }
-      if (next === detail.summary.trim()) {
-        showFlash("no change");
-        setOverlay({ kind: "none" });
-        return;
-      }
-      setOverlay({ kind: "none" });
-      await doSave(() => updateSummary(cfg, detail.key, next), "title updated");
-    } catch (e) {
-      showFlash(errorMessage(e), "err");
-      setOverlay({ kind: "none" });
-    }
-  }, [detail, cfg, showFlash, doSave]);
+    setOverlay({ kind: "inline-input", field: "title", value: detail.summary });
+  }, [detail]);
 
   const doEditDesc = useCallback(async () => {
     if (!detail) return;
@@ -484,6 +479,26 @@ export function IssueDetailModal({
       if (input === "m") return onMove();
       if (input === "t") return onTransition();
       if (input === "c") return void doAddComment();
+      if (input === "C") return onCreateSubtask(issueKey);
+      if (input === "y") {
+        copyToClipboard(issueKey)
+          .then(() => showFlash(`copied ${issueKey}`, "ok"))
+          .catch((err) => showFlash(errorMessage(err), "err"));
+        return;
+      }
+      if (input === "Y") {
+        const url = `${cfg.server}/browse/${issueKey}`;
+        copyToClipboard(url)
+          .then(() => showFlash("copied URL", "ok"))
+          .catch((err) => showFlash(errorMessage(err), "err"));
+        return;
+      }
+      if (input === "w" && detail) {
+        const watching = detail.watching;
+        const fn = watching ? () => unwatchIssue(cfg, issueKey) : () => watchIssue(cfg, issueKey);
+        void doSave(fn, watching ? "unwatched" : "watching");
+        return;
+      }
       if (key.tab) {
         setPane((p) => (p === "body" ? "fields" : "body"));
         return;
@@ -551,7 +566,18 @@ export function IssueDetailModal({
         onSubmit={async (val) => {
           setOverlay({ kind: "none" });
           if (!detail) return;
-          if (overlay.field === "points") {
+          if (overlay.field === "title") {
+            const next = val.trim();
+            if (!next) {
+              showFlash("summary empty, not saved");
+              return;
+            }
+            if (next === detail.summary.trim()) {
+              showFlash("no change");
+              return;
+            }
+            await doSave(() => updateSummary(cfg, detail.key, next), "title updated");
+          } else if (overlay.field === "points") {
             const n = val.trim() === "" ? null : Number(val);
             if (n !== null && Number.isNaN(n)) {
               showFlash("invalid number");
@@ -1018,6 +1044,7 @@ export function IssueDetailModal({
             <Text color={theme.violet}>{detail.parentKey}</Text>
           </>
         ) : null}
+        {detail.watching ? <Text color={theme.cyan}> ◉</Text> : null}
         {saving ? <Text color={theme.warn}> ◴ saving…</Text> : null}
       </Box>
       <Box paddingX={1}>
@@ -1099,6 +1126,9 @@ export function IssueDetailModal({
           <Hint k="e E" label="title/desc" />
           <Hint k="t" label="transition" />
           <Hint k="m" label="move" />
+          <Hint k="C" label="subtask" />
+          <Hint k="w" label={detail.watching ? "unwatch" : "watch"} />
+          <Hint k="y" label="yank" />
           <Hint k="esc" label="close" />
         </Box>
         {flash ? (
@@ -1193,7 +1223,11 @@ function InlineFieldInput({
 }) {
   const [value, setValue] = useState(initial);
   const hint =
-    field === "points" ? "enter a number (empty to clear)" : "YYYY-MM-DD (empty to clear)";
+    field === "title"
+      ? "issue title"
+      : field === "points"
+        ? "enter a number (empty to clear)"
+        : "YYYY-MM-DD (empty to clear)";
   return (
     <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.accent}>
       <Text color={theme.accent} bold>

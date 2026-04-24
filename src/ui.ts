@@ -100,6 +100,21 @@ export function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+export async function copyToClipboard(text: string): Promise<void> {
+  const platform = process.platform;
+  const cmd =
+    platform === "darwin"
+      ? ["pbcopy"]
+      : platform === "win32"
+        ? ["clip.exe"]
+        : ["xclip", "-selection", "clipboard"];
+  const proc = Bun.spawn(cmd, { stdin: "pipe" });
+  proc.stdin.write(text);
+  proc.stdin.end();
+  await proc.exited;
+  if (proc.exitCode !== 0) throw new Error(`clipboard failed (exit ${proc.exitCode})`);
+}
+
 export async function openInBrowser(url: string): Promise<void> {
   const platform = process.platform;
   const cmd =

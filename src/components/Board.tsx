@@ -1,6 +1,7 @@
 import { Box, Text, useInput } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { readBoardCache, writeBoardCache } from "../cache";
 import type { JiraConfig } from "../config";
 import { editInNeovim } from "../editor";
 import { useDimensions } from "../hooks";
@@ -8,6 +9,7 @@ import {
   type BoardColumn,
   type BoardConfig,
   type Issue,
+  type IssueSearchResult,
   type IssueLinkType,
   type IssueType,
   type Transition,
@@ -17,19 +19,22 @@ import {
   getIssueLinkTypes,
   getIssueTypes,
   getTransitions,
+  searchByJql,
   transitionIssue,
   updateDescription,
   updateSummary,
 } from "../jira";
-import { clamp, errorMessage, openInBrowser, theme } from "../ui";
+import { clamp, copyToClipboard, errorMessage, openInBrowser, theme, truncate } from "../ui";
 import { BoardHeader } from "./BoardHeader";
 import { CreateWizard } from "./CreateWizard";
 import { FilterPicker } from "./FilterPicker";
 import { type FlashStatus, Footer, type Tone } from "./Footer";
 import { HelpModal } from "./HelpModal";
+import { Hint } from "./Hint";
 import { IssueDetailModal } from "./IssueDetailModal";
 import { type Column, ColumnView, PagingArrow } from "./Kanban";
 import { ListPicker } from "./ListPicker";
+import { TextInput } from "./TextInput";
 
 // How long a toast message lingers in the footer before auto-clearing.
 const FLASH_TTL_MS = 3500;
@@ -56,8 +61,10 @@ type Modal =
   | { kind: "filter-sprint"; sprints: string[] }
   | { kind: "filter-label"; labels: string[] }
   | { kind: "filter-epic"; epics: string[] }
-  | { kind: "create"; types: IssueType[]; linkTypes: IssueLinkType[] }
-  | { kind: "detail"; issueKey: string };
+  | { kind: "create"; types: IssueType[]; linkTypes: IssueLinkType[]; parentKey?: string }
+  | { kind: "detail"; issueKey: string }
+  | { kind: "title-edit"; issueKey: string; current: string }
+  | { kind: "jql" };
 
 type Filters = {
   assignee: string | null;
@@ -190,25 +197,36 @@ export function BoardView({ cfg, board, onExit }: Props) {
     };
   }, [issues]);
 
+  const applyBoardData = useCallback((c: BoardConfig, is: Issue[]) => {
+    setConf(c);
+    setIssues(is);
+    setActiveRows((prev) => c.columns.map((_, i) => prev[i] ?? 0));
+    setScrolls((prev) => c.columns.map((_, i) => prev[i] ?? 0));
+  }, []);
+
   const load = useCallback(async () => {
     setLoadError(null);
+    if (!hasLoadedOnce.current) {
+      const cached = await readBoardCache(board.id);
+      if (cached) {
+        applyBoardData(cached.config, cached.issues);
+        hasLoadedOnce.current = true;
+      }
+    }
     try {
       const [c, is] = await Promise.all([
         getBoardConfig(cfg, board.id),
         getBoardIssues(cfg, board.id),
       ]);
-      setConf(c);
-      setIssues(is);
-      setActiveRows((prev) => c.columns.map((_, i) => prev[i] ?? 0));
-      setScrolls((prev) => c.columns.map((_, i) => prev[i] ?? 0));
+      applyBoardData(c, is);
       hasLoadedOnce.current = true;
+      void writeBoardCache(board.id, c, is);
     } catch (e) {
       const msg = errorMessage(e);
-      // Fatal on first load; toast on reload so the user keeps their place.
       if (hasLoadedOnce.current) flash(msg, "err");
       else setLoadError(msg);
     }
-  }, [cfg, board.id, flash]);
+  }, [cfg, board.id, flash, applyBoardData]);
 
   useEffect(() => {
     void load();
@@ -425,27 +443,11 @@ export function BoardView({ cfg, board, onExit }: Props) {
     [conf, activeCol, flash, moveToColumn],
   );
 
-  const doEditSummary = useCallback(async () => {
+  const doEditSummary = useCallback(() => {
     const issue = currentIssue;
     if (!issue) return;
-    try {
-      const raw = await editInNeovim(issue.summary, `${issue.key}-title.md`);
-      const next = (raw.split(/\n/, 1)[0] ?? "").trim();
-      if (!next) {
-        flash("summary empty, not saved", "info");
-        return;
-      }
-      if (next === issue.summary.trim()) {
-        flash("no change", "info");
-        return;
-      }
-      await updateSummary(cfg, issue.key, next);
-      flash(`${issue.key} summary updated`, "ok");
-      await load();
-    } catch (e) {
-      flash(errorMessage(e), "err");
-    }
-  }, [currentIssue, cfg, flash, load]);
+    setModal({ kind: "title-edit", issueKey: issue.key, current: issue.summary });
+  }, [currentIssue]);
 
   const doEditDescription = useCallback(async () => {
     const issue = currentIssue;
@@ -631,6 +633,21 @@ export function BoardView({ cfg, board, onExit }: Props) {
       if (input === ">" || input === ".") return void doTransition(1);
       if (input === "t") return void doFuzzyTransition();
       if (input === "i") return void doAssignToMe();
+      if (input === "y") {
+        if (!currentIssue) return flash("no issue selected", "info");
+        copyToClipboard(currentIssue.key)
+          .then(() => flash(`copied ${currentIssue.key}`, "ok"))
+          .catch((e) => flash(errorMessage(e), "err"));
+        return;
+      }
+      if (input === "Y") {
+        if (!currentIssue) return flash("no issue selected", "info");
+        const url = `${cfg.server}/browse/${currentIssue.key}`;
+        copyToClipboard(url)
+          .then(() => flash(`copied URL`, "ok"))
+          .catch((e) => flash(errorMessage(e), "err"));
+        return;
+      }
 
       // Board-wide
       if (input === "O") return void openBoardInBrowser();
@@ -649,6 +666,12 @@ export function BoardView({ cfg, board, onExit }: Props) {
       }
       if (input === "n") return jumpToMatch(1);
       if (input === "N") return jumpToMatch(-1);
+
+      // JQL
+      if (input === "J") {
+        setModal({ kind: "jql" });
+        return;
+      }
 
       // Filters
       if (input === "f") {
@@ -762,6 +785,45 @@ export function BoardView({ cfg, board, onExit }: Props) {
       />
     );
   }
+  if (modal.kind === "title-edit") {
+    const editKey = modal.issueKey;
+    return (
+      <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.accent}>
+        <Text color={theme.accent} bold>
+          edit title · {editKey}
+        </Text>
+        <Box marginTop={1}>
+          <Text color={theme.muted}>› </Text>
+          <TextInput
+            value={modal.current}
+            placeholder="issue title"
+            onChange={(v) => setModal({ ...modal, current: v })}
+            onSubmit={async (val) => {
+              const next = val.trim();
+              if (!next) {
+                flash("summary empty, not saved", "info");
+                closeModal();
+                return;
+              }
+              closeModal();
+              try {
+                await updateSummary(cfg, editKey, next);
+                flash(`${editKey} title updated`, "ok");
+                await load();
+              } catch (e) {
+                flash(errorMessage(e), "err");
+              }
+            }}
+            onCancel={closeModal}
+          />
+        </Box>
+        <Box marginTop={1}>
+          <Hint k="⏎" label="save" />
+          <Hint k="esc" label="cancel" />
+        </Box>
+      </Box>
+    );
+  }
   if (modal.kind === "detail") {
     return (
       <IssueDetailModal
@@ -777,6 +839,25 @@ export function BoardView({ cfg, board, onExit }: Props) {
             if (trs.length === 0) return;
             setModal({ kind: "transition-picker", transitions: trs, issueKey: key });
           } catch {}
+        }}
+        onCreateSubtask={(parentKey) => {
+          closeModal();
+          void (async () => {
+            if (!conf) return;
+            try {
+              if (!metaCache.current) {
+                const [types, linkTypes] = await Promise.all([
+                  getIssueTypes(cfg, conf.projectKey),
+                  getIssueLinkTypes(cfg),
+                ]);
+                metaCache.current = { types: types.filter((t) => !t.subtask), linkTypes };
+              }
+              const { types, linkTypes } = metaCache.current;
+              setModal({ kind: "create", types, linkTypes, parentKey });
+            } catch (e) {
+              flash(errorMessage(e), "err");
+            }
+          })();
         }}
         onRefresh={() => void load()}
       />
@@ -961,6 +1042,18 @@ export function BoardView({ cfg, board, onExit }: Props) {
       />
     );
   }
+  if (modal.kind === "jql") {
+    return (
+      <JqlView
+        cfg={cfg}
+        onPick={(key) => {
+          closeModal();
+          openDetailForKey(key);
+        }}
+        onCancel={closeModal}
+      />
+    );
+  }
   if (modal.kind === "create") {
     return (
       <CreateWizard
@@ -968,6 +1061,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
         projectKey={conf.projectKey}
         types={modal.types}
         linkTypes={modal.linkTypes}
+        defaultParent={modal.parentKey}
         onCancel={closeModal}
         onDone={({ key, title, linkSummary }) => {
           const headline = `created ${key}: ${title}`;
@@ -1059,6 +1153,145 @@ export function BoardView({ cfg, board, onExit }: Props) {
           closeModal();
         }}
       />
+    </Box>
+  );
+}
+
+function JqlView({
+  cfg,
+  onPick,
+  onCancel,
+}: {
+  cfg: JiraConfig;
+  onPick: (key: string) => void;
+  onCancel: () => void;
+}) {
+  const [jql, setJql] = useState("");
+  const [results, setResults] = useState<IssueSearchResult[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [idx, setIdx] = useState(0);
+  const submitted = useRef(false);
+
+  useInput(
+    (_input, key) => {
+      if (key.escape) onCancel();
+    },
+    { isActive: !submitted.current },
+  );
+
+  return (
+    <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.warn}>
+      <Text color={theme.warn} bold>
+        JQL query
+      </Text>
+      <Box marginTop={1}>
+        <Text color={theme.muted}>› </Text>
+        <TextInput
+          value={jql}
+          placeholder="e.g. assignee = currentUser() AND sprint in openSprints()"
+          onChange={(v) => {
+            setJql(v);
+            setError(null);
+          }}
+          onSubmit={async () => {
+            if (!jql.trim()) return;
+            submitted.current = true;
+            setLoading(true);
+            setError(null);
+            try {
+              const r = await searchByJql(cfg, jql.trim());
+              setResults(r);
+              setIdx(0);
+            } catch (e) {
+              setError(errorMessage(e));
+              setResults([]);
+            } finally {
+              setLoading(false);
+              submitted.current = false;
+            }
+          }}
+          onCancel={onCancel}
+        />
+      </Box>
+      {error ? (
+        <Box marginTop={1}>
+          <Text color={theme.err}>{error}</Text>
+        </Box>
+      ) : null}
+      {loading ? (
+        <Box marginTop={1}>
+          <Text color={theme.accent}>◴ searching…</Text>
+        </Box>
+      ) : results.length > 0 ? (
+        <JqlResults results={results} idx={idx} setIdx={setIdx} onPick={onPick} />
+      ) : submitted.current ? null : jql.trim() ? null : (
+        <Box marginTop={1}>
+          <Text color={theme.muted}>type a JQL query and press ⏎</Text>
+        </Box>
+      )}
+      <Box marginTop={1}>
+        <Hint k="⏎" label="search" />
+        <Hint k="esc" label="close" />
+      </Box>
+    </Box>
+  );
+}
+
+function JqlResults({
+  results,
+  idx,
+  setIdx,
+  onPick,
+}: {
+  results: IssueSearchResult[];
+  idx: number;
+  setIdx: (i: number) => void;
+  onPick: (key: string) => void;
+}) {
+  const { rows } = useDimensions();
+  const maxVisible = Math.max(5, rows - 12);
+  const [scroll, setScroll] = useState(0);
+
+  useEffect(() => {
+    if (idx < scroll) setScroll(idx);
+    else if (idx >= scroll + maxVisible) setScroll(idx - maxVisible + 1);
+  }, [idx, scroll, maxVisible]);
+
+  useInput((input, key) => {
+    if (key.upArrow || input === "k") setIdx(clamp(idx - 1, 0, results.length - 1));
+    else if (key.downArrow || input === "j") setIdx(clamp(idx + 1, 0, results.length - 1));
+    else if (key.return) {
+      const r = results[idx];
+      if (r) onPick(r.key);
+    }
+  });
+
+  const visible = results.slice(scroll, scroll + maxVisible);
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      <Text color={theme.muted}>
+        {results.length} result{results.length === 1 ? "" : "s"}
+      </Text>
+      {scroll > 0 ? <Text color={theme.muted}> ▲ {scroll} more</Text> : null}
+      {visible.map((r, i) => {
+        const abs = scroll + i;
+        const sel = abs === idx;
+        return (
+          <Box key={r.key}>
+            <Text color={sel ? theme.accent : theme.muted}>{sel ? "▶ " : "  "}</Text>
+            <Text color={sel ? theme.pink : theme.fgDim} bold={sel}>
+              {r.key}
+            </Text>
+            <Text color={theme.muted}> · </Text>
+            <Text color={sel ? theme.fg : theme.fgDim}>{truncate(r.summary, 60)}</Text>
+            <Text color={theme.muted}> {r.issueType}</Text>
+          </Box>
+        );
+      })}
+      {results.length > scroll + maxVisible ? (
+        <Text color={theme.muted}> ▼ {results.length - scroll - maxVisible} more</Text>
+      ) : null}
     </Box>
   );
 }

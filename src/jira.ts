@@ -1,3 +1,5 @@
+import { adfToMd, mdToAdf } from "github-markdown-adf";
+
 import type { JiraConfig } from "./config";
 
 /**
@@ -53,6 +55,14 @@ export type Comment = {
   created: string;
 };
 
+export type IssueLink = {
+  direction: string;
+  key: string;
+  summary: string;
+  statusName: string;
+  issueType: string;
+};
+
 export type IssueDetail = Issue & {
   reporter?: string;
   labels: string[];
@@ -65,7 +75,9 @@ export type IssueDetail = Issue & {
   updated: string;
   parentKey?: string;
   subtasks: { key: string; summary: string; statusName: string }[];
+  links: IssueLink[];
   comments: Comment[];
+  watching?: boolean;
 };
 
 async function jf(cfg: JiraConfig, path: string, init: RequestInit = {}): Promise<Response> {
@@ -123,6 +135,11 @@ export async function getBoardConfig(cfg: JiraConfig, boardId: number): Promise<
 function adfToText(node: any): string {
   if (!node) return "";
   if (typeof node === "string") return node;
+  if (node.type === "doc" && node.version === 1) {
+    try {
+      return adfToMd(node).replaceAll("\t", "  ");
+    } catch {}
+  }
   // Tabs desync Ink's column math with terminal width — normalize to spaces.
   if (node.type === "text") return (node.text ?? "").replaceAll("\t", "  ");
   if (node.type === "hardBreak") return "\n";
@@ -132,10 +149,6 @@ function adfToText(node: any): string {
   if (node.type === "media" || node.type === "mediaSingle" || node.type === "mediaGroup")
     return "[media]\n";
   if (node.type === "rule") return "\n───\n";
-  /**
-   * Fence code blocks so line structure survives and the reader can tell
-   * code from prose — otherwise it all flattens into one run.
-   */
   if (node.type === "codeBlock") {
     const lang = node.attrs?.language ?? "";
     const body = Array.isArray(node.content) ? node.content.map(adfToText).join("") : "";
@@ -222,6 +235,8 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
     CF_STORY_POINTS,
     "parent",
     "subtasks",
+    "issuelinks",
+    "watches",
   ].join(",");
   const [data, commentsData] = await Promise.all([
     jget(cfg, `/rest/api/3/issue/${issueKey}?fields=${fields}&expand=renderedFields`),
@@ -258,7 +273,35 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
           statusName: s.fields?.status?.name ?? "",
         }))
       : [],
+    links: Array.isArray(f.issuelinks)
+      ? f.issuelinks.flatMap((l: any) => {
+          if (l.outwardIssue) {
+            return [
+              {
+                direction: l.type?.outward ?? "relates to",
+                key: l.outwardIssue.key,
+                summary: l.outwardIssue.fields?.summary ?? "",
+                statusName: l.outwardIssue.fields?.status?.name ?? "",
+                issueType: l.outwardIssue.fields?.issuetype?.name ?? "",
+              },
+            ];
+          }
+          if (l.inwardIssue) {
+            return [
+              {
+                direction: l.type?.inward ?? "relates to",
+                key: l.inwardIssue.key,
+                summary: l.inwardIssue.fields?.summary ?? "",
+                statusName: l.inwardIssue.fields?.status?.name ?? "",
+                issueType: l.inwardIssue.fields?.issuetype?.name ?? "",
+              },
+            ];
+          }
+          return [];
+        })
+      : [],
     comments,
+    watching: f.watches?.isWatching ?? undefined,
   };
   if (f.assignee?.displayName) detail.assignee = f.assignee.displayName;
   if (f.priority?.name) detail.priority = f.priority.name;
@@ -293,15 +336,9 @@ export async function transitionIssue(
   if (!res.ok) throw new Error(`transition failed ${res.status}: ${await res.text()}`);
 }
 
-function textToAdf(text: string) {
-  // Strip \r so Windows-flavored tmp files don't carry ^M into ADF nodes.
-  const lines = text.replaceAll(/\r\n/g, "\n").split("\n");
-  const content = lines.map((line) =>
-    line.length === 0
-      ? { type: "paragraph" }
-      : { type: "paragraph", content: [{ type: "text", text: line }] },
-  );
-  return { type: "doc", version: 1, content };
+function textToAdf(text: string): any {
+  const cleaned = text.replaceAll(/\r\n/g, "\n");
+  return mdToAdf(cleaned);
 }
 
 export async function updateSummary(
@@ -511,6 +548,39 @@ export async function fetchCurrentUser(
     accountId: data.accountId ?? "",
     displayName: data.displayName ?? data.emailAddress ?? "unknown",
   };
+}
+
+export async function watchIssue(cfg: JiraConfig, issueKey: string): Promise<void> {
+  const res = await jf(cfg, `/rest/api/3/issue/${issueKey}/watchers`, { method: "POST" });
+  if (!res.ok) throw new Error(`watch ${res.status}: ${await res.text()}`);
+}
+
+export async function unwatchIssue(cfg: JiraConfig, issueKey: string): Promise<void> {
+  const me = await fetchCurrentUser(cfg);
+  const res = await jf(
+    cfg,
+    `/rest/api/3/issue/${issueKey}/watchers?accountId=${encodeURIComponent(me.accountId)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) throw new Error(`unwatch ${res.status}: ${await res.text()}`);
+}
+
+export async function searchByJql(
+  cfg: JiraConfig,
+  jql: string,
+  limit = 50,
+): Promise<IssueSearchResult[]> {
+  const res = await jf(cfg, `/rest/api/3/search/jql`, {
+    method: "POST",
+    body: JSON.stringify({ jql, fields: ["summary", "issuetype"], maxResults: limit }),
+  });
+  if (!res.ok) throw new Error(`jql search ${res.status}: ${await res.text()}`);
+  const data = (await res.json()) as any;
+  return (data.issues ?? []).map((i: any) => ({
+    key: i.key,
+    summary: i.fields?.summary ?? "",
+    issueType: i.fields?.issuetype?.name ?? "",
+  }));
 }
 
 export async function assignIssueToMe(cfg: JiraConfig, issueKey: string): Promise<void> {

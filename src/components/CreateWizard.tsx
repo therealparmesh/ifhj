@@ -86,6 +86,7 @@ export function CreateWizard({
   projectKey,
   types,
   linkTypes,
+  defaultParent,
   onCancel,
   onDone,
   onError,
@@ -94,16 +95,23 @@ export function CreateWizard({
   projectKey: string;
   types: IssueType[];
   linkTypes: IssueLinkType[];
+  defaultParent?: string | undefined;
   onCancel: () => void;
   onDone: (result: { key: string; title: string; linkSummary?: string }) => void;
   onError: (msg: string) => void;
 }) {
+  const parentLink: LinkChoice | null = defaultParent
+    ? { name: PARENT_SENTINEL, label: "is child of", direction: "outward" }
+    : null;
+  const parentTarget: IssueSearchResult | null = defaultParent
+    ? { key: defaultParent, summary: "", issueType: "" }
+    : null;
   const [form, setForm] = useState<FormState>({
     title: "",
     description: "",
     type: null,
-    link: null,
-    target: null,
+    link: parentLink,
+    target: parentTarget,
   });
   const [mode, setMode] = useState<Mode>({ kind: "browse" });
   const [focused, setFocused] = useState<FieldId>("title");

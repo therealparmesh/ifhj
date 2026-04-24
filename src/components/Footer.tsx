@@ -106,6 +106,7 @@ export function Footer({
           <Hint k="t" label="transition" />
           <Hint k="m" label="move" />
           <Hint k="i" label="assign me" />
+          <Hint k="y" label="yank" />
           <Hint k="c" label="create" />
           <Hint k="/" label="search" />
           <Hint k="f" label="filter" />
