@@ -46,6 +46,7 @@ export type IssueType = { id: string; name: string; subtask: boolean };
 export type Comment = {
   id: string;
   author: string;
+  authorAccountId: string;
   body: string;
   created: string;
 };
@@ -226,6 +227,7 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
   const comments: Comment[] = (commentsData.comments ?? []).map((c: any) => ({
     id: String(c.id),
     author: c.author?.displayName ?? "unknown",
+    authorAccountId: c.author?.accountId ?? "",
     body: typeof c.body === "string" ? c.body : adfToText(c.body).trim(),
     created: c.created,
   }));
@@ -413,6 +415,94 @@ export async function createIssueLink(
     }),
   });
   if (!res.ok) throw new Error(`link ${res.status}: ${await res.text()}`);
+}
+
+export type JiraUser = { accountId: string; displayName: string };
+
+export async function getAssignableUsers(cfg: JiraConfig, projectKey: string): Promise<JiraUser[]> {
+  const data = await jget(
+    cfg,
+    `/rest/api/3/user/assignable/search?project=${encodeURIComponent(projectKey)}&maxResults=100`,
+  );
+  return (data ?? []).map((u: any) => ({
+    accountId: String(u.accountId),
+    displayName: u.displayName ?? u.emailAddress ?? u.accountId,
+  }));
+}
+
+export type Priority = { id: string; name: string };
+
+export async function getPriorities(cfg: JiraConfig): Promise<Priority[]> {
+  const data = await jget(cfg, `/rest/api/3/priority`);
+  return (data ?? []).map((p: any) => ({ id: String(p.id), name: p.name }));
+}
+
+export async function getLabels(cfg: JiraConfig): Promise<string[]> {
+  const data = await jget(cfg, `/rest/api/3/label?maxResults=1000`);
+  return data.values ?? [];
+}
+
+export type ProjectComponent = { id: string; name: string };
+
+export async function getProjectComponents(
+  cfg: JiraConfig,
+  projectKey: string,
+): Promise<ProjectComponent[]> {
+  const data = await jget(cfg, `/rest/api/3/project/${encodeURIComponent(projectKey)}/components`);
+  return (data ?? []).map((c: any) => ({ id: String(c.id), name: c.name }));
+}
+
+export type ProjectVersion = { id: string; name: string; released: boolean };
+
+export async function getProjectVersions(
+  cfg: JiraConfig,
+  projectKey: string,
+): Promise<ProjectVersion[]> {
+  const data = await jget(cfg, `/rest/api/3/project/${encodeURIComponent(projectKey)}/versions`);
+  return (data ?? []).map((v: any) => ({ id: String(v.id), name: v.name, released: !!v.released }));
+}
+
+export async function updateIssueField(
+  cfg: JiraConfig,
+  issueKey: string,
+  fields: Record<string, any>,
+): Promise<void> {
+  const res = await jf(cfg, `/rest/api/3/issue/${issueKey}`, {
+    method: "PUT",
+    body: JSON.stringify({ fields }),
+  });
+  if (!res.ok) throw new Error(`update ${res.status}: ${await res.text()}`);
+}
+
+export async function addComment(cfg: JiraConfig, issueKey: string, body: string): Promise<void> {
+  const res = await jf(cfg, `/rest/api/3/issue/${issueKey}/comment`, {
+    method: "POST",
+    body: JSON.stringify({ body: textToAdf(body) }),
+  });
+  if (!res.ok) throw new Error(`add comment ${res.status}: ${await res.text()}`);
+}
+
+export async function updateComment(
+  cfg: JiraConfig,
+  issueKey: string,
+  commentId: string,
+  body: string,
+): Promise<void> {
+  const res = await jf(cfg, `/rest/api/3/issue/${issueKey}/comment/${commentId}`, {
+    method: "PUT",
+    body: JSON.stringify({ body: textToAdf(body) }),
+  });
+  if (!res.ok) throw new Error(`update comment ${res.status}: ${await res.text()}`);
+}
+
+export async function fetchCurrentUser(
+  cfg: JiraConfig,
+): Promise<{ accountId: string; displayName: string }> {
+  const data = await jget(cfg, `/rest/api/3/myself`);
+  return {
+    accountId: data.accountId ?? "",
+    displayName: data.displayName ?? data.emailAddress ?? "unknown",
+  };
 }
 
 export async function createIssue(

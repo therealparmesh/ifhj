@@ -8,13 +8,11 @@ import {
   type BoardColumn,
   type BoardConfig,
   type Issue,
-  type IssueDetail,
   type IssueLinkType,
   type IssueType,
   type Transition,
   getBoardConfig,
   getBoardIssues,
-  getIssueDetail,
   getIssueLinkTypes,
   getIssueTypes,
   getTransitions,
@@ -53,7 +51,7 @@ type Modal =
   | { kind: "transition-picker"; transitions: Transition[]; issueKey: string }
   | { kind: "assignee-picker"; names: string[] }
   | { kind: "create"; types: IssueType[]; linkTypes: IssueLinkType[] }
-  | { kind: "detail"; issueKey: string; detail: IssueDetail | null; error: string | null };
+  | { kind: "detail"; issueKey: string };
 
 type CellRef = { col: number; row: number };
 
@@ -427,27 +425,17 @@ export function BoardView({ cfg, board, onExit }: Props) {
     }
   }, [currentIssue, cfg, flash, load]);
 
-  const openDetailForKey = useCallback(
-    async (key: string) => {
-      setModal({ kind: "detail", issueKey: key, detail: null, error: null });
-      try {
-        const detail = await getIssueDetail(cfg, key);
-        setModal((m) => (m.kind === "detail" && m.issueKey === key ? { ...m, detail } : m));
-      } catch (e) {
-        const msg = errorMessage(e);
-        setModal((m) => (m.kind === "detail" && m.issueKey === key ? { ...m, error: msg } : m));
-      }
-    },
-    [cfg],
-  );
+  const openDetailForKey = useCallback((key: string) => {
+    setModal({ kind: "detail", issueKey: key });
+  }, []);
 
-  const openDetail = useCallback(async () => {
+  const openDetail = useCallback(() => {
     const issue = currentIssue;
     if (!issue) {
       flash("no issue selected", "info");
       return;
     }
-    await openDetailForKey(issue.key);
+    openDetailForKey(issue.key);
   }, [currentIssue, flash, openDetailForKey]);
 
   const openIssueInBrowser = useCallback(async () => {
@@ -700,20 +688,12 @@ export function BoardView({ cfg, board, onExit }: Props) {
   if (modal.kind === "detail") {
     return (
       <IssueDetailModal
+        cfg={cfg}
+        projectKey={conf.projectKey}
         issueKey={modal.issueKey}
-        detail={modal.detail}
-        error={modal.error}
         onClose={closeModal}
-        onEditTitle={() => {
-          closeModal();
-          void doEditSummary();
-        }}
-        onEditDesc={() => {
-          closeModal();
-          void doEditDescription();
-        }}
-        onOpenWeb={() => void openIssueInBrowser()}
         onMove={() => setModal({ kind: "move-picker", issueKey: modal.issueKey })}
+        onRefresh={() => void load()}
       />
     );
   }

@@ -5,7 +5,7 @@ import { bg, clamp, theme } from "../ui";
 import { Hint } from "./Hint";
 import { TextInput } from "./TextInput";
 
-type FilterItem = { id: string; label: string; hint?: string };
+type FilterItem = { id: string; label: string; hint?: string | undefined };
 
 // Keep the picker compact — beyond this the user should filter instead.
 const MAX_PICKER_ROWS = 15;

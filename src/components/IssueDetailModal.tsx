@@ -1,12 +1,47 @@
 import { Box, Text, useInput } from "ink";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import type { JiraConfig } from "../config";
+import { editInNeovim } from "../editor";
 import { useDimensions } from "../hooks";
-import type { IssueDetail } from "../jira";
-import { theme, truncate, typeColors, typeGlyph } from "../ui";
+import {
+  type Comment,
+  type IssueDetail,
+  type JiraUser,
+  type Priority,
+  type ProjectComponent,
+  type ProjectVersion,
+  addComment,
+  fetchCurrentUser,
+  getAssignableUsers,
+  getIssueDetail,
+  getLabels,
+  getPriorities,
+  getProjectComponents,
+  getProjectVersions,
+  searchIssues,
+  updateComment,
+  updateDescription,
+  updateIssueField,
+  updateSummary,
+} from "../jira";
+import {
+  bg,
+  clamp,
+  errorMessage,
+  openInBrowser,
+  theme,
+  truncate,
+  typeColors,
+  typeGlyph,
+} from "../ui";
+import { FilterPicker } from "./FilterPicker";
 import { Hint } from "./Hint";
+import { ListPicker } from "./ListPicker";
+import { TextInput } from "./TextInput";
 
-const DETAIL_LABEL_WIDTH = 10;
+const DETAIL_LABEL_WIDTH = 11;
+const CF_STORY_POINTS = "customfield_10016";
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
@@ -17,26 +52,19 @@ function formatShortDate(iso: string | undefined): string {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
-// A single body line in the detail modal's main column.
-type DetailLine = { text: string; color: string; bold?: boolean };
+type DetailLine = { text: string; color: string; bold?: boolean; commentIdx?: number | undefined };
 
-/**
- * Flatten the detail document into renderable lines: description → sub-tasks
- * → comments. Each section gets a pink bold header and a thin divider.
- */
 function renderDetailLines(detail: IssueDetail, mainWidth: number): DetailLine[] {
   const out: DetailLine[] = [];
-  const push = (text: string, color = theme.fg, bold = false) => out.push({ text, color, bold });
-  /**
-   * Soft-wrap long lines so code, URLs, and stack traces aren't clipped at
-   * the edge. One row per DetailLine keeps the scroll math honest.
-   */
-  const pushLine = (text: string, color = theme.fg) => {
+  const push = (text: string, color = theme.fg, bold = false, commentIdx?: number) =>
+    out.push({ text, color, bold, commentIdx });
+  const pushLine = (text: string, color = theme.fg, commentIdx?: number) => {
     if (text.length === 0) {
-      push("", color);
+      push("", color, false, commentIdx);
       return;
     }
-    for (let i = 0; i < text.length; i += mainWidth) push(text.slice(i, i + mainWidth), color);
+    for (let i = 0; i < text.length; i += mainWidth)
+      push(text.slice(i, i + mainWidth), color, false, commentIdx);
   };
   const pushSection = (label: string) => {
     push("");
@@ -61,42 +89,181 @@ function renderDetailLines(detail: IssueDetail, mainWidth: number): DetailLine[]
     push("no comments yet", theme.muted);
     return out;
   }
-  /**
-   * Jira Cloud's /comment endpoint on Software boards returns a flat list —
-   * threading isn't in the response shape. Render chronologically with an
-   * author/date header per comment and a hair divider between entries.
-   */
   detail.comments.forEach((c, i) => {
-    if (i > 0) push("·".repeat(Math.min(mainWidth, 20)), theme.accentDim);
-    push(c.author, theme.cyan, true);
-    push(formatShortDate(c.created), theme.muted);
-    for (const ln of (c.body || "").split(/\n/)) pushLine(` ${ln}`);
+    if (i > 0) push("·".repeat(Math.min(mainWidth, 20)), theme.accentDim, false, i);
+    push(c.author, theme.cyan, true, i);
+    push(formatShortDate(c.created), theme.muted, false, i);
+    for (const ln of (c.body || "").split(/\n/)) pushLine(` ${ln}`, theme.fg, i);
   });
   return out;
 }
 
+type Pane = "body" | "fields";
+
+type FieldId =
+  | "status"
+  | "assignee"
+  | "priority"
+  | "parent"
+  | "sprint"
+  | "points"
+  | "labels"
+  | "components"
+  | "fixVersions"
+  | "due"
+  | "reporter"
+  | "created"
+  | "updated";
+
+const EDITABLE_FIELDS: FieldId[] = [
+  "assignee",
+  "priority",
+  "parent",
+  "points",
+  "labels",
+  "components",
+  "fixVersions",
+  "due",
+];
+
+const ALL_FIELDS: FieldId[] = [
+  "status",
+  "assignee",
+  "reporter",
+  "priority",
+  "parent",
+  "sprint",
+  "points",
+  "labels",
+  "components",
+  "fixVersions",
+  "due",
+  "created",
+  "updated",
+];
+
+const FIELD_LABELS: Record<FieldId, string> = {
+  status: "status",
+  assignee: "assignee",
+  reporter: "reporter",
+  priority: "priority",
+  parent: "parent",
+  sprint: "sprint",
+  points: "points",
+  labels: "labels",
+  components: "components",
+  fixVersions: "fix vers",
+  due: "due",
+  created: "created",
+  updated: "updated",
+};
+
+type Overlay =
+  | { kind: "none" }
+  | { kind: "nvim" }
+  | { kind: "inline-input"; field: string; value: string }
+  | { kind: "pick-assignee"; users: JiraUser[] }
+  | { kind: "pick-priority"; priorities: Priority[] }
+  | { kind: "pick-labels-action" }
+  | { kind: "pick-labels-add"; all: string[] }
+  | { kind: "pick-labels-remove" }
+  | { kind: "pick-components-action" }
+  | { kind: "pick-components-add"; all: ProjectComponent[] }
+  | { kind: "pick-components-remove" }
+  | { kind: "pick-versions-action" }
+  | { kind: "pick-versions-add"; all: ProjectVersion[] }
+  | { kind: "pick-versions-remove" }
+  | { kind: "pick-comment-action"; comment: Comment }
+  | { kind: "search-target" };
+
 export function IssueDetailModal({
+  cfg,
+  projectKey,
   issueKey,
-  detail,
-  error,
   onClose,
-  onEditTitle,
-  onEditDesc,
-  onOpenWeb,
   onMove,
+  onRefresh,
 }: {
+  cfg: JiraConfig;
+  projectKey: string;
   issueKey: string;
-  detail: IssueDetail | null;
-  error: string | null;
   onClose: () => void;
-  onEditTitle: () => void;
-  onEditDesc: () => void;
-  onOpenWeb: () => void;
   onMove: () => void;
+  onRefresh: () => void;
 }) {
   const { cols: termCols, rows: termRows } = useDimensions();
-  const [scroll, setScroll] = useState(0);
 
+  const [detail, setDetail] = useState<IssueDetail | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [flash, setFlash] = useState<{ text: string; tone: "ok" | "err" | "info" } | null>(null);
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [pane, setPane] = useState<Pane>("body");
+  const [bodyScroll, setBodyScroll] = useState(0);
+  const [fieldIdx, setFieldIdx] = useState(0);
+  const [overlay, setOverlay] = useState<Overlay>({ kind: "none" });
+  const [saving, setSaving] = useState(false);
+
+  const [myAccountId, setMyAccountId] = useState<string | null>(null);
+
+  const [searchResults, setSearchResults] = useState<
+    { key: string; summary: string; issueType: string }[]
+  >([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const searchSeq = useRef(0);
+
+  const showFlash = useCallback((text: string, tone: "ok" | "err" | "info" = "info") => {
+    setFlash({ text, tone });
+    if (flashTimer.current) clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => setFlash(null), 3500);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (flashTimer.current) clearTimeout(flashTimer.current);
+    },
+    [],
+  );
+
+  const fetchDetail = useCallback(async () => {
+    try {
+      const d = await getIssueDetail(cfg, issueKey);
+      setDetail(d);
+      setLoadError(null);
+    } catch (e) {
+      setLoadError(errorMessage(e));
+    }
+  }, [cfg, issueKey]);
+
+  useEffect(() => {
+    void fetchDetail();
+  }, [fetchDetail]);
+
+  useEffect(() => {
+    if (myAccountId) return;
+    fetchCurrentUser(cfg)
+      .then((u) => setMyAccountId(u.accountId))
+      .catch(() => {});
+  }, [cfg, myAccountId]);
+
+  const doSave = useCallback(
+    async (fn: () => Promise<void>, successMsg: string) => {
+      setSaving(true);
+      try {
+        await fn();
+        showFlash(successMsg, "ok");
+        await fetchDetail();
+        onRefresh();
+      } catch (e) {
+        showFlash(errorMessage(e), "err");
+      } finally {
+        setSaving(false);
+      }
+    },
+    [fetchDetail, showFlash, onRefresh],
+  );
+
+  // Layout
   const innerHeight = Math.max(10, termRows - 4);
   const innerWidth = Math.max(60, termCols - 4);
   const sideWidth = Math.min(Math.max(26, Math.floor(innerWidth * 0.34)), innerWidth - 30);
@@ -108,23 +275,682 @@ export function IssueDetailModal({
     [detail, mainWidth],
   );
 
+  const commentLineIndices = useMemo(() => {
+    const indices: number[] = [];
+    let lastIdx = -1;
+    for (let i = 0; i < mainLines.length; i++) {
+      const ci = mainLines[i]!.commentIdx;
+      if (ci !== undefined && ci !== lastIdx) {
+        indices.push(i);
+        lastIdx = ci;
+      }
+    }
+    return indices;
+  }, [mainLines]);
+
   const maxScroll = Math.max(0, mainLines.length - bodyHeight);
 
-  useInput((input, key) => {
-    if (key.escape || input === "q" || (key.ctrl && input === "c")) return onClose();
-    if (input === "e") return onEditTitle();
-    if (input === "E") return onEditDesc();
-    if (input === "o") return onOpenWeb();
-    if (input === "m") return onMove();
-    if (key.downArrow || input === "j") setScroll((s) => Math.min(s + 1, maxScroll));
-    else if (key.upArrow || input === "k") setScroll((s) => Math.max(0, s - 1));
-    else if (key.pageDown) setScroll((s) => Math.min(s + 10, maxScroll));
-    else if (key.pageUp) setScroll((s) => Math.max(0, s - 10));
-    else if (input === "g") setScroll(0);
-    else if (input === "G") setScroll(maxScroll);
-  });
+  const focusedCommentIdx = useMemo(() => {
+    if (pane !== "body") return -1;
+    for (let i = 0; i < mainLines.length; i++) {
+      if (i >= bodyScroll && i < bodyScroll + bodyHeight) {
+        const ci = mainLines[i]!.commentIdx;
+        if (ci !== undefined) return ci;
+      }
+    }
+    return -1;
+  }, [pane, bodyScroll, bodyHeight, mainLines]);
 
-  if (error) {
+  const currentField = ALL_FIELDS[fieldIdx];
+  const isEditable = currentField ? EDITABLE_FIELDS.includes(currentField) : false;
+
+  const doEditTitle = useCallback(async () => {
+    if (!detail) return;
+    setOverlay({ kind: "nvim" });
+    try {
+      const raw = await editInNeovim(detail.summary, `${detail.key}-title.md`);
+      const next = (raw.split(/\n/, 1)[0] ?? "").trim();
+      if (!next) {
+        showFlash("summary empty, not saved");
+        setOverlay({ kind: "none" });
+        return;
+      }
+      if (next === detail.summary.trim()) {
+        showFlash("no change");
+        setOverlay({ kind: "none" });
+        return;
+      }
+      setOverlay({ kind: "none" });
+      await doSave(() => updateSummary(cfg, detail.key, next), "title updated");
+    } catch (e) {
+      showFlash(errorMessage(e), "err");
+      setOverlay({ kind: "none" });
+    }
+  }, [detail, cfg, showFlash, doSave]);
+
+  const doEditDesc = useCallback(async () => {
+    if (!detail) return;
+    setOverlay({ kind: "nvim" });
+    try {
+      const raw = await editInNeovim(detail.description, `${detail.key}-desc.md`);
+      if (raw.trim() === detail.description.trim()) {
+        showFlash("no change");
+        setOverlay({ kind: "none" });
+        return;
+      }
+      setOverlay({ kind: "none" });
+      await doSave(() => updateDescription(cfg, detail.key, raw), "description updated");
+    } catch (e) {
+      showFlash(errorMessage(e), "err");
+      setOverlay({ kind: "none" });
+    }
+  }, [detail, cfg, showFlash, doSave]);
+
+  const doAddComment = useCallback(async () => {
+    if (!detail) return;
+    setOverlay({ kind: "nvim" });
+    try {
+      const raw = await editInNeovim("", `${detail.key}-comment.md`);
+      if (!raw.trim()) {
+        showFlash("empty comment, not saved");
+        setOverlay({ kind: "none" });
+        return;
+      }
+      setOverlay({ kind: "none" });
+      await doSave(() => addComment(cfg, detail.key, raw), "comment added");
+    } catch (e) {
+      showFlash(errorMessage(e), "err");
+      setOverlay({ kind: "none" });
+    }
+  }, [detail, cfg, showFlash, doSave]);
+
+  const doEditComment = useCallback(
+    async (comment: Comment) => {
+      if (!detail) return;
+      setOverlay({ kind: "nvim" });
+      try {
+        const raw = await editInNeovim(comment.body, `${detail.key}-comment-${comment.id}.md`);
+        if (raw.trim() === comment.body.trim()) {
+          showFlash("no change");
+          setOverlay({ kind: "none" });
+          return;
+        }
+        setOverlay({ kind: "none" });
+        await doSave(() => updateComment(cfg, detail.key, comment.id, raw), "comment updated");
+      } catch (e) {
+        showFlash(errorMessage(e), "err");
+        setOverlay({ kind: "none" });
+      }
+    },
+    [detail, cfg, showFlash, doSave],
+  );
+
+  const openFieldEditor = useCallback(async () => {
+    if (!detail || !currentField || !isEditable) return;
+
+    if (currentField === "assignee") {
+      try {
+        const users = await getAssignableUsers(cfg, projectKey);
+        setOverlay({ kind: "pick-assignee", users });
+      } catch (e) {
+        showFlash(errorMessage(e), "err");
+      }
+    } else if (currentField === "priority") {
+      try {
+        const priorities = await getPriorities(cfg);
+        setOverlay({ kind: "pick-priority", priorities });
+      } catch (e) {
+        showFlash(errorMessage(e), "err");
+      }
+    } else if (currentField === "parent") {
+      setOverlay({ kind: "search-target" });
+    } else if (currentField === "points") {
+      setOverlay({
+        kind: "inline-input",
+        field: "points",
+        value: detail.storyPoints !== undefined ? String(detail.storyPoints) : "",
+      });
+    } else if (currentField === "due") {
+      setOverlay({
+        kind: "inline-input",
+        field: "due",
+        value: detail.dueDate ?? "",
+      });
+    } else if (currentField === "labels") {
+      setOverlay({ kind: "pick-labels-action" });
+    } else if (currentField === "components") {
+      setOverlay({ kind: "pick-components-action" });
+    } else if (currentField === "fixVersions") {
+      setOverlay({ kind: "pick-versions-action" });
+    }
+  }, [detail, currentField, isEditable, cfg, projectKey, showFlash]);
+
+  const clearField = useCallback(async () => {
+    if (!detail || !currentField || !isEditable) return;
+    if (currentField === "assignee") {
+      await doSave(() => updateIssueField(cfg, detail.key, { assignee: null }), "assignee cleared");
+    } else if (currentField === "priority") {
+      showFlash("priority cannot be cleared");
+    } else if (currentField === "parent") {
+      await doSave(() => updateIssueField(cfg, detail.key, { parent: null }), "parent cleared");
+    } else if (currentField === "points") {
+      await doSave(
+        () => updateIssueField(cfg, detail.key, { [CF_STORY_POINTS]: null }),
+        "points cleared",
+      );
+    } else if (currentField === "due") {
+      await doSave(() => updateIssueField(cfg, detail.key, { duedate: null }), "due date cleared");
+    } else if (currentField === "labels") {
+      if (detail.labels.length === 0) {
+        showFlash("no labels to clear");
+        return;
+      }
+      await doSave(() => updateIssueField(cfg, detail.key, { labels: [] }), "labels cleared");
+    } else if (currentField === "components") {
+      if (detail.components.length === 0) {
+        showFlash("no components to clear");
+        return;
+      }
+      await doSave(
+        () => updateIssueField(cfg, detail.key, { components: [] }),
+        "components cleared",
+      );
+    } else if (currentField === "fixVersions") {
+      if (detail.fixVersions.length === 0) {
+        showFlash("no fix versions to clear");
+        return;
+      }
+      await doSave(
+        () => updateIssueField(cfg, detail.key, { fixVersions: [] }),
+        "fix versions cleared",
+      );
+    }
+  }, [detail, currentField, isEditable, cfg, doSave, showFlash]);
+
+  // Main input handler
+  useInput(
+    (input, key) => {
+      if (key.escape || input === "q" || (key.ctrl && input === "c")) return onClose();
+      if (input === "e") return void doEditTitle();
+      if (input === "E") return void doEditDesc();
+      if (input === "o") {
+        openInBrowser(`${cfg.server}/browse/${issueKey}`)
+          .then(() => showFlash(`opened ${issueKey}`, "ok"))
+          .catch((e) => showFlash(errorMessage(e), "err"));
+        return;
+      }
+      if (input === "m") return onMove();
+      if (input === "c") return void doAddComment();
+      if (key.tab) {
+        setPane((p) => (p === "body" ? "fields" : "body"));
+        return;
+      }
+
+      if (pane === "body") {
+        if (key.downArrow || input === "j") setBodyScroll((s) => Math.min(s + 1, maxScroll));
+        else if (key.upArrow || input === "k") setBodyScroll((s) => Math.max(0, s - 1));
+        else if (key.pageDown) setBodyScroll((s) => Math.min(s + bodyHeight, maxScroll));
+        else if (key.pageUp) setBodyScroll((s) => Math.max(0, s - bodyHeight));
+        else if (input === "g") setBodyScroll(0);
+        else if (input === "G") setBodyScroll(maxScroll);
+        else if (input === "]") {
+          const next = commentLineIndices.find((i) => i > bodyScroll);
+          if (next !== undefined) setBodyScroll(Math.min(next, maxScroll));
+        } else if (input === "[") {
+          const prev = commentLineIndices.toReversed().find((i) => i < bodyScroll);
+          if (prev !== undefined) setBodyScroll(prev);
+        } else if (key.return && detail) {
+          const ci = focusedCommentIdx;
+          if (ci >= 0 && ci < detail.comments.length) {
+            const comment = detail.comments[ci]!;
+            const isMine = myAccountId ? comment.authorAccountId === myAccountId : false;
+            if (isMine) {
+              setOverlay({ kind: "pick-comment-action", comment });
+            } else {
+              showFlash(`${comment.author}'s comment — not editable`);
+            }
+          }
+        }
+      } else {
+        if (key.downArrow || input === "j")
+          setFieldIdx((i) => clamp(i + 1, 0, ALL_FIELDS.length - 1));
+        else if (key.upArrow || input === "k")
+          setFieldIdx((i) => clamp(i - 1, 0, ALL_FIELDS.length - 1));
+        else if (input === "g") setFieldIdx(0);
+        else if (input === "G") setFieldIdx(ALL_FIELDS.length - 1);
+        else if (key.return) void openFieldEditor();
+        else if (input === "x" || (key.ctrl && input === "x")) void clearField();
+      }
+    },
+    { isActive: overlay.kind === "none" && !saving },
+  );
+
+  // Overlays
+  if (overlay.kind === "nvim") {
+    return (
+      <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.accent}>
+        <Text color={theme.accent} bold>
+          editing in Neovim
+        </Text>
+        <Box marginTop={1}>
+          <Text color={theme.muted}>save & quit to return</Text>
+        </Box>
+      </Box>
+    );
+  }
+
+  if (overlay.kind === "inline-input") {
+    return (
+      <InlineFieldInput
+        field={overlay.field}
+        initial={overlay.value}
+        onCancel={() => setOverlay({ kind: "none" })}
+        onSubmit={async (val) => {
+          setOverlay({ kind: "none" });
+          if (!detail) return;
+          if (overlay.field === "points") {
+            const n = val.trim() === "" ? null : Number(val);
+            if (n !== null && Number.isNaN(n)) {
+              showFlash("invalid number");
+              return;
+            }
+            await doSave(
+              () => updateIssueField(cfg, detail.key, { [CF_STORY_POINTS]: n }),
+              n === null ? "points cleared" : "points updated",
+            );
+          } else if (overlay.field === "due") {
+            const v = val.trim() || null;
+            if (v && !/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+              showFlash("use YYYY-MM-DD format");
+              return;
+            }
+            await doSave(
+              () => updateIssueField(cfg, detail.key, { duedate: v }),
+              v ? "due date updated" : "due date cleared",
+            );
+          }
+        }}
+      />
+    );
+  }
+
+  if (overlay.kind === "pick-assignee") {
+    const items = [
+      { id: "__unassign__", label: "(Unassigned)" },
+      ...overlay.users.map((u) => ({ id: u.accountId, label: u.displayName })),
+    ];
+    const currentId = detail
+      ? overlay.users.find((u) => u.displayName === detail.assignee)?.accountId
+      : undefined;
+    return (
+      <FilterPicker
+        title="assignee"
+        items={items}
+        {...(currentId ? { currentId } : {})}
+        onPick={async (id) => {
+          setOverlay({ kind: "none" });
+          if (!detail) return;
+          const value = id === "__unassign__" ? null : { accountId: id };
+          await doSave(
+            () => updateIssueField(cfg, detail.key, { assignee: value }),
+            id === "__unassign__" ? "assignee cleared" : "assignee updated",
+          );
+        }}
+        onClear={() => {
+          setOverlay({ kind: "none" });
+          if (!detail) return;
+          void doSave(
+            () => updateIssueField(cfg, detail.key, { assignee: null }),
+            "assignee cleared",
+          );
+        }}
+        onCancel={() => setOverlay({ kind: "none" })}
+      />
+    );
+  }
+
+  if (overlay.kind === "pick-priority") {
+    const currentId = detail
+      ? overlay.priorities.find((p) => p.name === detail.priority)?.id
+      : undefined;
+    return (
+      <FilterPicker
+        title="priority"
+        items={overlay.priorities.map((p) => ({ id: p.id, label: p.name }))}
+        {...(currentId ? { currentId } : {})}
+        onPick={async (id) => {
+          setOverlay({ kind: "none" });
+          if (!detail) return;
+          await doSave(
+            () => updateIssueField(cfg, detail.key, { priority: { id } }),
+            "priority updated",
+          );
+        }}
+        onCancel={() => setOverlay({ kind: "none" })}
+      />
+    );
+  }
+
+  if (overlay.kind === "search-target") {
+    return (
+      <FilterPicker
+        title="parent issue"
+        items={searchResults.map((r) => ({
+          id: r.key,
+          label: `${r.key}  ${truncate(r.summary, 80)}`,
+          hint: r.issueType,
+        }))}
+        loading={searchLoading}
+        placeholder="type summary or issue key…"
+        onQueryChange={(q) => {
+          const seq = ++searchSeq.current;
+          setSearchLoading(true);
+          (async () => {
+            try {
+              const r = await searchIssues(cfg, projectKey, q);
+              if (seq === searchSeq.current) setSearchResults(r);
+            } catch {
+              if (seq === searchSeq.current) setSearchResults([]);
+            } finally {
+              if (seq === searchSeq.current) setSearchLoading(false);
+            }
+          })();
+        }}
+        onPick={async (id) => {
+          setOverlay({ kind: "none" });
+          if (!detail) return;
+          await doSave(
+            () => updateIssueField(cfg, detail.key, { parent: { key: id } }),
+            `parent set to ${id}`,
+          );
+        }}
+        onClear={() => {
+          setOverlay({ kind: "none" });
+          if (!detail) return;
+          void doSave(() => updateIssueField(cfg, detail.key, { parent: null }), "parent cleared");
+        }}
+        onCancel={() => setOverlay({ kind: "none" })}
+      />
+    );
+  }
+
+  if (overlay.kind === "pick-labels-action") {
+    return (
+      <ListPicker
+        title="labels"
+        items={[
+          { id: "add", label: "add label" },
+          ...(detail && detail.labels.length > 0 ? [{ id: "remove", label: "remove label" }] : []),
+          ...(detail && detail.labels.length > 0 ? [{ id: "clear", label: "clear all" }] : []),
+        ]}
+        onPick={async (id) => {
+          if (id === "add") {
+            try {
+              const all = await getLabels(cfg);
+              setOverlay({ kind: "pick-labels-add", all });
+            } catch (e) {
+              showFlash(errorMessage(e), "err");
+              setOverlay({ kind: "none" });
+            }
+          } else if (id === "remove") {
+            setOverlay({ kind: "pick-labels-remove" });
+          } else if (id === "clear") {
+            setOverlay({ kind: "none" });
+            if (detail) {
+              await doSave(
+                () => updateIssueField(cfg, detail.key, { labels: [] }),
+                "labels cleared",
+              );
+            }
+          }
+        }}
+        onCancel={() => setOverlay({ kind: "none" })}
+      />
+    );
+  }
+
+  if (overlay.kind === "pick-labels-add") {
+    const existing = new Set(detail?.labels ?? []);
+    const available = overlay.all.filter((l) => !existing.has(l));
+    return (
+      <FilterPicker
+        title="add label"
+        items={available.map((l) => ({ id: l, label: l }))}
+        onPick={async (id) => {
+          setOverlay({ kind: "none" });
+          if (!detail) return;
+          await doSave(
+            () => updateIssueField(cfg, detail.key, { labels: [...detail.labels, id] }),
+            `label "${id}" added`,
+          );
+        }}
+        onCancel={() => setOverlay({ kind: "none" })}
+      />
+    );
+  }
+
+  if (overlay.kind === "pick-labels-remove") {
+    return (
+      <FilterPicker
+        title="remove label"
+        items={(detail?.labels ?? []).map((l) => ({ id: l, label: l }))}
+        onPick={async (id) => {
+          setOverlay({ kind: "none" });
+          if (!detail) return;
+          await doSave(
+            () =>
+              updateIssueField(cfg, detail.key, {
+                labels: detail.labels.filter((l) => l !== id),
+              }),
+            `label "${id}" removed`,
+          );
+        }}
+        onCancel={() => setOverlay({ kind: "none" })}
+      />
+    );
+  }
+
+  if (overlay.kind === "pick-components-action") {
+    return (
+      <ListPicker
+        title="components"
+        items={[
+          { id: "add", label: "add component" },
+          ...(detail && detail.components.length > 0
+            ? [{ id: "remove", label: "remove component" }]
+            : []),
+          ...(detail && detail.components.length > 0 ? [{ id: "clear", label: "clear all" }] : []),
+        ]}
+        onPick={async (id) => {
+          if (id === "add") {
+            try {
+              const all = await getProjectComponents(cfg, projectKey);
+              setOverlay({ kind: "pick-components-add", all });
+            } catch (e) {
+              showFlash(errorMessage(e), "err");
+              setOverlay({ kind: "none" });
+            }
+          } else if (id === "remove") {
+            setOverlay({ kind: "pick-components-remove" });
+          } else if (id === "clear") {
+            setOverlay({ kind: "none" });
+            if (detail) {
+              await doSave(
+                () => updateIssueField(cfg, detail.key, { components: [] }),
+                "components cleared",
+              );
+            }
+          }
+        }}
+        onCancel={() => setOverlay({ kind: "none" })}
+      />
+    );
+  }
+
+  if (overlay.kind === "pick-components-add") {
+    const existing = new Set(detail?.components ?? []);
+    const available = overlay.all.filter((c) => !existing.has(c.name));
+    return (
+      <FilterPicker
+        title="add component"
+        items={available.map((c) => ({ id: c.id, label: c.name }))}
+        onPick={async (id) => {
+          setOverlay({ kind: "none" });
+          if (!detail) return;
+          const comp = overlay.all.find((c) => c.id === id);
+          if (!comp) return;
+          await doSave(
+            () =>
+              updateIssueField(cfg, detail.key, {
+                components: [
+                  ...detail.components.map((n) => {
+                    const found = overlay.all.find((c) => c.name === n);
+                    return found ? { id: found.id } : { name: n };
+                  }),
+                  { id: comp.id },
+                ],
+              }),
+            `component "${comp.name}" added`,
+          );
+        }}
+        onCancel={() => setOverlay({ kind: "none" })}
+      />
+    );
+  }
+
+  if (overlay.kind === "pick-components-remove") {
+    return (
+      <FilterPicker
+        title="remove component"
+        items={(detail?.components ?? []).map((c) => ({ id: c, label: c }))}
+        onPick={async (id) => {
+          setOverlay({ kind: "none" });
+          if (!detail) return;
+          await doSave(
+            () =>
+              updateIssueField(cfg, detail.key, {
+                components: detail.components.filter((c) => c !== id).map((c) => ({ name: c })),
+              }),
+            `component "${id}" removed`,
+          );
+        }}
+        onCancel={() => setOverlay({ kind: "none" })}
+      />
+    );
+  }
+
+  if (overlay.kind === "pick-versions-action") {
+    return (
+      <ListPicker
+        title="fix versions"
+        items={[
+          { id: "add", label: "add version" },
+          ...(detail && detail.fixVersions.length > 0
+            ? [{ id: "remove", label: "remove version" }]
+            : []),
+          ...(detail && detail.fixVersions.length > 0 ? [{ id: "clear", label: "clear all" }] : []),
+        ]}
+        onPick={async (id) => {
+          if (id === "add") {
+            try {
+              const all = await getProjectVersions(cfg, projectKey);
+              setOverlay({ kind: "pick-versions-add", all });
+            } catch (e) {
+              showFlash(errorMessage(e), "err");
+              setOverlay({ kind: "none" });
+            }
+          } else if (id === "remove") {
+            setOverlay({ kind: "pick-versions-remove" });
+          } else if (id === "clear") {
+            setOverlay({ kind: "none" });
+            if (detail) {
+              await doSave(
+                () => updateIssueField(cfg, detail.key, { fixVersions: [] }),
+                "fix versions cleared",
+              );
+            }
+          }
+        }}
+        onCancel={() => setOverlay({ kind: "none" })}
+      />
+    );
+  }
+
+  if (overlay.kind === "pick-versions-add") {
+    const existing = new Set(detail?.fixVersions ?? []);
+    const available = overlay.all.filter((v) => !existing.has(v.name));
+    return (
+      <FilterPicker
+        title="add version"
+        items={available.map((v) => ({
+          id: v.id,
+          label: v.name,
+          hint: v.released ? "released" : undefined,
+        }))}
+        onPick={async (id) => {
+          setOverlay({ kind: "none" });
+          if (!detail) return;
+          const ver = overlay.all.find((v) => v.id === id);
+          if (!ver) return;
+          await doSave(
+            () =>
+              updateIssueField(cfg, detail.key, {
+                fixVersions: [
+                  ...detail.fixVersions.map((n) => {
+                    const found = overlay.all.find((v) => v.name === n);
+                    return found ? { id: found.id } : { name: n };
+                  }),
+                  { id: ver.id },
+                ],
+              }),
+            `version "${ver.name}" added`,
+          );
+        }}
+        onCancel={() => setOverlay({ kind: "none" })}
+      />
+    );
+  }
+
+  if (overlay.kind === "pick-versions-remove") {
+    return (
+      <FilterPicker
+        title="remove version"
+        items={(detail?.fixVersions ?? []).map((v) => ({ id: v, label: v }))}
+        onPick={async (id) => {
+          setOverlay({ kind: "none" });
+          if (!detail) return;
+          await doSave(
+            () =>
+              updateIssueField(cfg, detail.key, {
+                fixVersions: detail.fixVersions.filter((v) => v !== id).map((v) => ({ name: v })),
+              }),
+            `version "${id}" removed`,
+          );
+        }}
+        onCancel={() => setOverlay({ kind: "none" })}
+      />
+    );
+  }
+
+  if (overlay.kind === "pick-comment-action") {
+    const comment = overlay.comment;
+    return (
+      <ListPicker
+        title={`${comment.author} · ${formatShortDate(comment.created)}`}
+        items={[{ id: "edit", label: "edit comment (Neovim)" }]}
+        onPick={(id) => {
+          if (id === "edit") {
+            setOverlay({ kind: "none" });
+            void doEditComment(comment);
+          }
+        }}
+        onCancel={() => setOverlay({ kind: "none" })}
+      />
+    );
+  }
+
+  // Error state
+  if (loadError) {
     return (
       <Box
         flexDirection="column"
@@ -138,7 +964,7 @@ export function IssueDetailModal({
           failed to load {issueKey}
         </Text>
         <Box marginTop={1}>
-          <Text color={theme.fg}>{error}</Text>
+          <Text color={theme.fg}>{loadError}</Text>
         </Box>
         <Box marginTop={1}>
           <Text color={theme.muted}>esc / q close</Text>
@@ -147,6 +973,7 @@ export function IssueDetailModal({
     );
   }
 
+  // Loading state
   if (!detail) {
     return (
       <Box
@@ -163,7 +990,7 @@ export function IssueDetailModal({
   }
 
   const typeColor = typeColors[detail.issueType] ?? theme.fg;
-  const clampedScroll = Math.min(scroll, maxScroll);
+  const clampedScroll = Math.min(bodyScroll, maxScroll);
   const visibleMain = mainLines.slice(clampedScroll, clampedScroll + bodyHeight);
 
   return (
@@ -188,6 +1015,7 @@ export function IssueDetailModal({
             <Text color={theme.violet}>{detail.parentKey}</Text>
           </>
         ) : null}
+        {saving ? <Text color={theme.warn}> ◴ saving…</Text> : null}
       </Box>
       <Box paddingX={1}>
         <Text color={theme.fg} bold>
@@ -198,19 +1026,28 @@ export function IssueDetailModal({
         <Text color={theme.accentDim}>{"─".repeat(Math.max(0, innerWidth))}</Text>
       </Box>
 
-      {/* Body: main + side (side panel uses borderLeft as the divider) */}
+      {/* Body: main + side */}
       <Box flexDirection="row" flexGrow={1}>
         <Box flexDirection="column" width={mainWidth} paddingX={1}>
-          {visibleMain.map((ln, i) => (
-            <Text
-              key={`${clampedScroll + i}`}
-              color={ln.color}
-              bold={ln.bold ?? false}
-              wrap="truncate"
-            >
-              {ln.text || " "}
-            </Text>
-          ))}
+          {visibleMain.map((ln, i) => {
+            const lineCommentIdx = ln.commentIdx;
+            const isCommentHeader =
+              lineCommentIdx !== undefined &&
+              ln.bold &&
+              pane === "body" &&
+              lineCommentIdx === focusedCommentIdx;
+            return (
+              <Text
+                key={`${clampedScroll + i}`}
+                color={ln.color}
+                bold={ln.bold ?? false}
+                wrap="truncate"
+                {...bg(isCommentHeader ? theme.accentDim : undefined)}
+              >
+                {ln.text || " "}
+              </Text>
+            );
+          })}
         </Box>
 
         <Box
@@ -222,38 +1059,18 @@ export function IssueDetailModal({
           borderBottom={false}
           borderRight={false}
           borderStyle="single"
-          borderColor={theme.accentDim}
+          borderColor={pane === "fields" ? theme.accent : theme.accentDim}
         >
-          <DetailField label="status" value={detail.statusName} color={theme.ok} />
-          <DetailField label="assignee" value={detail.assignee ?? "Unassigned"} />
-          <DetailField label="reporter" value={detail.reporter ?? "—"} />
-          <DetailField label="priority" value={detail.priority ?? "—"} />
-          <DetailField
-            label="parent"
-            value={detail.parentKey ?? detail.epicKey ?? "—"}
-            color={theme.violet}
-          />
-          <DetailField label="sprint" value={detail.sprint ?? "—"} />
-          <DetailField
-            label="points"
-            value={detail.storyPoints !== undefined ? String(detail.storyPoints) : "—"}
-          />
-          <DetailField
-            label="labels"
-            value={detail.labels.length === 0 ? "—" : detail.labels.join(", ")}
-            color={theme.cyan}
-          />
-          <DetailField
-            label="components"
-            value={detail.components.length === 0 ? "—" : detail.components.join(", ")}
-          />
-          <DetailField
-            label="fix vers"
-            value={detail.fixVersions.length === 0 ? "—" : detail.fixVersions.join(", ")}
-          />
-          <DetailField label="due" value={detail.dueDate ?? "—"} color={theme.warn} />
-          <DetailField label="created" value={formatShortDate(detail.created)} />
-          <DetailField label="updated" value={formatShortDate(detail.updated)} />
+          {ALL_FIELDS.map((f, i) => (
+            <SideField
+              key={f}
+              field={f}
+              detail={detail}
+              focused={pane === "fields" && i === fieldIdx}
+              editable={EDITABLE_FIELDS.includes(f)}
+              sideWidth={sideWidth - 3}
+            />
+          ))}
         </Box>
       </Box>
 
@@ -262,31 +1079,136 @@ export function IssueDetailModal({
         <Text color={theme.accentDim}>{"─".repeat(Math.max(0, innerWidth))}</Text>
       </Box>
       <Box paddingX={1} justifyContent="space-between">
-        <Box>
+        <Box flexWrap="wrap">
+          <Hint k="tab" label="pane" />
           <Hint k="↑↓" label="scroll" />
-          <Hint k="g G" label="top / end" />
-          <Hint k="e" label="title" />
-          <Hint k="E" label="desc" />
+          {pane === "body" ? (
+            <>
+              <Hint k="[ ]" label="comment" />
+              <Hint k="c" label="add comment" />
+            </>
+          ) : (
+            <>
+              <Hint k="⏎" label="edit" />
+              <Hint k="x" label="clear" />
+            </>
+          )}
+          <Hint k="e E" label="title/desc" />
           <Hint k="m" label="move" />
-          <Hint k="o" label="web" />
           <Hint k="esc" label="close" />
         </Box>
-        <Text color={theme.muted}>
-          {clampedScroll + 1}-{Math.min(clampedScroll + bodyHeight, mainLines.length)} /{" "}
-          {mainLines.length}
-        </Text>
+        {flash ? (
+          <Text
+            color={flash.tone === "ok" ? theme.ok : flash.tone === "err" ? theme.err : theme.cyan}
+          >
+            ● {truncate(flash.text, 28)}
+          </Text>
+        ) : (
+          <Text color={theme.muted}>
+            {clampedScroll + 1}-{Math.min(clampedScroll + bodyHeight, mainLines.length)} /{" "}
+            {mainLines.length}
+          </Text>
+        )}
       </Box>
     </Box>
   );
 }
 
-function DetailField({ label, value, color }: { label: string; value: string; color?: string }) {
+function SideField({
+  field,
+  detail,
+  focused,
+  editable,
+  sideWidth,
+}: {
+  field: FieldId;
+  detail: IssueDetail;
+  focused: boolean;
+  editable: boolean;
+  sideWidth: number;
+}) {
+  const value = fieldDisplayValue(field, detail);
+  const color = fieldColor(field, detail);
+  const pointer = focused ? "▶" : " ";
+  const pointerColor = focused ? theme.accent : theme.muted;
+  const valueMax = Math.max(4, sideWidth - DETAIL_LABEL_WIDTH - 2);
   return (
     <Box>
-      <Text color={theme.muted}>{label.padEnd(DETAIL_LABEL_WIDTH)} </Text>
-      <Text color={color ?? theme.fg} wrap="truncate">
-        {value}
+      <Text color={pointerColor}>{pointer}</Text>
+      <Text color={focused ? theme.accent : theme.muted}>
+        {FIELD_LABELS[field].padEnd(DETAIL_LABEL_WIDTH)}
       </Text>
+      <Text
+        color={focused ? theme.fg : color}
+        bold={focused}
+        wrap="truncate"
+        {...bg(focused ? theme.accentDim : undefined)}
+      >
+        {truncate(value, valueMax)}
+      </Text>
+      {focused && editable ? <Text color={theme.muted}> ⏎</Text> : null}
+    </Box>
+  );
+}
+
+function fieldDisplayValue(field: FieldId, d: IssueDetail): string {
+  if (field === "status") return d.statusName;
+  if (field === "assignee") return d.assignee ?? "Unassigned";
+  if (field === "reporter") return d.reporter ?? "—";
+  if (field === "priority") return d.priority ?? "—";
+  if (field === "parent") return d.parentKey ?? d.epicKey ?? "—";
+  if (field === "sprint") return d.sprint ?? "—";
+  if (field === "points") return d.storyPoints !== undefined ? String(d.storyPoints) : "—";
+  if (field === "labels") return d.labels.length === 0 ? "—" : d.labels.join(", ");
+  if (field === "components") return d.components.length === 0 ? "—" : d.components.join(", ");
+  if (field === "fixVersions") return d.fixVersions.length === 0 ? "—" : d.fixVersions.join(", ");
+  if (field === "due") return d.dueDate ?? "—";
+  if (field === "created") return formatShortDate(d.created);
+  if (field === "updated") return formatShortDate(d.updated);
+  return "—";
+}
+
+function fieldColor(field: FieldId, _d: IssueDetail): string {
+  if (field === "status") return theme.ok;
+  if (field === "parent") return theme.violet;
+  if (field === "labels") return theme.cyan;
+  if (field === "due") return theme.warn;
+  return theme.fg;
+}
+
+function InlineFieldInput({
+  field,
+  initial,
+  onCancel,
+  onSubmit,
+}: {
+  field: string;
+  initial: string;
+  onCancel: () => void;
+  onSubmit: (value: string) => void;
+}) {
+  const [value, setValue] = useState(initial);
+  const hint =
+    field === "points" ? "enter a number (empty to clear)" : "YYYY-MM-DD (empty to clear)";
+  return (
+    <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.accent}>
+      <Text color={theme.accent} bold>
+        {field}
+      </Text>
+      <Box marginTop={1}>
+        <Text color={theme.muted}>› </Text>
+        <TextInput
+          value={value}
+          placeholder={hint}
+          onChange={setValue}
+          onSubmit={() => onSubmit(value)}
+          onCancel={onCancel}
+        />
+      </Box>
+      <Box marginTop={1}>
+        <Hint k="⏎" label="save" />
+        <Hint k="esc" label="cancel" />
+      </Box>
     </Box>
   );
 }
