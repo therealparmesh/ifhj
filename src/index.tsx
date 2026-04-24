@@ -53,6 +53,11 @@ function App() {
   return <BoardView cfg={cfg} board={board} onExit={() => setBoard(null)} />;
 }
 
-process.stdout.write("\x1b[?1049h\x1b[H\x1b[2J");
+// Alt screen + paint the brand before Ink mounts so there's no blank flash.
+process.stdout.write(
+  "\x1b[?1049h\x1b[H\x1b[2J" +
+    `\x1b[1m\x1b[38;2;255;126;219m ifhj\x1b[0m\n` +
+    `\x1b[38;2;54;249;246m ◴ \x1b[38;2;132;139;189mloading…\x1b[0m\n`,
+);
 const inst = render(<App />);
 inst.waitUntilExit().then(() => process.stdout.write("\x1b[?1049l"));
