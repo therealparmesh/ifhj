@@ -30,16 +30,15 @@ import { clamp, copyToClipboard, errorMessage, openInBrowser, theme, truncate } 
 import { BoardHeader } from "./BoardHeader";
 import { CreateWizard } from "./CreateWizard";
 import { FilterPicker } from "./FilterPicker";
-import { type FlashStatus, Footer, type Tone } from "./Footer";
+import { Footer } from "./Footer";
 import { HelpModal } from "./HelpModal";
 import { Hint } from "./Hint";
 import { IssueDetailModal } from "./IssueDetailModal";
 import { type Column, ColumnView, PagingArrow } from "./Kanban";
 import { ListPicker } from "./ListPicker";
 import { TextInput } from "./TextInput";
+import { ToastStack, useToasts } from "./Toasts";
 
-// How long a toast message lingers in the footer before auto-clearing.
-const FLASH_TTL_MS = 3500;
 const MAX_VISIBLE_COLS = 4;
 
 type Board = { id: number; name: string };
@@ -119,8 +118,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
   const [scrolls, setScrolls] = useState<number[]>([]);
 
   // UI state
-  const [status, setStatus] = useState<FlashStatus | null>(null);
-  const statusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { toasts, flash } = useToasts();
   const [query, setQuery] = useState("");
   const [matchIdx, setMatchIdx] = useState(0);
   const [modal, setModal] = useState<Modal>({ kind: "none" });
@@ -142,20 +140,6 @@ export function BoardView({ cfg, board, onExit }: Props) {
     });
   }, []);
   const closeModal = useCallback(() => setModal({ kind: "none" }), []);
-
-  const flash = useCallback((text: string, tone: Tone = "info") => {
-    setStatus({ text, tone });
-    if (statusTimer.current) clearTimeout(statusTimer.current);
-    statusTimer.current = setTimeout(() => setStatus(null), FLASH_TTL_MS);
-  }, []);
-
-  // Kill the flash timer on unmount — otherwise it fires on a dead component.
-  useEffect(
-    () => () => {
-      if (statusTimer.current) clearTimeout(statusTimer.current);
-    },
-    [],
-  );
 
   const filteredIssues = useMemo(() => {
     let list = issues;
@@ -300,7 +284,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
    * Layout math. The grid fits `MAX_VISIBLE_COLS` columns; everything beyond
    * that requires ←/→ paging.
    */
-  const footerRows = modal.kind === "search" ? 6 : status ? 5 : 4;
+  const footerRows = modal.kind === "search" ? 5 : 3;
   const columnHeight = Math.max(6, termRows - 2 - footerRows);
   const columnInnerHeight = columnHeight - 2; // minus border top/bottom
   const perCardLines = 5; // card = 3 content + 1 spacer + 1 (border-ish) handled via marginBottom
@@ -1164,7 +1148,6 @@ export function BoardView({ cfg, board, onExit }: Props) {
       <Footer
         currentIssue={currentIssue}
         termCols={termCols}
-        status={status}
         mode={modal.kind === "search" ? "search" : "normal"}
         query={query}
         matches={matches.length}
@@ -1177,14 +1160,10 @@ export function BoardView({ cfg, board, onExit }: Props) {
           closeModal();
         }}
         onSearchCancel={() => {
-          /**
-           * Escape closes the search bar but keeps the committed query — the
-           * user may have hit `/` just to peek. Use ⌃u inside the buffer
-           * to actually clear it.
-           */
           closeModal();
         }}
       />
+      <ToastStack toasts={toasts} maxWidth={termCols} />
     </Box>
   );
 }

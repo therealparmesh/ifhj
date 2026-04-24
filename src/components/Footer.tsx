@@ -5,19 +5,9 @@ import { theme, truncate, typeColors } from "../ui";
 import { Hint } from "./Hint";
 import { TextInput } from "./TextInput";
 
-export type Tone = "ok" | "err" | "info";
-export type FlashStatus = { text: string; tone: Tone };
-
-function statusColor(tone: Tone): string {
-  if (tone === "ok") return theme.ok;
-  if (tone === "err") return theme.err;
-  return theme.cyan;
-}
-
 type FooterProps = {
   currentIssue: Issue | null;
   termCols: number;
-  status: FlashStatus | null;
   mode: "normal" | "search";
   query: string;
   matches: number;
@@ -32,7 +22,6 @@ type FooterProps = {
 export function Footer({
   currentIssue,
   termCols,
-  status,
   mode,
   query,
   matches,
@@ -95,10 +84,6 @@ export function Footer({
           </Box>
         </Box>
       ) : (
-        /**
-         * Compact hint strip — high-traffic keys only, `?` opens the full
-         * reference. Conditional hints surface only when actionable.
-         */
         <Box flexWrap="wrap">
           <Hint k="↑↓←→/hjkl" label="nav" />
           <Hint k="⏎" label="actions" />
@@ -124,12 +109,6 @@ export function Footer({
           <Hint k="q" label="quit" />
         </Box>
       )}
-
-      {status ? (
-        <Box>
-          <Text color={statusColor(status.tone)}>● {status.text}</Text>
-        </Box>
-      ) : null}
     </Box>
   );
 }

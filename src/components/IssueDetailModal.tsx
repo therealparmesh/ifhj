@@ -42,6 +42,7 @@ import { FilterPicker } from "./FilterPicker";
 import { Hint } from "./Hint";
 import { ListPicker } from "./ListPicker";
 import { TextInput } from "./TextInput";
+import { ToastStack, useToasts } from "./Toasts";
 
 const DETAIL_LABEL_WIDTH = 11;
 const CF_STORY_POINTS = "customfield_10016";
@@ -211,8 +212,7 @@ export function IssueDetailModal({
 
   const [detail, setDetail] = useState<IssueDetail | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [flash, setFlash] = useState<{ text: string; tone: "ok" | "err" | "info" } | null>(null);
-  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { toasts, flash: showFlash } = useToasts();
 
   const [pane, setPane] = useState<Pane>("body");
   const [bodyScroll, setBodyScroll] = useState(0);
@@ -227,19 +227,6 @@ export function IssueDetailModal({
   >([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const searchSeq = useRef(0);
-
-  const showFlash = useCallback((text: string, tone: "ok" | "err" | "info" = "info") => {
-    setFlash({ text, tone });
-    if (flashTimer.current) clearTimeout(flashTimer.current);
-    flashTimer.current = setTimeout(() => setFlash(null), 3500);
-  }, []);
-
-  useEffect(
-    () => () => {
-      if (flashTimer.current) clearTimeout(flashTimer.current);
-    },
-    [],
-  );
 
   const fetchDetail = useCallback(async () => {
     try {
@@ -1131,19 +1118,12 @@ export function IssueDetailModal({
           <Hint k="y" label="yank" />
           <Hint k="esc" label="close" />
         </Box>
-        {flash ? (
-          <Text
-            color={flash.tone === "ok" ? theme.ok : flash.tone === "err" ? theme.err : theme.cyan}
-          >
-            ● {truncate(flash.text, 28)}
-          </Text>
-        ) : (
-          <Text color={theme.muted}>
-            {clampedScroll + 1}-{Math.min(clampedScroll + bodyHeight, mainLines.length)} /{" "}
-            {mainLines.length}
-          </Text>
-        )}
+        <Text color={theme.muted}>
+          {clampedScroll + 1}-{Math.min(clampedScroll + bodyHeight, mainLines.length)} /{" "}
+          {mainLines.length}
+        </Text>
       </Box>
+      <ToastStack toasts={toasts} maxWidth={innerWidth} />
     </Box>
   );
 }
