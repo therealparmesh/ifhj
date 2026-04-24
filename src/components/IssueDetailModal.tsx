@@ -182,6 +182,7 @@ export function IssueDetailModal({
   issueKey,
   onClose,
   onMove,
+  onTransition,
   onRefresh,
 }: {
   cfg: JiraConfig;
@@ -189,6 +190,7 @@ export function IssueDetailModal({
   issueKey: string;
   onClose: () => void;
   onMove: () => void;
+  onTransition: () => void;
   onRefresh: () => void;
 }) {
   const { cols: termCols, rows: termRows } = useDimensions();
@@ -480,6 +482,7 @@ export function IssueDetailModal({
         return;
       }
       if (input === "m") return onMove();
+      if (input === "t") return onTransition();
       if (input === "c") return void doAddComment();
       if (key.tab) {
         setPane((p) => (p === "body" ? "fields" : "body"));
@@ -1094,6 +1097,7 @@ export function IssueDetailModal({
             </>
           )}
           <Hint k="e E" label="title/desc" />
+          <Hint k="t" label="transition" />
           <Hint k="m" label="move" />
           <Hint k="esc" label="close" />
         </Box>

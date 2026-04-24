@@ -11,6 +11,7 @@ import {
   type IssueLinkType,
   type IssueType,
   type Transition,
+  assignIssueToMe,
   getBoardConfig,
   getBoardIssues,
   getIssueLinkTypes,
@@ -49,9 +50,34 @@ type Modal =
   | { kind: "card-action" }
   | { kind: "move-picker"; issueKey?: string }
   | { kind: "transition-picker"; transitions: Transition[]; issueKey: string }
-  | { kind: "assignee-picker"; names: string[] }
+  | { kind: "filter-menu" }
+  | { kind: "filter-assignee"; names: string[] }
+  | { kind: "filter-type"; types: string[] }
+  | { kind: "filter-sprint"; sprints: string[] }
+  | { kind: "filter-label"; labels: string[] }
+  | { kind: "filter-epic"; epics: string[] }
   | { kind: "create"; types: IssueType[]; linkTypes: IssueLinkType[] }
   | { kind: "detail"; issueKey: string };
+
+type Filters = {
+  assignee: string | null;
+  type: string | null;
+  sprint: string | null;
+  label: string | null;
+  epic: string | null;
+};
+
+const EMPTY_FILTERS: Filters = {
+  assignee: null,
+  type: null,
+  sprint: null,
+  label: null,
+  epic: null,
+};
+
+function activeFilterCount(f: Filters): number {
+  return Object.values(f).filter(Boolean).length;
+}
 
 type CellRef = { col: number; row: number };
 
@@ -90,7 +116,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
   const [matchIdx, setMatchIdx] = useState(0);
   const [modal, setModal] = useState<Modal>({ kind: "none" });
   const [searchBuffer, setSearchBuffer] = useState("");
-  const [assigneeFilter, setAssigneeFilter] = useState<string | null>(null);
+  const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
 
   // Link & issue types don't change for the life of the board — fetch once, reuse.
   const metaCache = useRef<{ types: IssueType[]; linkTypes: IssueLinkType[] } | null>(null);
@@ -122,29 +148,46 @@ export function BoardView({ cfg, board, onExit }: Props) {
     [],
   );
 
-  const filteredIssues = useMemo(
-    () =>
-      assigneeFilter
-        ? issues.filter((i) => (i.assignee ?? "Unassigned") === assigneeFilter)
-        : issues,
-    [issues, assigneeFilter],
-  );
+  const filteredIssues = useMemo(() => {
+    let list = issues;
+    if (filters.assignee)
+      list = list.filter((i) => (i.assignee ?? "Unassigned") === filters.assignee);
+    if (filters.type) list = list.filter((i) => i.issueType === filters.type);
+    if (filters.sprint) list = list.filter((i) => i.sprintName === filters.sprint);
+    if (filters.label) list = list.filter((i) => i.labels.includes(filters.label!));
+    if (filters.epic) list = list.filter((i) => i.epicKey === filters.epic);
+    return list;
+  }, [issues, filters]);
   const columns = useMemo(
     () => (conf ? buildColumns(conf.columns, filteredIssues) : []),
     [conf, filteredIssues],
   );
-  const assigneeNames = useMemo(() => {
-    const set = new Set<string>();
-    for (const i of issues) set.add(i.assignee ?? "Unassigned");
-    /**
-     * Pin "Unassigned" to the top regardless of alphabetical order — it's
-     * the special bucket, not a real person.
-     */
-    return Array.from(set).toSorted((a, b) => {
-      if (a === "Unassigned") return -1;
-      if (b === "Unassigned") return 1;
-      return a.localeCompare(b);
-    });
+
+  const filterOptions = useMemo(() => {
+    const assignees = new Set<string>();
+    const types = new Set<string>();
+    const sprints = new Set<string>();
+    const labels = new Set<string>();
+    const epics = new Set<string>();
+    for (const i of issues) {
+      assignees.add(i.assignee ?? "Unassigned");
+      types.add(i.issueType);
+      if (i.sprintName) sprints.add(i.sprintName);
+      for (const l of i.labels) labels.add(l);
+      if (i.epicKey) epics.add(i.epicKey);
+    }
+    const sortSet = (s: Set<string>) => Array.from(s).toSorted((a, b) => a.localeCompare(b));
+    return {
+      assignees: Array.from(assignees).toSorted((a, b) => {
+        if (a === "Unassigned") return -1;
+        if (b === "Unassigned") return 1;
+        return a.localeCompare(b);
+      }),
+      types: sortSet(types),
+      sprints: sortSet(sprints),
+      labels: sortSet(labels),
+      epics: sortSet(epics),
+    };
   }, [issues]);
 
   const load = useCallback(async () => {
@@ -425,6 +468,39 @@ export function BoardView({ cfg, board, onExit }: Props) {
     }
   }, [currentIssue, cfg, flash, load]);
 
+  const doAssignToMe = useCallback(async () => {
+    const issue = currentIssue;
+    if (!issue) {
+      flash("no issue selected", "info");
+      return;
+    }
+    try {
+      await assignIssueToMe(cfg, issue.key);
+      flash(`${issue.key} assigned to you`, "ok");
+      await load();
+    } catch (e) {
+      flash(errorMessage(e), "err");
+    }
+  }, [currentIssue, cfg, flash, load]);
+
+  const doFuzzyTransition = useCallback(async () => {
+    const issue = currentIssue;
+    if (!issue) {
+      flash("no issue selected", "info");
+      return;
+    }
+    try {
+      const trs = await getTransitions(cfg, issue.key);
+      if (trs.length === 0) {
+        flash("no transitions available", "info");
+        return;
+      }
+      setModal({ kind: "transition-picker", transitions: trs, issueKey: issue.key });
+    } catch (e) {
+      flash(errorMessage(e), "err");
+    }
+  }, [currentIssue, cfg, flash]);
+
   const openDetailForKey = useCallback((key: string) => {
     setModal({ kind: "detail", issueKey: key });
   }, []);
@@ -553,6 +629,8 @@ export function BoardView({ cfg, board, onExit }: Props) {
       }
       if (input === "<" || input === ",") return void doTransition(-1);
       if (input === ">" || input === ".") return void doTransition(1);
+      if (input === "t") return void doFuzzyTransition();
+      if (input === "i") return void doAssignToMe();
 
       // Board-wide
       if (input === "O") return void openBoardInBrowser();
@@ -572,18 +650,17 @@ export function BoardView({ cfg, board, onExit }: Props) {
       if (input === "n") return jumpToMatch(1);
       if (input === "N") return jumpToMatch(-1);
 
-      // Assignee filter
-      if (input === "a") {
-        if (assigneeNames.length === 0) return flash("no assignees to filter", "info");
-        setModal({ kind: "assignee-picker", names: assigneeNames });
+      // Filters
+      if (input === "f") {
+        setModal({ kind: "filter-menu" });
         return;
       }
-      if (input === "A") {
-        if (assigneeFilter) {
-          setAssigneeFilter(null);
-          flash("assignee filter cleared", "ok");
+      if (input === "F") {
+        if (activeFilterCount(filters) > 0) {
+          setFilters(EMPTY_FILTERS);
+          flash("all filters cleared", "ok");
         } else {
-          flash("no assignee filter active", "info");
+          flash("no filters active", "info");
         }
         return;
       }
@@ -622,9 +699,9 @@ export function BoardView({ cfg, board, onExit }: Props) {
           { id: "detail", label: "view details" },
           { id: "title", label: "edit title (Neovim)" },
           { id: "desc", label: "edit description (Neovim)" },
+          { id: "transition", label: "transition to status…" },
           { id: "move", label: "move to column…" },
-          { id: "prev", label: "transition ← prev column" },
-          { id: "next", label: "transition → next column" },
+          { id: "assign-me", label: "assign to me" },
           { id: "open", label: "open in browser" },
         ]}
         onCancel={closeModal}
@@ -633,9 +710,9 @@ export function BoardView({ cfg, board, onExit }: Props) {
           if (id === "detail") void openDetail();
           else if (id === "title") void doEditSummary();
           else if (id === "desc") void doEditDescription();
+          else if (id === "transition") void doFuzzyTransition();
           else if (id === "move") setModal({ kind: "move-picker" });
-          else if (id === "prev") void doTransition(-1);
-          else if (id === "next") void doTransition(1);
+          else if (id === "assign-me") void doAssignToMe();
           else if (id === "open") void openIssueInBrowser();
         }}
       />
@@ -693,6 +770,14 @@ export function BoardView({ cfg, board, onExit }: Props) {
         issueKey={modal.issueKey}
         onClose={closeModal}
         onMove={() => setModal({ kind: "move-picker", issueKey: modal.issueKey })}
+        onTransition={async () => {
+          const key = modal.issueKey;
+          try {
+            const trs = await getTransitions(cfg, key);
+            if (trs.length === 0) return;
+            setModal({ kind: "transition-picker", transitions: trs, issueKey: key });
+          } catch {}
+        }}
         onRefresh={() => void load()}
       />
     );
@@ -724,24 +809,155 @@ export function BoardView({ cfg, board, onExit }: Props) {
       />
     );
   }
-  if (modal.kind === "assignee-picker") {
+  if (modal.kind === "filter-menu") {
+    const count = activeFilterCount(filters);
+    const items = [
+      { id: "assignee", label: `assignee${filters.assignee ? ` · ${filters.assignee}` : ""}` },
+      { id: "type", label: `issue type${filters.type ? ` · ${filters.type}` : ""}` },
+      { id: "sprint", label: `sprint${filters.sprint ? ` · ${filters.sprint}` : ""}` },
+      { id: "label", label: `label${filters.label ? ` · ${filters.label}` : ""}` },
+      { id: "epic", label: `epic${filters.epic ? ` · ${filters.epic}` : ""}` },
+      ...(count > 0 ? [{ id: "clear", label: "clear all filters" }] : []),
+    ];
+    return (
+      <ListPicker
+        title={`filters${count > 0 ? ` (${count} active)` : ""}`}
+        items={items}
+        onPick={(id) => {
+          if (id === "clear") {
+            setFilters(EMPTY_FILTERS);
+            closeModal();
+            flash("all filters cleared", "ok");
+          } else if (id === "assignee") {
+            setModal({ kind: "filter-assignee", names: filterOptions.assignees });
+          } else if (id === "type") {
+            setModal({ kind: "filter-type", types: filterOptions.types });
+          } else if (id === "sprint") {
+            if (filterOptions.sprints.length === 0) {
+              flash("no sprints found", "info");
+              return;
+            }
+            setModal({ kind: "filter-sprint", sprints: filterOptions.sprints });
+          } else if (id === "label") {
+            if (filterOptions.labels.length === 0) {
+              flash("no labels found", "info");
+              return;
+            }
+            setModal({ kind: "filter-label", labels: filterOptions.labels });
+          } else if (id === "epic") {
+            if (filterOptions.epics.length === 0) {
+              flash("no epics found", "info");
+              return;
+            }
+            setModal({ kind: "filter-epic", epics: filterOptions.epics });
+          }
+        }}
+        onCancel={closeModal}
+      />
+    );
+  }
+  if (modal.kind === "filter-assignee") {
     return (
       <FilterPicker
         title="filter by assignee"
         items={modal.names.map((n) => ({ id: n, label: n }))}
-        {...(assigneeFilter ? { currentId: assigneeFilter } : {})}
+        {...(filters.assignee ? { currentId: filters.assignee } : {})}
         borderColor={theme.cyan}
         onPick={(id) => {
-          setAssigneeFilter(id);
+          setFilters((f) => ({ ...f, assignee: id }));
           closeModal();
-          flash(`filtering by ${id}`, "ok");
+          flash(`assignee: ${id}`, "ok");
         }}
         onClear={() => {
-          setAssigneeFilter(null);
+          setFilters((f) => ({ ...f, assignee: null }));
           closeModal();
           flash("assignee filter cleared", "ok");
         }}
-        onCancel={closeModal}
+        onCancel={() => setModal({ kind: "filter-menu" })}
+      />
+    );
+  }
+  if (modal.kind === "filter-type") {
+    return (
+      <FilterPicker
+        title="filter by issue type"
+        items={modal.types.map((t) => ({ id: t, label: t }))}
+        {...(filters.type ? { currentId: filters.type } : {})}
+        borderColor={theme.cyan}
+        onPick={(id) => {
+          setFilters((f) => ({ ...f, type: id }));
+          closeModal();
+          flash(`type: ${id}`, "ok");
+        }}
+        onClear={() => {
+          setFilters((f) => ({ ...f, type: null }));
+          closeModal();
+          flash("type filter cleared", "ok");
+        }}
+        onCancel={() => setModal({ kind: "filter-menu" })}
+      />
+    );
+  }
+  if (modal.kind === "filter-sprint") {
+    return (
+      <FilterPicker
+        title="filter by sprint"
+        items={modal.sprints.map((s) => ({ id: s, label: s }))}
+        {...(filters.sprint ? { currentId: filters.sprint } : {})}
+        borderColor={theme.cyan}
+        onPick={(id) => {
+          setFilters((f) => ({ ...f, sprint: id }));
+          closeModal();
+          flash(`sprint: ${id}`, "ok");
+        }}
+        onClear={() => {
+          setFilters((f) => ({ ...f, sprint: null }));
+          closeModal();
+          flash("sprint filter cleared", "ok");
+        }}
+        onCancel={() => setModal({ kind: "filter-menu" })}
+      />
+    );
+  }
+  if (modal.kind === "filter-label") {
+    return (
+      <FilterPicker
+        title="filter by label"
+        items={modal.labels.map((l) => ({ id: l, label: l }))}
+        {...(filters.label ? { currentId: filters.label } : {})}
+        borderColor={theme.cyan}
+        onPick={(id) => {
+          setFilters((f) => ({ ...f, label: id }));
+          closeModal();
+          flash(`label: ${id}`, "ok");
+        }}
+        onClear={() => {
+          setFilters((f) => ({ ...f, label: null }));
+          closeModal();
+          flash("label filter cleared", "ok");
+        }}
+        onCancel={() => setModal({ kind: "filter-menu" })}
+      />
+    );
+  }
+  if (modal.kind === "filter-epic") {
+    return (
+      <FilterPicker
+        title="filter by epic"
+        items={modal.epics.map((e) => ({ id: e, label: e }))}
+        {...(filters.epic ? { currentId: filters.epic } : {})}
+        borderColor={theme.cyan}
+        onPick={(id) => {
+          setFilters((f) => ({ ...f, epic: id }));
+          closeModal();
+          flash(`epic: ${id}`, "ok");
+        }}
+        onClear={() => {
+          setFilters((f) => ({ ...f, epic: null }));
+          closeModal();
+          flash("epic filter cleared", "ok");
+        }}
+        onCancel={() => setModal({ kind: "filter-menu" })}
       />
     );
   }
@@ -789,7 +1005,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
         totalIssueCount={issues.length}
         colIndex={activeCol}
         colCount={columns.length}
-        assigneeFilter={assigneeFilter}
+        filterCount={activeFilterCount(filters)}
         query={modal.kind === "search" ? "" : query}
         matches={matches.length}
         matchIdx={matchIdx}
@@ -827,7 +1043,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
         query={query}
         matches={matches.length}
         matchIdx={matchIdx}
-        assigneeFilter={assigneeFilter}
+        filterCount={activeFilterCount(filters)}
         searchBuffer={searchBuffer}
         onSearchChange={setSearchBuffer}
         onSearchSubmit={(q) => {

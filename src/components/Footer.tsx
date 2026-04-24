@@ -22,7 +22,7 @@ type FooterProps = {
   query: string;
   matches: number;
   matchIdx: number;
-  assigneeFilter: string | null;
+  filterCount: number;
   searchBuffer: string;
   onSearchChange: (v: string) => void;
   onSearchSubmit: (v: string) => void;
@@ -37,7 +37,7 @@ export function Footer({
   query,
   matches,
   matchIdx,
-  assigneeFilter,
+  filterCount,
   searchBuffer,
   onSearchChange,
   onSearchSubmit,
@@ -103,18 +103,19 @@ export function Footer({
           <Hint k="↑↓←→/hjkl" label="nav" />
           <Hint k="⏎" label="actions" />
           <Hint k="v" label="view" />
+          <Hint k="t" label="transition" />
           <Hint k="m" label="move" />
-          <Hint k="< >" label="± col" />
+          <Hint k="i" label="assign me" />
           <Hint k="c" label="create" />
           <Hint k="/" label="search" />
-          <Hint k="a" label="assignee" />
+          <Hint k="f" label="filter" />
           {query ? (
             <Hint
               k="n N"
               label={matches === 0 ? "no matches" : `match ${matchIdx + 1}/${matches}`}
             />
           ) : null}
-          {assigneeFilter ? <Hint k="A" label="clear filter" /> : null}
+          {filterCount > 0 ? <Hint k="F" label="clear filters" /> : null}
           <Hint k="r" label="refresh" />
           <Hint k="?" label="help" />
           <Hint k="q" label="quit" />

@@ -13,7 +13,7 @@ export function BoardHeader({
   totalIssueCount,
   colIndex,
   colCount,
-  assigneeFilter,
+  filterCount,
   query,
   matches,
   matchIdx,
@@ -24,7 +24,7 @@ export function BoardHeader({
   totalIssueCount: number;
   colIndex: number;
   colCount: number;
-  assigneeFilter: string | null;
+  filterCount: number;
   query: string;
   matches: number;
   matchIdx: number;
@@ -39,7 +39,7 @@ export function BoardHeader({
         <Text color={theme.muted}>
           {" "}
           · {visibleIssueCount}
-          {assigneeFilter ? ` / ${totalIssueCount}` : ""} issues
+          {filterCount > 0 ? ` / ${totalIssueCount}` : ""} issues
         </Text>
         {colCount > 0 ? (
           <Text color={theme.muted}>
@@ -47,13 +47,13 @@ export function BoardHeader({
             col {colIndex + 1}/{colCount}
           </Text>
         ) : null}
-        {assigneeFilter ? (
+        {filterCount > 0 ? (
           <>
             <Text color={theme.muted}>{"  "}</Text>
             <Text color={theme.cyan}>
-              {assigneeFilter === "Unassigned" ? assigneeFilter : `@${assigneeFilter}`}
+              {filterCount} filter{filterCount > 1 ? "s" : ""}
             </Text>
-            <Text color={theme.muted}> (A clear)</Text>
+            <Text color={theme.muted}> (F clear)</Text>
           </>
         ) : null}
       </Box>

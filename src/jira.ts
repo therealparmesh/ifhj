@@ -37,6 +37,8 @@ export type Issue = {
   assignee?: string;
   priority?: string;
   epicKey?: string;
+  labels: string[];
+  sprintName?: string;
 };
 
 export type Transition = { id: string; name: string; toStatusId: string };
@@ -158,7 +160,9 @@ export async function getBoardIssues(cfg: JiraConfig, boardId: number): Promise<
     "assignee",
     "priority",
     "description",
+    "labels",
     CF_EPIC_LINK,
+    CF_SPRINT,
     "parent",
   ].join(",");
   const all: Issue[] = [];
@@ -172,6 +176,8 @@ export async function getBoardIssues(cfg: JiraConfig, boardId: number): Promise<
       const f = it.fields ?? {};
       const descRaw = f.description;
       const description = typeof descRaw === "string" ? descRaw : adfToText(descRaw).trim();
+      const sprints = Array.isArray(f[CF_SPRINT]) ? f[CF_SPRINT] : [];
+      const activeSprint = sprints.find((s: any) => s?.state === "active") ?? sprints[0];
       const issue: Issue = {
         key: it.key,
         summary: f.summary ?? "",
@@ -179,9 +185,11 @@ export async function getBoardIssues(cfg: JiraConfig, boardId: number): Promise<
         statusId: String(f.status?.id ?? ""),
         statusName: f.status?.name ?? "",
         issueType: f.issuetype?.name ?? "",
+        labels: Array.isArray(f.labels) ? f.labels : [],
       };
       if (f.assignee?.displayName) issue.assignee = f.assignee.displayName;
       if (f.priority?.name) issue.priority = f.priority.name;
+      if (activeSprint?.name) issue.sprintName = activeSprint.name;
       const epic = f[CF_EPIC_LINK] || f.parent?.key;
       if (epic) issue.epicKey = epic;
       all.push(issue);
@@ -503,6 +511,15 @@ export async function fetchCurrentUser(
     accountId: data.accountId ?? "",
     displayName: data.displayName ?? data.emailAddress ?? "unknown",
   };
+}
+
+export async function assignIssueToMe(cfg: JiraConfig, issueKey: string): Promise<void> {
+  const me = await fetchCurrentUser(cfg);
+  const res = await jf(cfg, `/rest/api/3/issue/${issueKey}`, {
+    method: "PUT",
+    body: JSON.stringify({ fields: { assignee: { accountId: me.accountId } } }),
+  });
+  if (!res.ok) throw new Error(`assign ${res.status}: ${await res.text()}`);
 }
 
 export async function createIssue(
