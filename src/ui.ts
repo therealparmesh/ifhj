@@ -1,48 +1,140 @@
 /**
- * Synthwave '84 palette (Robb Owen) — out of the box. Jira, but neon.
- * https://github.com/robb0wen/synthwave-vscode — lifted from the canonical
- * theme JSON and README. Every hex below maps to a real token/chrome color
- * from the theme, not a fan interpretation.
+ * Theme contract — a semantic palette, not a literal one. Slots describe
+ * *roles* (error, accent, divider) rather than aesthetics (pink, violet),
+ * so a theme author can map each role to whatever concrete color fits their
+ * palette. `fg` is optional: when unset, components emit no color code and
+ * the terminal's own default foreground shows through — which is the only
+ * way to be readable on *both* light and dark terminals using a single
+ * binary.
  */
-export const theme = {
+export type Theme = {
+  // ─── Surfaces ───────────────────────────────────────────────────
+  bg: string; // used as a foreground for inverted-cursor contrast, so must be concrete
+  bgPanel: string;
+  bgDeep: string;
+
+  // ─── Text tones ─────────────────────────────────────────────────
+  fg: string | undefined; // primary text — undefined ⇒ terminal default
+  fgDim: string; // secondary text
+  muted: string; // tertiary text (comments, hints)
+
+  // ─── Status ─────────────────────────────────────────────────────
+  error: string;
+  success: string;
+  warning: string;
+  info: string;
+
+  // ─── Interaction ────────────────────────────────────────────────
+  accent: string; // primary focus / selection color
+  accentAlt: string; // secondary accent (Epics, parent links, alt headings)
+  matchBg: string; // search-match background
+  divider: string; // thin lines, inactive borders
+
+  // ─── Assignee palette ───────────────────────────────────────────
+  // Ordered array of visually distinct colors for deterministic badge
+  // coloring. Order matters (hash → index); individual slots don't carry
+  // meaning.
+  palette: readonly string[];
+};
+
+/**
+ * Synthwave '84 palette (Robb Owen) — out of the box. Jira, but neon.
+ * https://github.com/robb0wen/synthwave-vscode — canonical hex values from
+ * the VSCode theme, mapped to semantic slots.
+ */
+export const synthwaveTheme: Theme = {
   // Chrome / surfaces
   bg: "#262335", // editor.background
   bgPanel: "#241b2f", // sideBar / statusBar / tab group
   bgDeep: "#171520", // activityBar (darkest chrome)
 
-  // Foreground text
+  // Text
   fg: "#f9f9fa", // generic off-white
   fgDim: "#b6b1b1", // punctuation / separators
   muted: "#848bbd", // comments
 
-  // Accents — the neon core palette
-  pink: "#ff7edb", // variables, the signature Synthwave hot pink
-  cyan: "#36f9f6", // functions
-  ok: "#72f1b8", // mint (tags, control keywords)
-  warn: "#fede5d", // keywords
-  orange: "#f97e72", // cursor / badge — the signature coral
-  err: "#fe4450", // language keywords (red)
-  /**
-   * lavender — not a canonical token, but the only readable Synthwave purple
-   * for foreground text (Epics, parent links).
-   */
-  violet: "#b893ce",
+  // Status
+  error: "#fe4450", // language keywords (red)
+  success: "#72f1b8", // mint (tags, control keywords)
+  warning: "#fede5d", // keywords
+  info: "#36f9f6", // functions (cyan)
 
-  // Derived roles
-  accent: "#ff7edb", // alias for pink — the focus/selection color
-  accentDim: "#2a2139", // input / dropdown bg — good for filled selection rows
+  // Interaction
+  accent: "#ff7edb", // variables, the signature Synthwave hot pink
+  // lavender — not a canonical Synthwave token, but the only readable
+  // purple for foreground text (Epics, parent links).
+  accentAlt: "#b893ce",
   matchBg: "#463465", // menu violet — subtle highlight for search matches
+  divider: "#2a2139", // muted violet — reads as thin lines
+
+  // 6 visually distinct colors, signature Synthwave flair
+  palette: ["#ff7edb", "#36f9f6", "#72f1b8", "#fede5d", "#f97e72", "#b893ce"],
 };
 
-export const typeColors: Record<string, string> = {
-  Bug: theme.err,
-  Story: theme.ok,
-  Task: theme.cyan,
-  Epic: theme.violet,
-  "Sub-task": theme.muted,
-  Subtask: theme.muted,
-  Spike: theme.warn,
+/**
+ * Terminal theme — defers to the user's terminal palette via named ANSI
+ * colors (Ink emits e.g. \e[36m for "cyan"). `fg` is `undefined` so primary
+ * text uses the terminal's own default foreground, guaranteeing readability
+ * on both dark and light terminal themes.
+ *
+ * `bg` stays concrete ("black") because it's used as a foreground for the
+ * inverted cursor (dark-text-on-bright-accent), where black is a safe
+ * contrast pick on any background the cursor itself sits on.
+ */
+export const terminalTheme: Theme = {
+  bg: "black",
+  bgPanel: "black",
+  bgDeep: "black",
+
+  fg: undefined, // terminal default — readable on both light and dark
+  fgDim: "gray",
+  muted: "gray",
+
+  error: "red",
+  success: "green",
+  warning: "yellow",
+  info: "cyan",
+
+  accent: "magenta",
+  accentAlt: "blue",
+  matchBg: "yellow",
+  divider: "gray",
+
+  palette: ["red", "green", "yellow", "blue", "magenta", "cyan"],
 };
+
+export type ThemeName = "synthwave" | "terminal";
+
+const THEMES: Record<ThemeName, Theme> = {
+  synthwave: synthwaveTheme,
+  terminal: terminalTheme,
+};
+
+export let theme: Theme = synthwaveTheme;
+
+export function setTheme(name: ThemeName): void {
+  theme = THEMES[name];
+}
+
+export function typeColor(type: string): string {
+  switch (type) {
+    case "Bug":
+      return theme.error;
+    case "Story":
+      return theme.success;
+    case "Task":
+      return theme.info;
+    case "Epic":
+      return theme.accentAlt;
+    case "Sub-task":
+    case "Subtask":
+      return theme.muted;
+    case "Spike":
+      return theme.warning;
+    default:
+      return theme.fgDim;
+  }
+}
 
 export function typeGlyph(type: string): string {
   const t = type.toLowerCase();
@@ -70,30 +162,22 @@ export function initials(name: string | undefined | null): string {
   return (parts[0]![0]! + parts.at(-1)![0]!).toUpperCase();
 }
 
-const ASSIGNEE_PALETTE = [
-  theme.pink,
-  theme.cyan,
-  theme.ok,
-  theme.warn,
-  theme.orange,
-  theme.violet,
-  theme.err,
-  theme.fg,
-];
-
 export function assigneeColor(name: string | undefined | null): string {
   if (!name) return theme.muted;
   let h = 0;
   for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
-  return ASSIGNEE_PALETTE[h % ASSIGNEE_PALETTE.length]!;
+  return theme.palette[h % theme.palette.length]!;
 }
 
 export function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
 }
 
-export function bg(color: string | undefined): { backgroundColor: string } | Record<string, never> {
-  return color ? { backgroundColor: color } : {};
+// Spread helper that lets callers omit the `color` prop entirely when a
+// theme slot is undefined. Ink's <Text> treats an unset color prop as "emit
+// no color code," which is what lets the terminal default show through.
+export function fg(color: string | undefined): { color: string } | Record<string, never> {
+  return color ? { color } : {};
 }
 
 export function errorMessage(e: unknown): string {

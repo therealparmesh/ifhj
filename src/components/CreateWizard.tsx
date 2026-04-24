@@ -12,7 +12,7 @@ import {
   createIssueLink,
   searchIssues,
 } from "../jira";
-import { bg, errorMessage, theme, truncate } from "../ui";
+import { errorMessage, fg, theme, truncate } from "../ui";
 import { FilterPicker } from "./FilterPicker";
 import { Hint } from "./Hint";
 
@@ -360,17 +360,17 @@ function CreateForm({
             ◆ Create issue
           </Text>
           <Text color={theme.muted}> · </Text>
-          <Text color={theme.violet}>{projectKey}</Text>
+          <Text color={theme.accentAlt}>{projectKey}</Text>
         </Box>
         <Text color={theme.muted}>esc close</Text>
       </Box>
       <Box paddingX={1}>
         <Text color={theme.muted}>fields marked </Text>
-        <Text color={theme.err}>*</Text>
+        <Text color={theme.error}>*</Text>
         <Text color={theme.muted}> are required. ⏎ edits the focused field.</Text>
       </Box>
       <Box paddingX={1}>
-        <Text color={theme.accentDim}>{"─".repeat(Math.max(0, innerWidth))}</Text>
+        <Text color={theme.divider}>{"─".repeat(Math.max(0, innerWidth))}</Text>
       </Box>
 
       {/* Body */}
@@ -389,7 +389,7 @@ function CreateForm({
 
       {/* Footer */}
       <Box paddingX={1}>
-        <Text color={theme.accentDim}>{"─".repeat(Math.max(0, innerWidth))}</Text>
+        <Text color={theme.divider}>{"─".repeat(Math.max(0, innerWidth))}</Text>
       </Box>
       <Box paddingX={1}>
         <Hint k="↑↓" label="nav" />
@@ -416,12 +416,12 @@ function FormRow({
 }) {
   // Submit row is a single action line, colored by readiness.
   if (field === "submit") {
-    const color = canSubmit ? (focused ? theme.ok : theme.fgDim) : theme.muted;
-    const rowBg = focused && canSubmit ? theme.accentDim : undefined;
+    const color = canSubmit ? (focused ? theme.success : theme.fgDim) : theme.muted;
+    const inverse = focused && canSubmit;
     const text = canSubmit ? "submit" : "submit (fill required fields)";
     return (
       <Box marginTop={1}>
-        <Text color={color} bold {...bg(rowBg)}>
+        <Text color={color} bold inverse={inverse}>
           {focused ? "▶ " : "  "}
           {text}
         </Text>
@@ -431,7 +431,6 @@ function FormRow({
 
   const value = displayValue(field, form);
   const isEmpty = value === "";
-  const rowBg = focused ? theme.accentDim : undefined;
   const labelColor = focused ? theme.accent : theme.muted;
   const valueColor = isEmpty ? theme.muted : focused ? theme.fg : theme.fgDim;
   const valueText = isEmpty ? "(empty, ⏎ to edit)" : value;
@@ -444,16 +443,16 @@ function FormRow({
   const valueMax = Math.max(4, width - 2 - LABEL_COL_WIDTH - 1);
   return (
     <Box width={width} marginBottom={1}>
-      <Text color={labelColor} {...bg(rowBg)}>
+      <Text color={labelColor} inverse={focused}>
         {focused ? "▶ " : "  "}
       </Text>
-      <Text color={labelColor} bold={focused} {...bg(rowBg)}>
+      <Text color={labelColor} bold={focused} inverse={focused}>
         {labelPadded}
       </Text>
-      <Text color={theme.err} {...bg(rowBg)}>
+      <Text color={theme.error} inverse={focused}>
         {REQUIRED[field] ? "* " : "  "}
       </Text>
-      <Text color={valueColor} {...bg(rowBg)} wrap="truncate">
+      <Text {...fg(valueColor)} inverse={focused} wrap="truncate">
         {truncate(valueText, valueMax)}
       </Text>
     </Box>
