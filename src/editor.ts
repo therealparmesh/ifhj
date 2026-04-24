@@ -6,38 +6,32 @@ export async function editInNeovim(initial: string, filename: string): Promise<s
   await Bun.write(path, initial);
 
   const stdin = process.stdin;
+  const stdout = process.stdout;
 
-  /**
-   * Ink's useInput holds a `data` listener on stdin. Leave it attached and
-   * every Neovim keystroke fires Ink handlers too — modals close, focus jumps.
-   * Detach for the life of the editor, restore after.
-   */
   const savedListeners = stdin.listeners("data") as ((chunk: Buffer | string) => void)[];
-  for (const l of savedListeners) stdin.off("data", l);
   const wasRaw = stdin.isRaw;
-  if (wasRaw) stdin.setRawMode(false);
-  stdin.pause();
 
-  /**
-   * If anything below throws, stdin must still get restored or the app
-   * locks up. try/finally is load-bearing.
-   */
   try {
+    for (const l of savedListeners) stdin.off("data", l);
+    if (wasRaw) stdin.setRawMode(false);
+    stdin.pause();
+    stdout.write("\x1b[?1049h\x1b[?25h");
+
     const proc = Bun.spawn(["nvim", path], {
       stdio: ["inherit", "inherit", "inherit"],
     });
     await proc.exited;
+
     let text = initial;
     try {
       text = await Bun.file(path).text();
-    } catch {
-      // File was deleted from inside Neovim — treat as no-op, don't crash.
-    }
+    } catch {}
     try {
       await Bun.file(path).unlink();
     } catch {}
     return text;
   } finally {
+    stdout.write("\x1b[?1049l");
     if (wasRaw) stdin.setRawMode(true);
     stdin.resume();
     for (const l of savedListeners) stdin.on("data", l);
