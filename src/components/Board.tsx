@@ -65,6 +65,7 @@ type Modal =
   | { kind: "create"; types: IssueType[]; linkTypes: IssueLinkType[]; parentKey?: string }
   | { kind: "detail"; issueKey: string }
   | { kind: "title-edit"; issueKey: string; current: string }
+  | { kind: "nvim" }
   | { kind: "jql" };
 
 type Filters = {
@@ -438,12 +439,10 @@ export function BoardView({ cfg, board, onExit }: Props) {
   const doEditDescription = useCallback(async () => {
     const issue = currentIssue;
     if (!issue) return;
+    setModal({ kind: "nvim" });
     try {
       const raw = await editInNeovim(issue.description, `${issue.key}-desc.md`);
-      /**
-       * Compare trimmed — a stray trailing newline from Neovim shouldn't
-       * trigger a spurious round-trip.
-       */
+      setModal({ kind: "none" });
       if (raw.trim() === issue.description.trim()) {
         flash("no change", "info");
         return;
@@ -452,6 +451,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
       flash(`${issue.key} description updated`, "ok");
       await load();
     } catch (e) {
+      setModal({ kind: "none" });
       flash(errorMessage(e), "err");
     }
   }, [currentIssue, cfg, flash, load]);
@@ -729,6 +729,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
   }
 
   // Modal overlays. Each branch is a discrete, full-screen-ish component.
+  if (modal.kind === "nvim") return <Box />;
   if (modal.kind === "help") return <HelpModal onClose={closeModal} />;
   if (modal.kind === "card-action" && currentIssue) {
     return (
