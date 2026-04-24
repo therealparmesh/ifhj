@@ -28,10 +28,10 @@ import {
   watchIssue,
 } from "../jira";
 import {
-  bg,
   clamp,
   copyToClipboard,
   errorMessage,
+  fg,
   openInBrowser,
   theme,
   truncate,
@@ -56,13 +56,22 @@ function formatShortDate(iso: string | undefined): string {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
-type DetailLine = { text: string; color: string; bold?: boolean; commentIdx?: number | undefined };
+type DetailLine = {
+  text: string;
+  color: string | undefined;
+  bold?: boolean;
+  commentIdx?: number | undefined;
+};
 
 function renderDetailLines(detail: IssueDetail, mainWidth: number): DetailLine[] {
   const out: DetailLine[] = [];
-  const push = (text: string, color = theme.fg, bold = false, commentIdx?: number) =>
-    out.push({ text, color, bold, commentIdx });
-  const pushLine = (text: string, color = theme.fg, commentIdx?: number) => {
+  const push = (
+    text: string,
+    color: string | undefined = theme.fg,
+    bold = false,
+    commentIdx?: number,
+  ) => out.push({ text, color, bold, commentIdx });
+  const pushLine = (text: string, color: string | undefined = theme.fg, commentIdx?: number) => {
     if (text.length === 0) {
       push("", color, false, commentIdx);
       return;
@@ -72,8 +81,8 @@ function renderDetailLines(detail: IssueDetail, mainWidth: number): DetailLine[]
   };
   const pushSection = (label: string) => {
     push("");
-    push(label.toUpperCase(), theme.pink, true);
-    push("─".repeat(Math.min(mainWidth, label.length + 6)), theme.accentDim);
+    push(label.toUpperCase(), theme.accent, true);
+    push("─".repeat(Math.min(mainWidth, label.length + 6)), theme.divider);
   };
 
   pushSection("description");
@@ -103,8 +112,8 @@ function renderDetailLines(detail: IssueDetail, mainWidth: number): DetailLine[]
     return out;
   }
   detail.comments.forEach((c, i) => {
-    if (i > 0) push("·".repeat(Math.min(mainWidth, 20)), theme.accentDim, false, i);
-    push(c.author, theme.cyan, true, i);
+    if (i > 0) push("·".repeat(Math.min(mainWidth, 20)), theme.divider, false, i);
+    push(c.author, theme.info, true, i);
     push(formatShortDate(c.created), theme.muted, false, i);
     for (const ln of (c.body || "").split(/\n/)) pushLine(` ${ln}`, theme.fg, i);
   });
@@ -973,14 +982,14 @@ export function IssueDetailModal({
         width={innerWidth + 2}
         height={innerHeight + 2}
         borderStyle="round"
-        borderColor={theme.err}
+        borderColor={theme.error}
         padding={1}
       >
-        <Text color={theme.err} bold>
+        <Text color={theme.error} bold>
           failed to load {issueKey}
         </Text>
         <Box marginTop={1}>
-          <Text color={theme.fg}>{loadError}</Text>
+          <Text {...fg(theme.fg)}>{loadError}</Text>
         </Box>
         <Box marginTop={1}>
           <Text color={theme.muted}>esc / q close</Text>
@@ -1020,7 +1029,7 @@ export function IssueDetailModal({
       {/* Header */}
       <Box paddingX={1}>
         <Text color={typeAccent}>{typeGlyph(detail.issueType)} </Text>
-        <Text color={theme.pink} bold>
+        <Text color={theme.accent} bold>
           {detail.key}
         </Text>
         <Text color={theme.muted}> · </Text>
@@ -1028,19 +1037,19 @@ export function IssueDetailModal({
         {detail.parentKey ? (
           <>
             <Text color={theme.muted}> · </Text>
-            <Text color={theme.violet}>{detail.parentKey}</Text>
+            <Text color={theme.accentAlt}>{detail.parentKey}</Text>
           </>
         ) : null}
-        {detail.watching ? <Text color={theme.cyan}> ◉</Text> : null}
-        {saving ? <Text color={theme.warn}> ◴ saving…</Text> : null}
+        {detail.watching ? <Text color={theme.info}> ◉</Text> : null}
+        {saving ? <Text color={theme.warning}> ◴ saving…</Text> : null}
       </Box>
       <Box paddingX={1}>
-        <Text color={theme.fg} bold>
+        <Text {...fg(theme.fg)} bold>
           {truncate(detail.summary, innerWidth - 4)}
         </Text>
       </Box>
       <Box paddingX={1}>
-        <Text color={theme.accentDim}>{"─".repeat(Math.max(0, innerWidth))}</Text>
+        <Text color={theme.divider}>{"─".repeat(Math.max(0, innerWidth))}</Text>
       </Box>
 
       {/* Body: main + side */}
@@ -1050,16 +1059,16 @@ export function IssueDetailModal({
             const lineCommentIdx = ln.commentIdx;
             const isCommentHeader =
               lineCommentIdx !== undefined &&
-              ln.bold &&
+              ln.bold === true &&
               pane === "body" &&
               lineCommentIdx === focusedCommentIdx;
             return (
               <Text
                 key={`${clampedScroll + i}`}
-                color={ln.color}
+                {...fg(ln.color)}
                 bold={ln.bold ?? false}
                 wrap="truncate"
-                {...bg(isCommentHeader ? theme.accentDim : undefined)}
+                inverse={isCommentHeader}
               >
                 {ln.text || " "}
               </Text>
@@ -1076,7 +1085,7 @@ export function IssueDetailModal({
           borderBottom={false}
           borderRight={false}
           borderStyle="single"
-          borderColor={pane === "fields" ? theme.accent : theme.accentDim}
+          borderColor={pane === "fields" ? theme.accent : theme.divider}
         >
           {ALL_FIELDS.map((f, i) => (
             <SideField
@@ -1093,7 +1102,7 @@ export function IssueDetailModal({
 
       {/* Footer */}
       <Box paddingX={1}>
-        <Text color={theme.accentDim}>{"─".repeat(Math.max(0, innerWidth))}</Text>
+        <Text color={theme.divider}>{"─".repeat(Math.max(0, innerWidth))}</Text>
       </Box>
       <Box paddingX={1} justifyContent="space-between">
         <Box flexWrap="wrap">
@@ -1152,12 +1161,7 @@ function SideField({
       <Text color={focused ? theme.accent : theme.muted}>
         {FIELD_LABELS[field].padEnd(DETAIL_LABEL_WIDTH)}
       </Text>
-      <Text
-        color={focused ? theme.fg : color}
-        bold={focused}
-        wrap="truncate"
-        {...bg(focused ? theme.accentDim : undefined)}
-      >
+      <Text {...fg(focused ? theme.fg : color)} bold={focused} wrap="truncate" inverse={focused}>
         {truncate(value, valueMax)}
       </Text>
       {focused && editable ? <Text color={theme.muted}> ⏎</Text> : null}
@@ -1182,11 +1186,11 @@ function fieldDisplayValue(field: FieldId, d: IssueDetail): string {
   return "—";
 }
 
-function fieldColor(field: FieldId, _d: IssueDetail): string {
-  if (field === "status") return theme.ok;
-  if (field === "parent") return theme.violet;
-  if (field === "labels") return theme.cyan;
-  if (field === "due") return theme.warn;
+function fieldColor(field: FieldId, _d: IssueDetail): string | undefined {
+  if (field === "status") return theme.success;
+  if (field === "parent") return theme.accentAlt;
+  if (field === "labels") return theme.info;
+  if (field === "due") return theme.warning;
   return theme.fg;
 }
 

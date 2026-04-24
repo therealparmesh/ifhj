@@ -6,7 +6,7 @@ import { BoardView } from "./components/Board";
 import { BoardPicker } from "./components/BoardPicker";
 import { loadConfig, type JiraConfig } from "./config";
 import type { Board } from "./jira";
-import { errorMessage, setTheme, theme } from "./ui";
+import { errorMessage, fg, setTheme, theme } from "./ui";
 
 function App() {
   const { exit } = useApp();
@@ -29,7 +29,7 @@ function App() {
   if (err)
     return (
       <Box flexDirection="column" padding={1}>
-        <Text color={theme.err}>{err}</Text>
+        <Text color={theme.error}>{err}</Text>
       </Box>
     );
 
@@ -37,7 +37,7 @@ function App() {
     return (
       <Box padding={1}>
         <Text color={theme.accent}>◴ </Text>
-        <Text color={theme.fg}>loading config…</Text>
+        <Text {...fg(theme.fg)}>loading config…</Text>
       </Box>
     );
 

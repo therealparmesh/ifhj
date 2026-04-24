@@ -1,7 +1,7 @@
 import { Box, Text } from "ink";
 
 import type { Issue } from "../jira";
-import { theme, truncate, typeColor } from "../ui";
+import { fg, theme, truncate, typeColor } from "../ui";
 import { Hint } from "./Hint";
 import { TextInput } from "./TextInput";
 
@@ -35,18 +35,18 @@ export function Footer({
   return (
     <Box flexDirection="column" paddingX={1}>
       <Box>
-        <Text color={theme.accentDim}>{"─".repeat(Math.max(0, termCols - 2))}</Text>
+        <Text color={theme.divider}>{"─".repeat(Math.max(0, termCols - 2))}</Text>
       </Box>
 
       {currentIssue ? (
         <Box>
-          <Text color={theme.pink} bold>
+          <Text color={theme.accent} bold>
             {currentIssue.key}
           </Text>
           <Text color={theme.muted}> · </Text>
           <Text color={typeColor(currentIssue.issueType)}>{currentIssue.issueType}</Text>
           <Text color={theme.muted}> · </Text>
-          <Text color={theme.fg}>
+          <Text {...fg(theme.fg)}>
             {truncate(currentIssue.summary, Math.max(10, termCols - currentIssue.key.length - 20))}
           </Text>
         </Box>
@@ -57,7 +57,7 @@ export function Footer({
       {mode === "search" ? (
         <Box flexDirection="column">
           <Box marginTop={0}>
-            <Text color={theme.warn} bold>
+            <Text color={theme.warning} bold>
               /{" "}
             </Text>
             <TextInput

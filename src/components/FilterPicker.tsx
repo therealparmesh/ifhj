@@ -1,7 +1,7 @@
 import { Box, Text, useInput } from "ink";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { bg, clamp, theme } from "../ui";
+import { clamp, fg, theme } from "../ui";
 import { Hint } from "./Hint";
 import { TextInput } from "./TextInput";
 
@@ -122,7 +122,7 @@ export function FilterPicker({
     { isActive: !!onClear },
   );
 
-  const accent = borderColor ?? theme.pink;
+  const accent = borderColor ?? theme.accent;
   return (
     <Box flexDirection="column" padding={2} borderStyle="round" borderColor={accent}>
       <Text color={accent} bold>
@@ -196,15 +196,11 @@ function PickerRows({
         return (
           <Box key={it.id}>
             <Text color={selected ? theme.accent : theme.muted}>{selected ? "▶ " : "  "}</Text>
-            <Text
-              color={selected ? theme.fg : theme.fgDim}
-              bold={selected}
-              {...bg(selected ? theme.accentDim : undefined)}
-            >
+            <Text {...fg(selected ? theme.fg : theme.fgDim)} bold={selected} inverse={selected}>
               {it.label}
             </Text>
             {it.hint ? <Text color={theme.muted}> {it.hint}</Text> : null}
-            {it.id === currentId ? <Text color={theme.warn}> (active)</Text> : null}
+            {it.id === currentId ? <Text color={theme.warning}> (active)</Text> : null}
           </Box>
         );
       })}

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { JiraConfig } from "../config";
 import { useDimensions } from "../hooks";
 import { type Board, listBoards } from "../jira";
-import { bg, clamp, errorMessage, theme, truncate } from "../ui";
+import { clamp, errorMessage, fg, theme, truncate } from "../ui";
 import { TextInput } from "./TextInput";
 
 type Props = {
@@ -89,8 +89,8 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
   if (error) {
     return (
       <Box flexDirection="column" padding={1}>
-        <Text color={theme.err}>Error loading boards:</Text>
-        <Text color={theme.fg}>{error}</Text>
+        <Text color={theme.error}>Error loading boards:</Text>
+        <Text {...fg(theme.fg)}>{error}</Text>
         <Box marginTop={1}>
           <Text color={theme.muted}>press esc or ⌃c to quit</Text>
         </Box>
@@ -102,7 +102,7 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
     return (
       <Box padding={1}>
         <Text color={theme.accent}>◴ </Text>
-        <Text color={theme.fg}>loading boards…</Text>
+        <Text {...fg(theme.fg)}>loading boards…</Text>
       </Box>
     );
   }
@@ -154,9 +154,9 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
                     {selected ? "▶ " : "  "}
                   </Text>
                   <Text
-                    color={selected ? theme.fg : theme.fgDim}
+                    {...fg(selected ? theme.fg : theme.fgDim)}
                     bold={selected}
-                    {...bg(selected ? theme.accentDim : undefined)}
+                    inverse={selected}
                   >
                     {label}
                   </Text>

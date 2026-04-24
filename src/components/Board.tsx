@@ -26,7 +26,7 @@ import {
   updateDescription,
   updateSummary,
 } from "../jira";
-import { clamp, copyToClipboard, errorMessage, openInBrowser, theme, truncate } from "../ui";
+import { clamp, copyToClipboard, errorMessage, fg, openInBrowser, theme, truncate } from "../ui";
 import { BoardHeader } from "./BoardHeader";
 import { CreateWizard } from "./CreateWizard";
 import { FilterPicker } from "./FilterPicker";
@@ -730,7 +730,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
     if (loadError) {
       return (
         <Box flexDirection="column" padding={1}>
-          <Text color={theme.err}>{loadError}</Text>
+          <Text color={theme.error}>{loadError}</Text>
           <Text color={theme.muted}>press q to go back</Text>
         </Box>
       );
@@ -738,7 +738,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
     return (
       <Box padding={1}>
         <Text color={theme.accent}>◴ </Text>
-        <Text color={theme.fg}>loading {board.name}…</Text>
+        <Text {...fg(theme.fg)}>loading {board.name}…</Text>
       </Box>
     );
   }
@@ -986,7 +986,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
         title="filter by assignee"
         items={modal.names.map((n) => ({ id: n, label: n }))}
         {...(filters.assignee ? { currentId: filters.assignee } : {})}
-        borderColor={theme.cyan}
+        borderColor={theme.info}
         onPick={(id) => {
           setFilters((f) => ({ ...f, assignee: id }));
           closeModal();
@@ -1007,7 +1007,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
         title="filter by issue type"
         items={modal.types.map((t) => ({ id: t, label: t }))}
         {...(filters.type ? { currentId: filters.type } : {})}
-        borderColor={theme.cyan}
+        borderColor={theme.info}
         onPick={(id) => {
           setFilters((f) => ({ ...f, type: id }));
           closeModal();
@@ -1028,7 +1028,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
         title="filter by sprint"
         items={modal.sprints.map((s) => ({ id: s, label: s }))}
         {...(filters.sprint ? { currentId: filters.sprint } : {})}
-        borderColor={theme.cyan}
+        borderColor={theme.info}
         onPick={(id) => {
           setFilters((f) => ({ ...f, sprint: id }));
           closeModal();
@@ -1049,7 +1049,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
         title="filter by label"
         items={modal.labels.map((l) => ({ id: l, label: l }))}
         {...(filters.label ? { currentId: filters.label } : {})}
-        borderColor={theme.cyan}
+        borderColor={theme.info}
         onPick={(id) => {
           setFilters((f) => ({ ...f, label: id }));
           closeModal();
@@ -1070,7 +1070,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
         title="filter by epic"
         items={modal.epics.map((e) => ({ id: e, label: e }))}
         {...(filters.epic ? { currentId: filters.epic } : {})}
-        borderColor={theme.cyan}
+        borderColor={theme.info}
         onPick={(id) => {
           setFilters((f) => ({ ...f, epic: id }));
           closeModal();
@@ -1235,8 +1235,8 @@ function JqlView({
   );
 
   return (
-    <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.warn}>
-      <Text color={theme.warn} bold>
+    <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.warning}>
+      <Text color={theme.warning} bold>
         JQL query
       </Text>
       <Box marginTop={1}>
@@ -1270,7 +1270,7 @@ function JqlView({
       </Box>
       {error ? (
         <Box marginTop={1}>
-          <Text color={theme.err}>{error}</Text>
+          <Text color={theme.error}>{error}</Text>
         </Box>
       ) : null}
       {loading ? (
@@ -1334,11 +1334,11 @@ function JqlResults({
         return (
           <Box key={r.key}>
             <Text color={sel ? theme.accent : theme.muted}>{sel ? "▶ " : "  "}</Text>
-            <Text color={sel ? theme.pink : theme.fgDim} bold={sel}>
+            <Text color={sel ? theme.accent : theme.fgDim} bold={sel}>
               {r.key}
             </Text>
             <Text color={theme.muted}> · </Text>
-            <Text color={sel ? theme.fg : theme.fgDim}>{truncate(r.summary, 60)}</Text>
+            <Text {...fg(sel ? theme.fg : theme.fgDim)}>{truncate(r.summary, 60)}</Text>
             <Text color={theme.muted}> {r.issueType}</Text>
           </Box>
         );
