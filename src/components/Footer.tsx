@@ -104,6 +104,7 @@ export function Footer({
             />
           ) : null}
           {filterCount > 0 ? <Hint k="F" label="clear filters" /> : null}
+          <Hint k="R" label="recents" />
           <Hint k="r" label="refresh" />
           <Hint k="?" label="help" />
           <Hint k="q" label="quit" />

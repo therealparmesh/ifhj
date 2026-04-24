@@ -66,7 +66,8 @@ type Modal =
   | { kind: "detail"; issueKey: string }
   | { kind: "title-edit"; issueKey: string; current: string }
   | { kind: "nvim" }
-  | { kind: "jql" };
+  | { kind: "jql" }
+  | { kind: "recents" };
 
 type Filters = {
   assignee: string | null;
@@ -132,6 +133,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
   const hasLoadedOnce = useRef(false);
   // After a transition, follow the moved card to its new column on reload.
   const pendingFocusKey = useRef<string | null>(null);
+  const [recents, setRecents] = useState<{ key: string; summary: string }[]>([]);
 
   const setActiveRowAt = useCallback((col: number, row: number) => {
     setActiveRows((prev) => {
@@ -517,9 +519,15 @@ export function BoardView({ cfg, board, onExit }: Props) {
     [columns, activeCol, activeRows, cfg, flash, load],
   );
 
-  const openDetailForKey = useCallback((key: string) => {
-    setModal({ kind: "detail", issueKey: key });
-  }, []);
+  const openDetailForKey = useCallback(
+    (key: string) => {
+      const issue = issues.find((i) => i.key === key);
+      const summary = issue?.summary ?? key;
+      setRecents((prev) => [{ key, summary }, ...prev.filter((r) => r.key !== key).slice(0, 19)]);
+      setModal({ kind: "detail", issueKey: key });
+    },
+    [issues],
+  );
 
   const openDetail = useCallback(() => {
     const issue = currentIssue;
@@ -682,6 +690,13 @@ export function BoardView({ cfg, board, onExit }: Props) {
       }
       if (input === "n") return jumpToMatch(1);
       if (input === "N") return jumpToMatch(-1);
+
+      // Recents
+      if (input === "R") {
+        if (recents.length === 0) return flash("no recent issues", "info");
+        setModal({ kind: "recents" });
+        return;
+      }
 
       // JQL
       if (input === "J") {
@@ -1067,6 +1082,22 @@ export function BoardView({ cfg, board, onExit }: Props) {
           flash("epic filter cleared", "ok");
         }}
         onCancel={() => setModal({ kind: "filter-menu" })}
+      />
+    );
+  }
+  if (modal.kind === "recents") {
+    return (
+      <FilterPicker
+        title="recent issues"
+        items={recents.map((r) => ({
+          id: r.key,
+          label: `${r.key}  ${truncate(r.summary, 60)}`,
+        }))}
+        onPick={(key) => {
+          closeModal();
+          openDetailForKey(key);
+        }}
+        onCancel={closeModal}
       />
     );
   }
