@@ -55,7 +55,7 @@ export type Comment = {
   created: string;
 };
 
-export type IssueLink = {
+type IssueLink = {
   direction: string;
   key: string;
   summary: string;
