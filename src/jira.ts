@@ -65,7 +65,6 @@ export type IssueLink = {
 
 export type IssueDetail = Issue & {
   reporter?: string;
-  labels: string[];
   components: string[];
   fixVersions: string[];
   sprint?: string;
@@ -581,6 +580,30 @@ export async function searchByJql(
     summary: i.fields?.summary ?? "",
     issueType: i.fields?.issuetype?.name ?? "",
   }));
+}
+
+export async function rankIssueBefore(
+  cfg: JiraConfig,
+  issueKey: string,
+  beforeKey: string,
+): Promise<void> {
+  const res = await jf(cfg, `/rest/agile/1.0/issue/rank`, {
+    method: "PUT",
+    body: JSON.stringify({ issues: [issueKey], rankBeforeIssue: beforeKey }),
+  });
+  if (!res.ok) throw new Error(`rank ${res.status}: ${await res.text()}`);
+}
+
+export async function rankIssueAfter(
+  cfg: JiraConfig,
+  issueKey: string,
+  afterKey: string,
+): Promise<void> {
+  const res = await jf(cfg, `/rest/agile/1.0/issue/rank`, {
+    method: "PUT",
+    body: JSON.stringify({ issues: [issueKey], rankAfterIssue: afterKey }),
+  });
+  if (!res.ok) throw new Error(`rank ${res.status}: ${await res.text()}`);
 }
 
 export async function assignIssueToMe(cfg: JiraConfig, issueKey: string): Promise<void> {

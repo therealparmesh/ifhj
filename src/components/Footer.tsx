@@ -104,6 +104,8 @@ export function Footer({
           <Hint k="⏎" label="actions" />
           <Hint k="v" label="view" />
           <Hint k="t" label="transition" />
+          <Hint k="< >" label="± col" />
+          <Hint k="⌃,." label="rank" />
           <Hint k="m" label="move" />
           <Hint k="i" label="assign me" />
           <Hint k="y" label="yank" />

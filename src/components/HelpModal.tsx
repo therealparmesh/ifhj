@@ -12,6 +12,7 @@ const BOARD_BINDINGS: { keys: string; desc: string }[] = [
   { keys: "t", desc: "transition to any status (fuzzy)" },
   { keys: "m", desc: "move card to any column (picker)" },
   { keys: "< >", desc: "transition to prev / next column" },
+  { keys: "⌃, ⌃.", desc: "rerank card up / down within column" },
   { keys: "i", desc: "assign to me" },
   { keys: "e / E", desc: "edit summary / description in Neovim" },
   { keys: "c", desc: "create issue" },

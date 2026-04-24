@@ -15,6 +15,8 @@ import {
   type Transition,
   assignIssueToMe,
   getBoardConfig,
+  rankIssueAfter,
+  rankIssueBefore,
   getBoardIssues,
   getIssueLinkTypes,
   getIssueTypes,
@@ -503,6 +505,34 @@ export function BoardView({ cfg, board, onExit }: Props) {
     }
   }, [currentIssue, cfg, flash]);
 
+  const doRerank = useCallback(
+    async (direction: -1 | 1) => {
+      const col = columns[activeCol];
+      const row = activeRows[activeCol] ?? 0;
+      if (!col) return;
+      const issue = col.issues[row];
+      if (!issue) return;
+      const targetRow = row + direction;
+      if (targetRow < 0 || targetRow >= col.issues.length) {
+        flash("already at the edge", "info");
+        return;
+      }
+      const neighbor = col.issues[targetRow]!;
+      try {
+        if (direction === -1) {
+          await rankIssueBefore(cfg, issue.key, neighbor.key);
+        } else {
+          await rankIssueAfter(cfg, issue.key, neighbor.key);
+        }
+        pendingFocusKey.current = issue.key;
+        await load();
+      } catch (e) {
+        flash(errorMessage(e), "err");
+      }
+    },
+    [columns, activeCol, activeRows, cfg, flash, load],
+  );
+
   const openDetailForKey = useCallback((key: string) => {
     setModal({ kind: "detail", issueKey: key });
   }, []);
@@ -629,6 +659,8 @@ export function BoardView({ cfg, board, onExit }: Props) {
         setModal({ kind: "move-picker" });
         return;
       }
+      if (key.ctrl && input === ",") return void doRerank(-1);
+      if (key.ctrl && input === ".") return void doRerank(1);
       if (input === "<" || input === ",") return void doTransition(-1);
       if (input === ">" || input === ".") return void doTransition(1);
       if (input === "t") return void doFuzzyTransition();
@@ -720,7 +752,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
         title={`${currentIssue.key} · ${currentIssue.summary.slice(0, 60)}`}
         items={[
           { id: "detail", label: "view details" },
-          { id: "title", label: "edit title (Neovim)" },
+          { id: "title", label: "edit title" },
           { id: "desc", label: "edit description (Neovim)" },
           { id: "transition", label: "transition to status…" },
           { id: "move", label: "move to column…" },
