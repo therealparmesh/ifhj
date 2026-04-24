@@ -70,6 +70,22 @@ login: you@your-company.com
 
 Environment variables win when both are set.
 
+### Theme
+
+ifhj ships with two themes: `synthwave` (default) and `terminal`. The `terminal` theme defers to your terminal's own color palette.
+
+Set `IFHJ_THEME` as an environment variable:
+
+```sh
+export IFHJ_THEME=terminal    # or: synthwave
+```
+
+Or set it in your Jira config file at `~/.config/.jira/.config.yml`:
+
+```yaml
+theme: terminal
+```
+
 ## Usage
 
 ```sh
