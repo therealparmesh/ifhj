@@ -35,7 +35,7 @@ import {
   openInBrowser,
   theme,
   truncate,
-  typeColors,
+  typeColor,
   typeGlyph,
 } from "../ui";
 import { FilterPicker } from "./FilterPicker";
@@ -1005,7 +1005,7 @@ export function IssueDetailModal({
     );
   }
 
-  const typeColor = typeColors[detail.issueType] ?? theme.fg;
+  const typeAccent = typeColor(detail.issueType);
   const clampedScroll = Math.min(bodyScroll, maxScroll);
   const visibleMain = mainLines.slice(clampedScroll, clampedScroll + bodyHeight);
 
@@ -1019,12 +1019,12 @@ export function IssueDetailModal({
     >
       {/* Header */}
       <Box paddingX={1}>
-        <Text color={typeColor}>{typeGlyph(detail.issueType)} </Text>
+        <Text color={typeAccent}>{typeGlyph(detail.issueType)} </Text>
         <Text color={theme.pink} bold>
           {detail.key}
         </Text>
         <Text color={theme.muted}> · </Text>
-        <Text color={typeColor}>{detail.issueType}</Text>
+        <Text color={typeAccent}>{detail.issueType}</Text>
         {detail.parentKey ? (
           <>
             <Text color={theme.muted}> · </Text>

@@ -1,7 +1,7 @@
 import { Box, Text } from "ink";
 
 import type { BoardColumn, Issue } from "../jira";
-import { assigneeColor, bg, initials, theme, truncate, typeColors, typeGlyph } from "../ui";
+import { assigneeColor, bg, initials, theme, truncate, typeColor, typeGlyph } from "../ui";
 
 export type Column = BoardColumn & { issues: Issue[] };
 
@@ -109,7 +109,7 @@ function Card({
   selected: boolean;
   isMatch: boolean;
 }) {
-  const accent = typeColors[issue.issueType] ?? theme.fg;
+  const accent = typeColor(issue.issueType);
   const bar = selected ? theme.accent : accent;
   const badge = initials(issue.assignee);
   const badgeColor = assigneeColor(issue.assignee);

@@ -1,7 +1,7 @@
 import { Box, Text } from "ink";
 
 import type { Issue } from "../jira";
-import { theme, truncate, typeColors } from "../ui";
+import { theme, truncate, typeColor } from "../ui";
 import { Hint } from "./Hint";
 import { TextInput } from "./TextInput";
 
@@ -44,9 +44,7 @@ export function Footer({
             {currentIssue.key}
           </Text>
           <Text color={theme.muted}> · </Text>
-          <Text color={typeColors[currentIssue.issueType] ?? theme.fg}>
-            {currentIssue.issueType}
-          </Text>
+          <Text color={typeColor(currentIssue.issueType)}>{currentIssue.issueType}</Text>
           <Text color={theme.muted}> · </Text>
           <Text color={theme.fg}>
             {truncate(currentIssue.summary, Math.max(10, termCols - currentIssue.key.length - 20))}
