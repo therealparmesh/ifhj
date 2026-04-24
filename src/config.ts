@@ -6,44 +6,86 @@ export type JiraConfig = {
   authHeader: string;
 };
 
-// Strip matching single or double quotes around a YAML scalar.
-function unquote(s: string): string {
-  const t = s.trim();
-  if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))
-    return t.slice(1, -1);
-  return t;
+export type AppConfig = {
+  jira: JiraConfig;
+  maxVisibleCols: number;
+};
+
+export function parseFlatToml(text: string): Record<string, string | number> {
+  const result: Record<string, string | number> = {};
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#") || line.startsWith("[")) continue;
+    const eq = line.indexOf("=");
+    if (eq === -1) continue;
+    const key = line.slice(0, eq).trim();
+    const val = line.slice(eq + 1).trim();
+    if (val.startsWith('"') || val.startsWith("'")) {
+      const quote = val[0]!;
+      const close = val.indexOf(quote, 1);
+      if (close !== -1) {
+        result[key] = val.slice(1, close);
+        continue;
+      }
+    }
+    const bare = val.replace(/#.*$/, "").trim();
+    if (bare !== "" && Number.isFinite(Number(bare)))
+      result[key] = Number(bare);
+    else
+      result[key] = bare;
+  }
+  return result;
 }
 
-async function readConfigYaml(): Promise<{ server?: string; login?: string }> {
-  const paths = [
+async function readConfigToml(): Promise<{ server?: string; login?: string; maxColumns?: number }> {
+  const legacyPaths = [
     join(homedir(), ".config", ".jira", ".config.yml"),
     join(homedir(), ".config", "jira", ".config.yml"),
+  ];
+  for (const p of legacyPaths) {
+    if (await Bun.file(p).exists()) {
+      console.warn(`Warning: found legacy YAML config at ${p} — rename to .config.toml (TOML format)`);
+      break;
+    }
+  }
+  const paths = [
+    join(homedir(), ".config", ".jira", ".config.toml"),
+    join(homedir(), ".config", "jira", ".config.toml"),
   ];
   for (const p of paths) {
     const f = Bun.file(p);
     if (!(await f.exists())) continue;
-    const text = await f.text();
-    const out: { server?: string; login?: string } = {};
-    const server = /^server:\s*(.+)$/m.exec(text)?.[1];
-    const login = /^login:\s*(.+)$/m.exec(text)?.[1];
-    if (server) out.server = unquote(server);
-    if (login) out.login = unquote(login);
+    const parsed = parseFlatToml(await f.text());
+    const out: { server?: string; login?: string; maxColumns?: number } = {};
+    if (typeof parsed["server"] === "string") out.server = parsed["server"];
+    if (typeof parsed["login"] === "string") out.login = parsed["login"];
+    if (typeof parsed["max_columns"] === "number" && parsed["max_columns"] >= 1) {
+      out.maxColumns = Math.min(Math.trunc(parsed["max_columns"]), 20);
+    }
     return out;
   }
   return {};
 }
 
-export async function loadConfig(): Promise<JiraConfig> {
+const DEFAULT_MAX_VISIBLE_COLS = 4;
+
+export async function loadConfig(): Promise<AppConfig> {
   const env = Bun.env;
-  const yaml = await readConfigYaml();
-  const server = env["JIRA_SERVER"] || yaml.server;
-  const email = env["JIRA_LOGIN"] || env["JIRA_EMAIL"] || yaml.login;
+  const toml = await readConfigToml();
+  const server = env["JIRA_SERVER"] || toml.server;
+  const email = env["JIRA_LOGIN"] || env["JIRA_EMAIL"] || toml.login;
   const token = env["JIRA_API_TOKEN"];
   if (!server)
-    throw new Error("Missing Jira server (set JIRA_SERVER or ~/.config/.jira/.config.yml)");
+    throw new Error("Missing Jira server (set JIRA_SERVER or ~/.config/.jira/.config.toml)");
   if (!email)
-    throw new Error("Missing Jira login email (set JIRA_LOGIN or ~/.config/.jira/.config.yml)");
+    throw new Error("Missing Jira login email (set JIRA_LOGIN or ~/.config/.jira/.config.toml)");
   if (!token) throw new Error("Missing JIRA_API_TOKEN environment variable");
   const authHeader = "Basic " + Buffer.from(`${email}:${token}`).toString("base64");
-  return { server: server.replace(/\/$/, ""), authHeader };
+
+  const maxVisibleCols = toml.maxColumns ?? DEFAULT_MAX_VISIBLE_COLS;
+
+  return {
+    jira: { server: server.replace(/\/$/, ""), authHeader },
+    maxVisibleCols,
+  };
 }

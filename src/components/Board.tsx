@@ -38,13 +38,12 @@ import { TextInput } from "./TextInput";
 
 // How long a toast message lingers in the footer before auto-clearing.
 const FLASH_TTL_MS = 3500;
-const MAX_VISIBLE_COLS = 4;
-
 type Board = { id: number; name: string };
 
 type Props = {
   cfg: JiraConfig;
   board: Board;
+  maxVisibleCols: number;
   onExit: () => void;
 };
 
@@ -103,7 +102,7 @@ function buildColumns(colDefs: BoardColumn[], issues: Issue[]): Column[] {
   return cols;
 }
 
-export function BoardView({ cfg, board, onExit }: Props) {
+export function BoardView({ cfg, board, maxVisibleCols, onExit }: Props) {
   const { cols: termCols, rows: termRows } = useDimensions();
 
   // Server state
@@ -295,8 +294,8 @@ export function BoardView({ cfg, board, onExit }: Props) {
   );
 
   /**
-   * Layout math. The grid fits `MAX_VISIBLE_COLS` columns; everything beyond
-   * that requires ←/→ paging.
+   * Layout math. The grid fits `maxVisibleCols` columns; everything beyond
+   * that requires left/right paging.
    */
   const footerRows = modal.kind === "search" ? 6 : status ? 5 : 4;
   const columnHeight = Math.max(6, termRows - 2 - footerRows);
@@ -304,7 +303,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
   const perCardLines = 5; // card = 3 content + 1 spacer + 1 (border-ish) handled via marginBottom
   const cardsVisible = Math.max(1, Math.floor(columnInnerHeight / perCardLines));
 
-  const visibleColCount = Math.min(MAX_VISIBLE_COLS, columns.length);
+  const visibleColCount = Math.min(maxVisibleCols, columns.length);
   const colWindowStart = Math.max(
     0,
     Math.min(columns.length - visibleColCount, activeCol - Math.floor(visibleColCount / 2)),
