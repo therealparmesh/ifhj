@@ -32,6 +32,7 @@ const DETAIL_BINDINGS: { keys: string; desc: string }[] = [
   { keys: "tab", desc: "switch pane (body ↔ fields)" },
   { keys: "↑ ↓ j k", desc: "scroll body / move field cursor" },
   { keys: "g / G", desc: "top / bottom" },
+  { keys: "PgUp PgDn", desc: "page scroll" },
   { keys: "⏎", desc: "edit focused field or open comment" },
   { keys: "x", desc: "clear focused field" },
   { keys: "[ ]", desc: "prev / next comment" },
