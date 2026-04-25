@@ -56,7 +56,13 @@ function formatShortDate(iso: string | undefined): string {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
-type DetailLine = { text: string; color: string; bold?: boolean; commentIdx?: number | undefined };
+type DetailLine = {
+  text: string;
+  color: string;
+  bold?: boolean;
+  commentIdx?: number | undefined;
+  codeBg?: boolean;
+};
 
 function renderDetailLines(detail: IssueDetail, mainWidth: number): DetailLine[] {
   const out: DetailLine[] = [];
@@ -108,6 +114,17 @@ function renderDetailLines(detail: IssueDetail, mainWidth: number): DetailLine[]
     push(formatShortDate(c.created), theme.muted, false, i);
     for (const ln of (c.body || "").split(/\n/)) pushLine(` ${ln}`, theme.fg, i);
   });
+
+  let inCode = false;
+  for (const ln of out) {
+    if (ln.text.trimStart().startsWith("```")) {
+      inCode = !inCode;
+      ln.codeBg = true;
+    } else if (inCode) {
+      ln.codeBg = true;
+    }
+  }
+
   return out;
 }
 
@@ -1059,7 +1076,7 @@ export function IssueDetailModal({
                 color={ln.color}
                 bold={ln.bold ?? false}
                 wrap="truncate"
-                {...bg(isCommentHeader ? theme.accentDim : undefined)}
+                {...bg(isCommentHeader ? theme.accentDim : ln.codeBg ? theme.accentDim : undefined)}
               >
                 {ln.text || " "}
               </Text>
