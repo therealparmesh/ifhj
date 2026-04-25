@@ -6,6 +6,26 @@ export type JiraConfig = {
   authHeader: string;
 };
 
+export type Settings = Record<string, unknown>;
+
+const SETTINGS_PATH = join(homedir(), ".config", "ifhj", "settings.json");
+
+export async function loadSettings(): Promise<Settings> {
+  try {
+    const f = Bun.file(SETTINGS_PATH);
+    if (!(await f.exists())) return {};
+    return (await f.json()) as Settings;
+  } catch {
+    return {};
+  }
+}
+
+export async function saveSettings(settings: Settings): Promise<void> {
+  const { mkdirSync } = await import("node:fs");
+  mkdirSync(join(homedir(), ".config", "ifhj"), { recursive: true });
+  await Bun.write(SETTINGS_PATH, JSON.stringify(settings, null, 2) + "\n");
+}
+
 // Strip matching single or double quotes around a YAML scalar.
 function unquote(s: string): string {
   const t = s.trim();

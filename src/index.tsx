@@ -4,20 +4,23 @@ import { useEffect, useState } from "react";
 
 import { BoardView } from "./components/Board";
 import { BoardPicker } from "./components/BoardPicker";
-import { loadConfig, type JiraConfig } from "./config";
+import { type Settings, loadConfig, type JiraConfig, loadSettings } from "./config";
 import type { Board } from "./jira";
 import { errorMessage, theme } from "./ui";
 
 function App() {
   const { exit } = useApp();
   const [cfg, setCfg] = useState<JiraConfig | null>(null);
+  const [settings, setSettings] = useState<Settings | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [board, setBoard] = useState<Board | null>(null);
 
   useEffect(() => {
     (async () => {
       try {
-        setCfg(await loadConfig());
+        const [c, s] = await Promise.all([loadConfig(), loadSettings()]);
+        setCfg(c);
+        setSettings(s);
       } catch (e) {
         setErr(errorMessage(e));
       }
@@ -36,7 +39,7 @@ function App() {
       </Box>
     );
 
-  if (!cfg)
+  if (!cfg || !settings)
     return (
       <Box flexDirection="column" padding={1}>
         <Text color={theme.accent} bold>
