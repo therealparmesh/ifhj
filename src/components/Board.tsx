@@ -9,7 +9,6 @@ import {
   type BoardColumn,
   type BoardConfig,
   type Issue,
-  type IssueSearchResult,
   type IssueLinkType,
   type IssueType,
   type Transition,
@@ -21,7 +20,6 @@ import {
   getIssueLinkTypes,
   getIssueTypes,
   getTransitions,
-  searchByJql,
   transitionIssue,
   updateDescription,
   updateSummary,
@@ -30,13 +28,14 @@ import { clamp, copyToClipboard, errorMessage, openInBrowser, theme, truncate } 
 import { BoardHeader } from "./BoardHeader";
 import { CreateWizard } from "./CreateWizard";
 import { FilterPicker } from "./FilterPicker";
+import { FilterPickerModal } from "./FilterPickerModal";
 import { Footer } from "./Footer";
 import { HelpModal } from "./HelpModal";
-import { Hint } from "./Hint";
 import { IssueDetailModal } from "./IssueDetailModal";
+import { JqlView } from "./JqlView";
 import { type Column, ColumnView, PagingArrow } from "./Kanban";
 import { ListPicker } from "./ListPicker";
-import { TextInput } from "./TextInput";
+import { TitleEditModal } from "./TitleEditModal";
 import { ToastStack, useToasts } from "./Toasts";
 
 const MAX_VISIBLE_COLS = 4;
@@ -568,17 +567,30 @@ export function BoardView({ cfg, board, onExit }: Props) {
     }
   }, [cfg.server, conf, board.id, flash]);
 
+  /**
+   * Hydrate (and memoize) the issue-type + link-type catalog. Both are
+   * board-lifetime constants, so one fetch covers every caller that needs
+   * them: `c` (full wizard) and the subtask path out of the detail modal.
+   */
+  const ensureMeta = useCallback(async (): Promise<{
+    types: IssueType[];
+    linkTypes: IssueLinkType[];
+  }> => {
+    if (!conf) throw new Error("board config not loaded");
+    if (!metaCache.current) {
+      const [types, linkTypes] = await Promise.all([
+        getIssueTypes(cfg, conf.projectKey),
+        getIssueLinkTypes(cfg),
+      ]);
+      metaCache.current = { types: types.filter((t) => !t.subtask), linkTypes };
+    }
+    return metaCache.current;
+  }, [cfg, conf]);
+
   const startCreate = useCallback(async () => {
     if (!conf) return;
     try {
-      if (!metaCache.current) {
-        const [types, linkTypes] = await Promise.all([
-          getIssueTypes(cfg, conf.projectKey),
-          getIssueLinkTypes(cfg),
-        ]);
-        metaCache.current = { types: types.filter((t) => !t.subtask), linkTypes };
-      }
-      const { types, linkTypes } = metaCache.current;
+      const { types, linkTypes } = await ensureMeta();
       if (types.length === 0) {
         flash("no creatable issue types", "err");
         return;
@@ -587,7 +599,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
     } catch (e) {
       flash(errorMessage(e), "err");
     }
-  }, [cfg, conf, flash]);
+  }, [conf, ensureMeta, flash]);
 
   // Nudge the cursor within the active column / across columns.
   const nudgeRow = useCallback(
@@ -831,40 +843,28 @@ export function BoardView({ cfg, board, onExit }: Props) {
   if (modal.kind === "title-edit") {
     const editKey = modal.issueKey;
     return (
-      <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.accent}>
-        <Text color={theme.accent} bold>
-          edit title · {editKey}
-        </Text>
-        <Box marginTop={1}>
-          <Text color={theme.muted}>› </Text>
-          <TextInput
-            value={modal.current}
-            placeholder="issue title"
-            onChange={(v) => setModal({ ...modal, current: v })}
-            onSubmit={async (val) => {
-              const next = val.trim();
-              if (!next) {
-                flash("summary empty, not saved", "info");
-                closeModal();
-                return;
-              }
-              closeModal();
-              try {
-                await updateSummary(cfg, editKey, next);
-                flash(`${editKey} title updated`, "ok");
-                await load();
-              } catch (e) {
-                flash(errorMessage(e), "err");
-              }
-            }}
-            onCancel={closeModal}
-          />
-        </Box>
-        <Box marginTop={1}>
-          <Hint k="⏎" label="save" />
-          <Hint k="esc" label="cancel" />
-        </Box>
-      </Box>
+      <TitleEditModal
+        issueKey={editKey}
+        value={modal.current}
+        onChange={(v) => setModal({ ...modal, current: v })}
+        onSubmit={async (val) => {
+          const next = val.trim();
+          if (!next) {
+            flash("summary empty, not saved", "info");
+            closeModal();
+            return;
+          }
+          closeModal();
+          try {
+            await updateSummary(cfg, editKey, next);
+            flash(`${editKey} title updated`, "ok");
+            await load();
+          } catch (e) {
+            flash(errorMessage(e), "err");
+          }
+        }}
+        onCancel={closeModal}
+      />
     );
   }
   if (modal.kind === "detail") {
@@ -980,106 +980,43 @@ export function BoardView({ cfg, board, onExit }: Props) {
       />
     );
   }
-  if (modal.kind === "filter-assignee") {
+  if (
+    modal.kind === "filter-assignee" ||
+    modal.kind === "filter-type" ||
+    modal.kind === "filter-sprint" ||
+    modal.kind === "filter-label" ||
+    modal.kind === "filter-epic"
+  ) {
+    // Map modal kind → the filter key + label + items source in one shot so
+    // the five variants collapse to a single render block.
+    const spec: {
+      key: keyof Filters;
+      label: string;
+      items: string[];
+    } =
+      modal.kind === "filter-assignee"
+        ? { key: "assignee", label: "assignee", items: modal.names }
+        : modal.kind === "filter-type"
+          ? { key: "type", label: "issue type", items: modal.types }
+          : modal.kind === "filter-sprint"
+            ? { key: "sprint", label: "sprint", items: modal.sprints }
+            : modal.kind === "filter-label"
+              ? { key: "label", label: "label", items: modal.labels }
+              : { key: "epic", label: "epic", items: modal.epics };
     return (
-      <FilterPicker
-        title="filter by assignee"
-        items={modal.names.map((n) => ({ id: n, label: n }))}
-        {...(filters.assignee ? { currentId: filters.assignee } : {})}
-        borderColor={theme.cyan}
+      <FilterPickerModal
+        label={spec.label}
+        items={spec.items}
+        currentId={filters[spec.key]}
         onPick={(id) => {
-          setFilters((f) => ({ ...f, assignee: id }));
+          setFilters((f) => ({ ...f, [spec.key]: id }));
           closeModal();
-          flash(`assignee: ${id}`, "ok");
+          flash(`${spec.label}: ${id}`, "ok");
         }}
         onClear={() => {
-          setFilters((f) => ({ ...f, assignee: null }));
+          setFilters((f) => ({ ...f, [spec.key]: null }));
           closeModal();
-          flash("assignee filter cleared", "ok");
-        }}
-        onCancel={() => setModal({ kind: "filter-menu" })}
-      />
-    );
-  }
-  if (modal.kind === "filter-type") {
-    return (
-      <FilterPicker
-        title="filter by issue type"
-        items={modal.types.map((t) => ({ id: t, label: t }))}
-        {...(filters.type ? { currentId: filters.type } : {})}
-        borderColor={theme.cyan}
-        onPick={(id) => {
-          setFilters((f) => ({ ...f, type: id }));
-          closeModal();
-          flash(`type: ${id}`, "ok");
-        }}
-        onClear={() => {
-          setFilters((f) => ({ ...f, type: null }));
-          closeModal();
-          flash("type filter cleared", "ok");
-        }}
-        onCancel={() => setModal({ kind: "filter-menu" })}
-      />
-    );
-  }
-  if (modal.kind === "filter-sprint") {
-    return (
-      <FilterPicker
-        title="filter by sprint"
-        items={modal.sprints.map((s) => ({ id: s, label: s }))}
-        {...(filters.sprint ? { currentId: filters.sprint } : {})}
-        borderColor={theme.cyan}
-        onPick={(id) => {
-          setFilters((f) => ({ ...f, sprint: id }));
-          closeModal();
-          flash(`sprint: ${id}`, "ok");
-        }}
-        onClear={() => {
-          setFilters((f) => ({ ...f, sprint: null }));
-          closeModal();
-          flash("sprint filter cleared", "ok");
-        }}
-        onCancel={() => setModal({ kind: "filter-menu" })}
-      />
-    );
-  }
-  if (modal.kind === "filter-label") {
-    return (
-      <FilterPicker
-        title="filter by label"
-        items={modal.labels.map((l) => ({ id: l, label: l }))}
-        {...(filters.label ? { currentId: filters.label } : {})}
-        borderColor={theme.cyan}
-        onPick={(id) => {
-          setFilters((f) => ({ ...f, label: id }));
-          closeModal();
-          flash(`label: ${id}`, "ok");
-        }}
-        onClear={() => {
-          setFilters((f) => ({ ...f, label: null }));
-          closeModal();
-          flash("label filter cleared", "ok");
-        }}
-        onCancel={() => setModal({ kind: "filter-menu" })}
-      />
-    );
-  }
-  if (modal.kind === "filter-epic") {
-    return (
-      <FilterPicker
-        title="filter by epic"
-        items={modal.epics.map((e) => ({ id: e, label: e }))}
-        {...(filters.epic ? { currentId: filters.epic } : {})}
-        borderColor={theme.cyan}
-        onPick={(id) => {
-          setFilters((f) => ({ ...f, epic: id }));
-          closeModal();
-          flash(`epic: ${id}`, "ok");
-        }}
-        onClear={() => {
-          setFilters((f) => ({ ...f, epic: null }));
-          closeModal();
-          flash("epic filter cleared", "ok");
+          flash(`${spec.label} filter cleared`, "ok");
         }}
         onCancel={() => setModal({ kind: "filter-menu" })}
       />
@@ -1207,145 +1144,6 @@ export function BoardView({ cfg, board, onExit }: Props) {
         }}
       />
       <ToastStack toasts={toasts} maxWidth={termCols} />
-    </Box>
-  );
-}
-
-function JqlView({
-  cfg,
-  onPick,
-  onCancel,
-}: {
-  cfg: JiraConfig;
-  onPick: (key: string) => void;
-  onCancel: () => void;
-}) {
-  const [jql, setJql] = useState("");
-  const [results, setResults] = useState<IssueSearchResult[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [idx, setIdx] = useState(0);
-  const submitted = useRef(false);
-
-  useInput(
-    (_input, key) => {
-      if (key.escape) onCancel();
-    },
-    { isActive: !submitted.current },
-  );
-
-  return (
-    <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.warn}>
-      <Text color={theme.warn} bold>
-        JQL query
-      </Text>
-      <Box marginTop={1}>
-        <Text color={theme.muted}>› </Text>
-        <TextInput
-          value={jql}
-          placeholder="e.g. assignee = currentUser() AND sprint in openSprints()"
-          onChange={(v) => {
-            setJql(v);
-            setError(null);
-          }}
-          onSubmit={async () => {
-            if (!jql.trim()) return;
-            submitted.current = true;
-            setLoading(true);
-            setError(null);
-            try {
-              const r = await searchByJql(cfg, jql.trim());
-              setResults(r);
-              setIdx(0);
-            } catch (e) {
-              setError(errorMessage(e));
-              setResults([]);
-            } finally {
-              setLoading(false);
-              submitted.current = false;
-            }
-          }}
-          onCancel={onCancel}
-        />
-      </Box>
-      {error ? (
-        <Box marginTop={1}>
-          <Text color={theme.err}>{error}</Text>
-        </Box>
-      ) : null}
-      {loading ? (
-        <Box marginTop={1}>
-          <Text color={theme.accent}>◴ searching…</Text>
-        </Box>
-      ) : results.length > 0 ? (
-        <JqlResults results={results} idx={idx} setIdx={setIdx} onPick={onPick} />
-      ) : submitted.current ? null : jql.trim() ? null : (
-        <Box marginTop={1}>
-          <Text color={theme.muted}>type a JQL query and press ⏎</Text>
-        </Box>
-      )}
-      <Box marginTop={1}>
-        <Hint k="⏎" label="search" />
-        <Hint k="esc" label="close" />
-      </Box>
-    </Box>
-  );
-}
-
-function JqlResults({
-  results,
-  idx,
-  setIdx,
-  onPick,
-}: {
-  results: IssueSearchResult[];
-  idx: number;
-  setIdx: (i: number) => void;
-  onPick: (key: string) => void;
-}) {
-  const { rows } = useDimensions();
-  const maxVisible = Math.max(5, rows - 12);
-  const [scroll, setScroll] = useState(0);
-
-  useEffect(() => {
-    if (idx < scroll) setScroll(idx);
-    else if (idx >= scroll + maxVisible) setScroll(idx - maxVisible + 1);
-  }, [idx, scroll, maxVisible]);
-
-  useInput((input, key) => {
-    if (key.upArrow || input === "k") setIdx(clamp(idx - 1, 0, results.length - 1));
-    else if (key.downArrow || input === "j") setIdx(clamp(idx + 1, 0, results.length - 1));
-    else if (key.return) {
-      const r = results[idx];
-      if (r) onPick(r.key);
-    }
-  });
-
-  const visible = results.slice(scroll, scroll + maxVisible);
-  return (
-    <Box flexDirection="column" marginTop={1}>
-      <Text color={theme.muted}>
-        {results.length} result{results.length === 1 ? "" : "s"}
-      </Text>
-      {scroll > 0 ? <Text color={theme.muted}> ▲ {scroll} more</Text> : null}
-      {visible.map((r, i) => {
-        const abs = scroll + i;
-        const sel = abs === idx;
-        return (
-          <Box key={r.key}>
-            <Text color={sel ? theme.accent : theme.muted}>{sel ? "▶ " : "  "}</Text>
-            <Text color={sel ? theme.pink : theme.fgDim} bold={sel}>
-              {r.key}
-            </Text>
-            <Text color={theme.muted}> · </Text>
-            <Text color={sel ? theme.fg : theme.fgDim}>{truncate(r.summary, 60)}</Text>
-            <Text color={theme.muted}> {r.issueType}</Text>
-          </Box>
-        );
-      })}
-      {results.length > scroll + maxVisible ? (
-        <Text color={theme.muted}> ▼ {results.length - scroll - maxVisible} more</Text>
-      ) : null}
     </Box>
   );
 }
