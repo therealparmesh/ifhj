@@ -139,6 +139,14 @@ Assignee, priority, parent, story points, labels, components, fix versions, due 
 
 Descriptions and comments round-trip as Markdown. Write Markdown in Neovim, it gets converted to Jira's ADF format on save. ADF from Jira gets converted back to Markdown for display.
 
+### @mentions
+
+In a description or comment, type `@`. Neovim opens a completion menu of the project's assignable users — pick one and it inserts `[@Name](jira-mention:<id>)`. On save, that becomes a real Jira mention.
+
+Plain `@foo` that you type yourself stays as literal text. The mention is whatever came out of the menu — no guessing.
+
+The completion source is injected via `--cmd` / `-c` and is buffer-local, so it doesn't touch your regular Neovim config.
+
 ### Caching
 
 Board state is cached at `~/.cache/ifhj/` for instant startup. Stale after 10 minutes. Fresh data loads in the background and replaces the cache.

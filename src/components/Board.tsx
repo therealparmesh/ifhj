@@ -11,9 +11,11 @@ import {
   type Issue,
   type IssueLinkType,
   type IssueType,
+  type JiraUser,
   type Transition,
   assignIssueToMe,
   createIssue,
+  getAssignableUsers,
   getBoardConfig,
   rankIssueAfter,
   rankIssueBefore,
@@ -132,6 +134,9 @@ export function BoardView({ cfg, board, onExit }: Props) {
 
   // Link & issue types don't change for the life of the board — fetch once, reuse.
   const metaCache = useRef<{ types: IssueType[]; linkTypes: IssueLinkType[] } | null>(null);
+  // Assignable-users cache for @-completion in Neovim, shared across every
+  // edit path that shells out on this board.
+  const usersRef = useRef<JiraUser[] | null>(null);
   // First load is fatal; reload failures just flash a toast.
   const hasLoadedOnce = useRef(false);
   // After a transition, follow the moved card to its new column on reload.
@@ -441,12 +446,30 @@ export function BoardView({ cfg, board, onExit }: Props) {
     setModal({ kind: "title-edit", issueKey: issue.key, current: issue.summary });
   }, [currentIssue]);
 
+  /**
+   * Lazy-hydrate the project's assignable users. Handed to `editInNeovim`
+   * so the editor's `@` completion menu can offer real teammates. Fetch
+   * failure isn't fatal — we just spawn plain nvim without the menu.
+   */
+  const ensureUsers = useCallback(async (): Promise<JiraUser[]> => {
+    if (!conf) return [];
+    try {
+      if (!usersRef.current) {
+        usersRef.current = await getAssignableUsers(cfg, conf.projectKey);
+      }
+      return usersRef.current;
+    } catch {
+      return [];
+    }
+  }, [cfg, conf]);
+
   const doEditDescription = useCallback(async () => {
     const issue = currentIssue;
     if (!issue) return;
     setModal({ kind: "nvim" });
     try {
-      const raw = await editInNeovim(issue.description, `${issue.key}-desc.md`);
+      const mentionUsers = await ensureUsers();
+      const raw = await editInNeovim(issue.description, `${issue.key}-desc.md`, { mentionUsers });
       setModal({ kind: "none" });
       if (raw.trim() === issue.description.trim()) {
         flash("no change", "info");
@@ -459,7 +482,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
       setModal({ kind: "none" });
       flash(errorMessage(e), "err");
     }
-  }, [currentIssue, cfg, flash, load]);
+  }, [currentIssue, cfg, flash, load, ensureUsers]);
 
   const doAssignToMe = useCallback(async () => {
     const issue = currentIssue;
@@ -1143,6 +1166,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
         types={modal.types}
         linkTypes={modal.linkTypes}
         defaultParent={modal.parentKey}
+        ensureUsers={ensureUsers}
         onCancel={closeModal}
         onDone={({ key, title, linkSummary }) => {
           const headline = `created ${key}: ${title}`;

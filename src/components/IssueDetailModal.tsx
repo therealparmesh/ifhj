@@ -239,6 +239,25 @@ export function IssueDetailModal({
 
   const [myAccountId, setMyAccountId] = useState<string | null>(null);
 
+  /**
+   * Assignable-users cache, feeding Neovim's `@`-completion menu on every
+   * description/comment edit. Lazy-fetched once per modal open — project
+   * membership doesn't churn fast enough to be worth refreshing. The
+   * `assignee`-field editor fetches its own list; keeping them separate
+   * avoids reshuffling that path.
+   */
+  const usersRef = useRef<JiraUser[] | null>(null);
+  const ensureUsers = useCallback(async (): Promise<JiraUser[]> => {
+    try {
+      if (!usersRef.current) {
+        usersRef.current = await getAssignableUsers(cfg, projectKey);
+      }
+      return usersRef.current;
+    } catch {
+      return [];
+    }
+  }, [cfg, projectKey]);
+
   const [searchResults, setSearchResults] = useState<
     { key: string; summary: string; issueType: string }[]
   >([]);
@@ -333,7 +352,8 @@ export function IssueDetailModal({
     if (!detail) return;
     setOverlay({ kind: "nvim" });
     try {
-      const raw = await editInNeovim(detail.description, `${detail.key}-desc.md`);
+      const mentionUsers = await ensureUsers();
+      const raw = await editInNeovim(detail.description, `${detail.key}-desc.md`, { mentionUsers });
       if (raw.trim() === detail.description.trim()) {
         showFlash("no change");
         setOverlay({ kind: "none" });
@@ -345,13 +365,14 @@ export function IssueDetailModal({
       showFlash(errorMessage(e), "err");
       setOverlay({ kind: "none" });
     }
-  }, [detail, cfg, showFlash, doSave]);
+  }, [detail, cfg, showFlash, doSave, ensureUsers]);
 
   const doAddComment = useCallback(async () => {
     if (!detail) return;
     setOverlay({ kind: "nvim" });
     try {
-      const raw = await editInNeovim("", `${detail.key}-comment.md`);
+      const mentionUsers = await ensureUsers();
+      const raw = await editInNeovim("", `${detail.key}-comment.md`, { mentionUsers });
       if (!raw.trim()) {
         showFlash("empty comment, not saved");
         setOverlay({ kind: "none" });
@@ -363,14 +384,17 @@ export function IssueDetailModal({
       showFlash(errorMessage(e), "err");
       setOverlay({ kind: "none" });
     }
-  }, [detail, cfg, showFlash, doSave]);
+  }, [detail, cfg, showFlash, doSave, ensureUsers]);
 
   const doEditComment = useCallback(
     async (comment: Comment) => {
       if (!detail) return;
       setOverlay({ kind: "nvim" });
       try {
-        const raw = await editInNeovim(comment.body, `${detail.key}-comment-${comment.id}.md`);
+        const mentionUsers = await ensureUsers();
+        const raw = await editInNeovim(comment.body, `${detail.key}-comment-${comment.id}.md`, {
+          mentionUsers,
+        });
         if (raw.trim() === comment.body.trim()) {
           showFlash("no change");
           setOverlay({ kind: "none" });
@@ -383,7 +407,7 @@ export function IssueDetailModal({
         setOverlay({ kind: "none" });
       }
     },
-    [detail, cfg, showFlash, doSave],
+    [detail, cfg, showFlash, doSave, ensureUsers],
   );
 
   const openFieldEditor = useCallback(async () => {

@@ -1,5 +1,4 @@
-import { adfToMd, mdToAdf } from "github-markdown-adf";
-
+import { adfToText, textToAdf } from "./adf";
 import type { JiraConfig } from "./config";
 
 /**
@@ -129,39 +128,6 @@ export async function getBoardConfig(cfg: JiraConfig, boardId: number): Promise<
     projectKey: data.location?.key,
     columns,
   };
-}
-
-function adfToText(node: any): string {
-  if (!node) return "";
-  if (typeof node === "string") return node;
-  if (node.type === "doc" && node.version === 1) {
-    try {
-      return adfToMd(node).replaceAll("\t", "  ");
-    } catch {}
-  }
-  // Tabs desync Ink's column math with terminal width — normalize to spaces.
-  if (node.type === "text") return (node.text ?? "").replaceAll("\t", "  ");
-  if (node.type === "hardBreak") return "\n";
-  if (node.type === "mention") return `@${node.attrs?.text ?? node.attrs?.displayName ?? ""}`;
-  if (node.type === "emoji") return node.attrs?.text ?? node.attrs?.shortName ?? "";
-  if (node.type === "inlineCard") return node.attrs?.url ?? "";
-  if (node.type === "media" || node.type === "mediaSingle" || node.type === "mediaGroup")
-    return "[media]\n";
-  if (node.type === "rule") return "\n───\n";
-  if (node.type === "codeBlock") {
-    const lang = node.attrs?.language ?? "";
-    const body = Array.isArray(node.content) ? node.content.map(adfToText).join("") : "";
-    return `\n\`\`\`${lang}\n${body}\n\`\`\`\n`;
-  }
-  const children = Array.isArray(node.content) ? node.content.map(adfToText).join("") : "";
-  if (node.type === "listItem") return `• ${children.trim()}\n`;
-  const block =
-    node.type === "paragraph" ||
-    node.type === "heading" ||
-    node.type === "bulletList" ||
-    node.type === "orderedList" ||
-    node.type === "blockquote";
-  return block ? children + "\n" : children;
 }
 
 export async function getBoardIssues(cfg: JiraConfig, boardId: number): Promise<Issue[]> {
@@ -343,11 +309,6 @@ export async function transitionIssue(
     body: JSON.stringify({ transition: { id: transitionId } }),
   });
   if (!res.ok) throw new Error(`transition failed ${res.status}: ${await res.text()}`);
-}
-
-function textToAdf(text: string): any {
-  const cleaned = text.replaceAll(/\r\n/g, "\n");
-  return mdToAdf(cleaned);
 }
 
 export async function updateSummary(
