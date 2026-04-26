@@ -6,8 +6,17 @@ import { assigneeColor, bg, initials, theme, truncate, typeColors, typeGlyph } f
 export type Column = BoardColumn & { issues: Issue[] };
 
 /**
- * Single kanban column: header (name + count), optional ▲/▼ hidden-count
- * indicators, and the visible card slice.
+ * Float-friendly formatter for the points badge — keeps 0.5 intact but
+ * drops the trailing `.0` on integers so "5p" beats "5.0p".
+ */
+function fmtPoints(sum: number): string {
+  return Number.isInteger(sum) ? String(sum) : sum.toFixed(1);
+}
+
+/**
+ * Single kanban column: header (name + count + optional WIP + optional
+ * point sum), optional ▲/▼ hidden-count indicators, and the visible card
+ * slice.
  */
 export function ColumnView({
   column,
@@ -33,6 +42,13 @@ export function ColumnView({
   const visible = column.issues.slice(scroll, scroll + cardsVisible);
   const hiddenAbove = scroll;
   const hiddenBelow = Math.max(0, column.issues.length - (scroll + cardsVisible));
+  const pointSum = column.issues.reduce((a, i) => a + (i.storyPoints ?? 0), 0);
+  const overWip = column.max !== undefined && column.issues.length > column.max;
+  const countText =
+    column.max !== undefined
+      ? `${column.issues.length}/${column.max}`
+      : String(column.issues.length);
+  const countColor = overWip ? theme.err : theme.muted;
   return (
     <Box
       width={width}
@@ -43,9 +59,14 @@ export function ColumnView({
     >
       <Box paddingX={1} justifyContent="space-between">
         <Text color={isActive ? theme.accent : theme.fgDim} bold>
-          {truncate(column.name.toUpperCase(), width - 8)}
+          {truncate(column.name.toUpperCase(), Math.max(4, width - 14))}
         </Text>
-        <Text color={theme.muted}>{column.issues.length}</Text>
+        <Box>
+          {pointSum > 0 ? <Text color={theme.muted}>{fmtPoints(pointSum)}p · </Text> : null}
+          <Text color={countColor} bold={overWip}>
+            {countText}
+          </Text>
+        </Box>
       </Box>
       {hiddenAbove > 0 ? (
         <Box paddingX={1}>

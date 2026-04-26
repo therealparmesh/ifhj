@@ -20,6 +20,8 @@ export type Board = {
 export type BoardColumn = {
   name: string;
   statusIds: string[];
+  /** WIP max from board config. 0 (or unset) means no limit. */
+  max?: number;
 };
 
 export type BoardConfig = {
@@ -40,6 +42,7 @@ export type Issue = {
   epicKey?: string;
   labels: string[];
   sprintName?: string;
+  storyPoints?: number;
 };
 
 export type Transition = { id: string; name: string; toStatusId: string };
@@ -119,10 +122,16 @@ export async function listBoards(cfg: JiraConfig): Promise<Board[]> {
 
 export async function getBoardConfig(cfg: JiraConfig, boardId: number): Promise<BoardConfig> {
   const data = await jget(cfg, `/rest/agile/1.0/board/${boardId}/configuration`);
-  const columns: BoardColumn[] = (data.columnConfig?.columns ?? []).map((c: any) => ({
-    name: c.name,
-    statusIds: (c.statuses ?? []).map((s: any) => String(s.id)),
-  }));
+  const columns: BoardColumn[] = (data.columnConfig?.columns ?? []).map((c: any) => {
+    const out: BoardColumn = {
+      name: c.name,
+      statusIds: (c.statuses ?? []).map((s: any) => String(s.id)),
+    };
+    // Jira sends 0 when no limit is set — treat as absent.
+    const max = Number(c.max);
+    if (Number.isFinite(max) && max > 0) out.max = max;
+    return out;
+  });
   return {
     name: data.name,
     projectKey: data.location?.key,
@@ -141,6 +150,7 @@ export async function getBoardIssues(cfg: JiraConfig, boardId: number): Promise<
     "labels",
     CF_EPIC_LINK,
     CF_SPRINT,
+    CF_STORY_POINTS,
     "parent",
   ].join(",");
   const all: Issue[] = [];
@@ -168,6 +178,7 @@ export async function getBoardIssues(cfg: JiraConfig, boardId: number): Promise<
       if (f.assignee?.displayName) issue.assignee = f.assignee.displayName;
       if (f.priority?.name) issue.priority = f.priority.name;
       if (activeSprint?.name) issue.sprintName = activeSprint.name;
+      if (typeof f[CF_STORY_POINTS] === "number") issue.storyPoints = f[CF_STORY_POINTS];
       const epic = f[CF_EPIC_LINK] || f.parent?.key;
       if (epic) issue.epicKey = epic;
       all.push(issue);

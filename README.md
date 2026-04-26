@@ -147,6 +147,10 @@ Plain `@foo` that you type yourself stays as literal text. The mention is whatev
 
 The completion source is injected via `--cmd` / `-c` and is buffer-local, so it doesn't touch your regular Neovim config.
 
+### Stats
+
+Each column header shows the card count, the sum of story points when non-zero, and — if the board config sets a WIP limit — `count/max`, red when over. The board header rolls up the visible-issue point total.
+
 ### Caching
 
 Board state is cached at `~/.cache/ifhj/` for instant startup. Stale after 10 minutes. Fresh data loads in the background and replaces the cache.

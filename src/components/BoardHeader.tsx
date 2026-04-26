@@ -11,6 +11,7 @@ export function BoardHeader({
   projectKey,
   visibleIssueCount,
   totalIssueCount,
+  visiblePointSum,
   colIndex,
   colCount,
   filterCount,
@@ -22,6 +23,8 @@ export function BoardHeader({
   projectKey: string;
   visibleIssueCount: number;
   totalIssueCount: number;
+  /** Sum of story points across currently-visible issues. Hidden when 0. */
+  visiblePointSum: number;
   colIndex: number;
   colCount: number;
   filterCount: number;
@@ -29,6 +32,9 @@ export function BoardHeader({
   matches: number;
   matchIdx: number;
 }) {
+  const pointText = Number.isInteger(visiblePointSum)
+    ? String(visiblePointSum)
+    : visiblePointSum.toFixed(1);
   return (
     <Box paddingX={1} justifyContent="space-between">
       <Box>
@@ -41,6 +47,7 @@ export function BoardHeader({
           · {visibleIssueCount}
           {filterCount > 0 ? ` / ${totalIssueCount}` : ""} issues
         </Text>
+        {visiblePointSum > 0 ? <Text color={theme.muted}> · {pointText}p</Text> : null}
         {colCount > 0 ? (
           <Text color={theme.muted}>
             {"  "}

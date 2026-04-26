@@ -1202,6 +1202,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
         projectKey={conf.projectKey}
         visibleIssueCount={filteredIssues.length}
         totalIssueCount={issues.length}
+        visiblePointSum={filteredIssues.reduce((a, i) => a + (i.storyPoints ?? 0), 0)}
         colIndex={activeCol}
         colCount={columns.length}
         filterCount={activeFilterCount(filters)}
