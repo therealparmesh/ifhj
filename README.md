@@ -98,6 +98,7 @@ Pick a board. Everything's keyboard from there.
 | `y` / `Y`           | yank issue key / URL                              |
 | `o` / `O`           | open card / board in browser                      |
 | `c`                 | create issue                                      |
+| `a`                 | quick add to current column                       |
 | `/`                 | search                                            |
 | `n` / `N`           | next / prev search match                          |
 | `f`                 | filter menu (assignee, type, sprint, label, epic) |

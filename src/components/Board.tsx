@@ -13,11 +13,13 @@ import {
   type IssueType,
   type Transition,
   assignIssueToMe,
+  createIssue,
   getBoardConfig,
   rankIssueAfter,
   rankIssueBefore,
   getBoardIssues,
   getIssueLinkTypes,
+  getIssueStatusId,
   getIssueTypes,
   getTransitions,
   transitionIssue,
@@ -35,6 +37,7 @@ import { IssueDetailModal } from "./IssueDetailModal";
 import { JqlView } from "./JqlView";
 import { type Column, ColumnView, PagingArrow } from "./Kanban";
 import { ListPicker } from "./ListPicker";
+import { QuickAddModal } from "./QuickAddModal";
 import { TitleEditModal } from "./TitleEditModal";
 import { ToastStack, useToasts } from "./Toasts";
 
@@ -62,6 +65,7 @@ type Modal =
   | { kind: "filter-label"; labels: string[] }
   | { kind: "filter-epic"; epics: string[] }
   | { kind: "create"; types: IssueType[]; linkTypes: IssueLinkType[]; parentKey?: string }
+  | { kind: "quick-add"; colIdx: number; typeName: string; value: string }
   | { kind: "detail"; issueKey: string }
   | { kind: "title-edit"; issueKey: string; current: string }
   | { kind: "nvim" }
@@ -601,6 +605,73 @@ export function BoardView({ cfg, board, onExit }: Props) {
     }
   }, [conf, ensureMeta, flash]);
 
+  /**
+   * Quick-add is `c` minus the wizard — just a title, landing in whatever
+   * column the cursor was on. Type defaults to the first non-subtask Jira
+   * returns (typically Story/Task). `colIdx` is captured at open-time so
+   * the user can move the cursor while typing without the target drifting.
+   */
+  const startQuickAdd = useCallback(async () => {
+    if (!conf) return;
+    try {
+      const { types } = await ensureMeta();
+      const defaultType = types[0];
+      if (!defaultType) {
+        flash("no creatable issue types", "err");
+        return;
+      }
+      setModal({ kind: "quick-add", colIdx: activeCol, typeName: defaultType.name, value: "" });
+    } catch (e) {
+      flash(errorMessage(e), "err");
+    }
+  }, [conf, ensureMeta, activeCol, flash]);
+
+  const submitQuickAdd = useCallback(
+    async (colIdx: number, typeName: string, title: string) => {
+      if (!conf) return;
+      const trimmed = title.trim();
+      if (!trimmed) {
+        flash("title empty, not created", "info");
+        closeModal();
+        return;
+      }
+      const targetCol = conf.columns[colIdx];
+      if (!targetCol) {
+        closeModal();
+        return;
+      }
+      closeModal();
+      try {
+        const created = await createIssue(cfg, conf.projectKey, typeName, trimmed, "");
+        // Jira drops the issue into the workflow's initial status, which
+        // usually isn't where the cursor was. Transition if it's not already
+        // in the target column; soft-fail if the workflow blocks the jump.
+        const statusId = await getIssueStatusId(cfg, created.key);
+        let landed = targetCol.statusIds.includes(statusId);
+        if (!landed) {
+          const trs = await getTransitions(cfg, created.key);
+          const hop = trs.find((t) => targetCol.statusIds.includes(t.toStatusId));
+          if (hop) {
+            await transitionIssue(cfg, created.key, hop.id);
+            landed = true;
+          }
+        }
+        setActiveCol(colIdx);
+        pendingFocusKey.current = created.key;
+        flash(
+          landed
+            ? `created ${created.key} in ${targetCol.name}`
+            : `created ${created.key} (couldn't move to ${targetCol.name})`,
+          landed ? "ok" : "info",
+        );
+        await load();
+      } catch (e) {
+        flash(errorMessage(e), "err");
+      }
+    },
+    [cfg, conf, flash, load, closeModal],
+  );
+
   // Nudge the cursor within the active column / across columns.
   const nudgeRow = useCallback(
     (delta: number) => {
@@ -688,6 +759,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
       // Board-wide
       if (input === "O") return void openBoardInBrowser();
       if (input === "c") return void startCreate();
+      if (input === "a") return void startQuickAdd();
       if (input === "r") {
         void load();
         flash("refreshing…", "info");
@@ -837,6 +909,19 @@ export function BoardView({ cfg, board, onExit }: Props) {
         loading
         onCancel={closeModal}
         onPick={() => {}}
+      />
+    );
+  }
+  if (modal.kind === "quick-add") {
+    const colName = conf.columns[modal.colIdx]?.name ?? "column";
+    return (
+      <QuickAddModal
+        colName={colName}
+        typeName={modal.typeName}
+        value={modal.value}
+        onChange={(v) => setModal({ ...modal, value: v })}
+        onSubmit={(val) => void submitQuickAdd(modal.colIdx, modal.typeName, val)}
+        onCancel={closeModal}
       />
     );
   }

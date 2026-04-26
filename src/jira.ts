@@ -314,6 +314,16 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
   return detail;
 }
 
+/**
+ * Cheap lookup for just the current status id — used after create to decide
+ * whether the fresh issue already sits in the column we want, or needs a
+ * transition to get there.
+ */
+export async function getIssueStatusId(cfg: JiraConfig, issueKey: string): Promise<string> {
+  const data = await jget(cfg, `/rest/api/3/issue/${issueKey}?fields=status`);
+  return String(data.fields?.status?.id ?? "");
+}
+
 export async function getTransitions(cfg: JiraConfig, issueKey: string): Promise<Transition[]> {
   const data = await jget(cfg, `/rest/api/3/issue/${issueKey}/transitions`);
   return (data.transitions ?? []).map((t: any) => ({
