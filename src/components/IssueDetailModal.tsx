@@ -6,6 +6,7 @@ import { editInNeovim } from "../editor";
 import { useDimensions } from "../hooks";
 import {
   type Comment,
+  type CustomField,
   type IssueDetail,
   type JiraUser,
   type Priority,
@@ -40,93 +41,12 @@ import {
 } from "../ui";
 import { FilterPicker } from "./FilterPicker";
 import { Hint } from "./Hint";
+import { formatShortDate, renderDetailLines } from "./IssueDetailLines";
+import { CustomSideField, InlineFieldInput } from "./IssueDetailSide";
 import { ListPicker } from "./ListPicker";
-import { TextInput } from "./TextInput";
 import { ToastStack, useToasts } from "./Toasts";
 
-const DETAIL_LABEL_WIDTH = 11;
 const CF_STORY_POINTS = "customfield_10016";
-
-const pad2 = (n: number) => String(n).padStart(2, "0");
-
-function formatShortDate(iso: string | undefined): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-}
-
-type DetailLine = {
-  text: string;
-  color: string;
-  bold?: boolean;
-  commentIdx?: number | undefined;
-  codeBg?: boolean;
-};
-
-function renderDetailLines(detail: IssueDetail, mainWidth: number): DetailLine[] {
-  const out: DetailLine[] = [];
-  const push = (text: string, color = theme.fg, bold = false, commentIdx?: number) =>
-    out.push({ text, color, bold, commentIdx });
-  const pushLine = (text: string, color = theme.fg, commentIdx?: number) => {
-    if (text.length === 0) {
-      push("", color, false, commentIdx);
-      return;
-    }
-    for (let i = 0; i < text.length; i += mainWidth)
-      push(text.slice(i, i + mainWidth), color, false, commentIdx);
-  };
-  const pushSection = (label: string) => {
-    push("");
-    push(label.toUpperCase(), theme.pink, true);
-    push("─".repeat(Math.min(mainWidth, label.length + 6)), theme.accentDim);
-  };
-
-  pushSection("description");
-  for (const ln of (detail.description || "—").split(/\n/)) pushLine(ln);
-
-  if (detail.subtasks.length > 0) {
-    pushSection(`sub-tasks (${detail.subtasks.length})`);
-    for (const s of detail.subtasks)
-      push(
-        `${s.key} · ${s.statusName} · ${truncate(s.summary, mainWidth - s.key.length - 16)}`,
-        theme.fgDim,
-      );
-  }
-
-  if (detail.links.length > 0) {
-    pushSection(`linked issues (${detail.links.length})`);
-    for (const l of detail.links)
-      push(
-        `${l.direction} ${l.key} · ${l.statusName} · ${truncate(l.summary, mainWidth - l.key.length - l.direction.length - 16)}`,
-        theme.fgDim,
-      );
-  }
-
-  pushSection(`comments (${detail.comments.length})`);
-  if (detail.comments.length === 0) {
-    push("no comments yet", theme.muted);
-    return out;
-  }
-  detail.comments.forEach((c, i) => {
-    if (i > 0) push("·".repeat(Math.min(mainWidth, 20)), theme.accentDim, false, i);
-    push(c.author, theme.cyan, true, i);
-    push(formatShortDate(c.created), theme.muted, false, i);
-    for (const ln of (c.body || "").split(/\n/)) pushLine(` ${ln}`, theme.fg, i);
-  });
-
-  let inCode = false;
-  for (const ln of out) {
-    if (ln.text.trimStart().startsWith("```")) {
-      inCode = !inCode;
-      ln.codeBg = true;
-    } else if (inCode) {
-      ln.codeBg = true;
-    }
-  }
-
-  return out;
-}
 
 type Pane = "body" | "fields";
 
@@ -233,7 +153,15 @@ export function IssueDetailModal({
 
   const [pane, setPane] = useState<Pane>("body");
   const [bodyScroll, setBodyScroll] = useState(0);
-  const [fieldIdx, setFieldIdx] = useState(0);
+  // Cursor + scroll live in one state atom so they update atomically:
+  // moving the cursor off-screen must shift scroll in the same render,
+  // otherwise there's a frame where no row is visibly selected.
+  const [fieldView, setFieldView] = useState<{ idx: number; scroll: number }>({
+    idx: 0,
+    scroll: 0,
+  });
+  const fieldIdx = fieldView.idx;
+  const fieldScroll = fieldView.scroll;
   const [overlay, setOverlay] = useState<Overlay>({ kind: "none" });
   const [saving, setSaving] = useState(false);
 
@@ -340,8 +268,84 @@ export function IssueDetailModal({
     return -1;
   }, [pane, bodyScroll, bodyHeight, mainLines]);
 
-  const currentField = ALL_FIELDS[fieldIdx];
-  const isEditable = currentField ? EDITABLE_FIELDS.includes(currentField) : false;
+  /**
+   * Unified list of side-panel rows — baked fields first, then the
+   * project's custom fields discovered via editmeta. Cursor `fieldIdx`
+   * indexes into this.
+   */
+  type FieldRow = { kind: "baked"; id: FieldId } | { kind: "custom"; field: CustomField };
+  const fieldRows: FieldRow[] = useMemo(() => {
+    const out: FieldRow[] = ALL_FIELDS.map((id) => ({ kind: "baked", id }));
+    for (const cf of detail?.customFields ?? []) out.push({ kind: "custom", field: cf });
+    return out;
+  }, [detail]);
+  // Clamp before indexing — state can lag fieldRows.length when
+  // editmeta shrinks between a fetch and the invariant effect firing.
+  // Without this, currentRow is undefined and keypresses no-op.
+  const currentRow = fieldRows[clamp(fieldIdx, 0, Math.max(0, fieldRows.length - 1))];
+  const currentField = currentRow?.kind === "baked" ? currentRow.id : undefined;
+  const isEditable = currentRow?.kind === "baked" && EDITABLE_FIELDS.includes(currentRow.id);
+
+  /**
+   * How many side-panel rows fit alongside the body. Each row is one
+   * terminal line; reserve 2 for the ▲/▼ indicators so they don't push
+   * the last row off-screen when we scroll.
+   */
+  const fieldWindow = Math.max(3, bodyHeight - 2);
+
+  // Cursor-visibility invariant. Re-runs whenever inputs change — so a
+  // terminal resize (fieldWindow shrinks), editmeta reload (fieldRows
+  // shrinks), or anything else that could push the cursor outside the
+  // visible window pulls it back into view atomically. Without this, a
+  // resize past the cursor's row leaves no row visibly selected.
+  useEffect(() => {
+    if (fieldRows.length === 0) return;
+    setFieldView((v) => {
+      const last = fieldRows.length - 1;
+      const idx = clamp(v.idx, 0, last);
+      const scrollCeiling = Math.max(0, last - fieldWindow + 1);
+      let scroll = Math.min(v.scroll, scrollCeiling);
+      if (idx < scroll) scroll = idx;
+      else if (idx >= scroll + fieldWindow) scroll = idx - fieldWindow + 1;
+      return idx === v.idx && scroll === v.scroll ? v : { idx, scroll };
+    });
+  }, [fieldRows.length, fieldWindow]);
+
+  /**
+   * Custom field labels can be long ("Technical Owner", "Target Release
+   * Date") — widen the label column up to 20 chars to fit them, but cap
+   * so values still have room. Baked fields are all under 11 by design,
+   * so they just pad to whatever the custom fields demand.
+   */
+  const customLabelWidth = useMemo(() => {
+    const base = 11;
+    const customs = detail?.customFields ?? [];
+    if (customs.length === 0) return base;
+    const longest = customs.reduce((m, f) => Math.max(m, f.name.length), 0);
+    return clamp(longest, base, Math.min(20, Math.floor(sideWidth / 2)));
+  }, [detail, sideWidth]);
+
+  /**
+   * Move the cursor and window together in one atomic state update.
+   * `advance` reads the freshest cursor so rapid key-repeat chains
+   * correctly — closure-captured `fieldIdx` would let two `j` presses
+   * both compute `cur + 1` from the same stale value.
+   */
+  const moveFieldCursor = useCallback(
+    (advance: (cur: number) => number) => {
+      setFieldView((v) => {
+        const last = Math.max(0, fieldRows.length - 1);
+        const nextIdx = clamp(advance(v.idx), 0, last);
+        let nextScroll = v.scroll;
+        if (nextIdx < nextScroll) nextScroll = nextIdx;
+        else if (nextIdx >= nextScroll + fieldWindow) nextScroll = nextIdx - fieldWindow + 1;
+        return nextIdx === v.idx && nextScroll === v.scroll
+          ? v
+          : { idx: nextIdx, scroll: nextScroll };
+      });
+    },
+    [fieldRows.length, fieldWindow],
+  );
 
   const doEditTitle = useCallback(() => {
     if (!detail) return;
@@ -411,7 +415,7 @@ export function IssueDetailModal({
   );
 
   const openFieldEditor = useCallback(async () => {
-    if (!detail || !currentField || !isEditable) return;
+    if (!detail || !currentRow || !isEditable) return;
 
     if (currentField === "assignee") {
       try {
@@ -448,10 +452,10 @@ export function IssueDetailModal({
     } else if (currentField === "fixVersions") {
       setOverlay({ kind: "pick-versions-action" });
     }
-  }, [detail, currentField, isEditable, cfg, projectKey, showFlash]);
+  }, [detail, currentRow, currentField, isEditable, cfg, projectKey, showFlash]);
 
   const clearField = useCallback(async () => {
-    if (!detail || !currentField || !isEditable) return;
+    if (!detail || !currentRow || !isEditable) return;
     if (currentField === "assignee") {
       await doSave(() => updateIssueField(cfg, detail.key, { assignee: null }), "assignee cleared");
     } else if (currentField === "priority") {
@@ -490,7 +494,7 @@ export function IssueDetailModal({
         "fix versions cleared",
       );
     }
-  }, [detail, currentField, isEditable, cfg, doSave, showFlash]);
+  }, [detail, currentRow, currentField, isEditable, cfg, doSave, showFlash]);
 
   // Main input handler
   useInput(
@@ -527,6 +531,11 @@ export function IssueDetailModal({
         void doSave(fn, watching ? "unwatched" : "watching");
         return;
       }
+      if (input === "r") {
+        void fetchDetail();
+        showFlash("refreshing…");
+        return;
+      }
       if (key.tab) {
         setPane((p) => (p === "body" ? "fields" : "body"));
         return;
@@ -558,12 +567,12 @@ export function IssueDetailModal({
           }
         }
       } else {
-        if (key.downArrow || input === "j")
-          setFieldIdx((i) => clamp(i + 1, 0, ALL_FIELDS.length - 1));
-        else if (key.upArrow || input === "k")
-          setFieldIdx((i) => clamp(i - 1, 0, ALL_FIELDS.length - 1));
-        else if (input === "g") setFieldIdx(0);
-        else if (input === "G") setFieldIdx(ALL_FIELDS.length - 1);
+        if (key.downArrow || input === "j") moveFieldCursor((i) => i + 1);
+        else if (key.upArrow || input === "k") moveFieldCursor((i) => i - 1);
+        else if (key.pageDown) moveFieldCursor((i) => i + fieldWindow);
+        else if (key.pageUp) moveFieldCursor((i) => i - fieldWindow);
+        else if (input === "g") moveFieldCursor(() => 0);
+        else if (input === "G") moveFieldCursor(() => fieldRows.length - 1);
         else if (key.return) void openFieldEditor();
         else if (input === "x" || (key.ctrl && input === "x")) void clearField();
       }
@@ -1050,6 +1059,21 @@ export function IssueDetailModal({
   const clampedScroll = Math.min(bodyScroll, maxScroll);
   const visibleMain = mainLines.slice(clampedScroll, clampedScroll + bodyHeight);
 
+  // Render-time clamp for the field pane: no matter what state says,
+  // draw a window that contains the cursor, and compare against the
+  // clamped cursor so the focused row is always one of the visible
+  // ones. Belt-and-suspenders alongside moveFieldCursor + the
+  // invariant effect — neither can race us here.
+  const fieldLast = Math.max(0, fieldRows.length - 1);
+  const fieldCursor = clamp(fieldIdx, 0, fieldLast);
+  const fieldRenderScroll = ((): number => {
+    const scrollCeiling = Math.max(0, fieldLast - fieldWindow + 1);
+    let s = Math.min(fieldScroll, scrollCeiling);
+    if (fieldCursor < s) s = fieldCursor;
+    else if (fieldCursor >= s + fieldWindow) s = fieldCursor - fieldWindow + 1;
+    return Math.max(0, s);
+  })();
+
   return (
     <Box
       flexDirection="column"
@@ -1119,16 +1143,45 @@ export function IssueDetailModal({
           borderStyle="single"
           borderColor={pane === "fields" ? theme.accent : theme.accentDim}
         >
-          {ALL_FIELDS.map((f, i) => (
-            <SideField
-              key={f}
-              field={f}
-              detail={detail}
-              focused={pane === "fields" && i === fieldIdx}
-              editable={EDITABLE_FIELDS.includes(f)}
-              sideWidth={sideWidth - 3}
-            />
-          ))}
+          {fieldRenderScroll > 0 ? (
+            <Text color={theme.muted}>▲ {fieldRenderScroll} more</Text>
+          ) : null}
+          {fieldRows
+            .slice(fieldRenderScroll, fieldRenderScroll + fieldWindow)
+            .map((row, offset) => {
+              const i = fieldRenderScroll + offset;
+              const focused = pane === "fields" && i === fieldCursor;
+              // Dim-highlight the cursor row even when pane is body, so
+              // users don't land in the side panel and wonder where they
+              // are. Tab flips to fields; then `focused` goes full pink.
+              const atCursor = i === fieldCursor;
+              return row.kind === "baked" ? (
+                <SideField
+                  key={`b-${row.id}`}
+                  field={row.id}
+                  detail={detail}
+                  focused={focused}
+                  atCursor={atCursor}
+                  editable={EDITABLE_FIELDS.includes(row.id)}
+                  sideWidth={sideWidth - 3}
+                  labelWidth={customLabelWidth}
+                />
+              ) : (
+                <CustomSideField
+                  key={`c-${row.field.id}`}
+                  field={row.field}
+                  focused={focused}
+                  atCursor={atCursor}
+                  sideWidth={sideWidth - 3}
+                  labelWidth={customLabelWidth}
+                />
+              );
+            })}
+          {fieldRows.length > fieldRenderScroll + fieldWindow ? (
+            <Text color={theme.muted}>
+              ▼ {fieldRows.length - fieldRenderScroll - fieldWindow} more
+            </Text>
+          ) : null}
         </Box>
       </Box>
 
@@ -1173,35 +1226,48 @@ function SideField({
   field,
   detail,
   focused,
+  atCursor,
   editable,
   sideWidth,
+  labelWidth,
 }: {
   field: FieldId;
   detail: IssueDetail;
   focused: boolean;
+  /** Cursor sits here, but pane focus might be elsewhere (body pane). */
+  atCursor: boolean;
   editable: boolean;
   sideWidth: number;
+  /** Shared label width so baked + custom rows align in one column. */
+  labelWidth: number;
 }) {
   const value = fieldDisplayValue(field, detail);
   const color = fieldColor(field, detail);
-  const pointer = focused ? "▶" : " ";
-  const pointerColor = focused ? theme.accent : theme.muted;
-  const valueMax = Math.max(4, sideWidth - DETAIL_LABEL_WIDTH - 2);
+  // Fixed-width text runs so Ink's layout and diff are deterministic —
+  // no ambiguous-width glyph counting and no flex-shrink collapse.
+  const pointer = focused ? "> " : atCursor ? "· " : "  ";
+  const label = FIELD_LABELS[field].padEnd(labelWidth);
+  const enterHint = focused && editable ? " ⏎" : "  ";
+  const prefix = pointer + label;
+  const valueWidth = Math.max(4, sideWidth - prefix.length - enterHint.length - 1);
+  const padded = truncate(value, valueWidth).padEnd(valueWidth);
+  const rowBg = focused ? theme.accentDim : undefined;
+  const pointerColor = focused || atCursor ? theme.accent : theme.muted;
+  const labelColor = focused ? theme.accent : atCursor ? theme.fg : theme.muted;
   return (
     <Box>
-      <Text color={pointerColor}>{pointer}</Text>
-      <Text color={focused ? theme.accent : theme.muted}>
-        {FIELD_LABELS[field].padEnd(DETAIL_LABEL_WIDTH)}
+      <Text color={pointerColor} bold={focused} {...bg(rowBg)}>
+        {pointer}
       </Text>
-      <Text
-        color={focused ? theme.fg : color}
-        bold={focused}
-        wrap="truncate"
-        {...bg(focused ? theme.accentDim : undefined)}
-      >
-        {truncate(value, valueMax)}
+      <Text color={labelColor} bold={focused} {...bg(rowBg)}>
+        {label}
       </Text>
-      {focused && editable ? <Text color={theme.muted}> ⏎</Text> : null}
+      <Text color={focused ? theme.fg : color} bold={focused} {...bg(rowBg)}>
+        {padded}
+      </Text>
+      <Text color={theme.muted} {...bg(rowBg)}>
+        {enterHint}
+      </Text>
     </Box>
   );
 }
@@ -1229,45 +1295,4 @@ function fieldColor(field: FieldId, _d: IssueDetail): string {
   if (field === "labels") return theme.cyan;
   if (field === "due") return theme.warn;
   return theme.fg;
-}
-
-function InlineFieldInput({
-  field,
-  initial,
-  onCancel,
-  onSubmit,
-}: {
-  field: string;
-  initial: string;
-  onCancel: () => void;
-  onSubmit: (value: string) => void;
-}) {
-  const [value, setValue] = useState(initial);
-  const hint =
-    field === "title"
-      ? "issue title"
-      : field === "points"
-        ? "enter a number (empty to clear)"
-        : "YYYY-MM-DD (empty to clear)";
-  return (
-    <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.accent}>
-      <Text color={theme.accent} bold>
-        {field}
-      </Text>
-      <Box marginTop={1}>
-        <Text color={theme.muted}>› </Text>
-        <TextInput
-          value={value}
-          placeholder={hint}
-          onChange={setValue}
-          onSubmit={() => onSubmit(value)}
-          onCancel={onCancel}
-        />
-      </Box>
-      <Box marginTop={1}>
-        <Hint k="⏎" label="save" />
-        <Hint k="esc" label="cancel" />
-      </Box>
-    </Box>
-  );
 }

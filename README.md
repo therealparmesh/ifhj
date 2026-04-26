@@ -129,11 +129,16 @@ Pick a board. Everything's keyboard from there.
 | `w`             | toggle watch / unwatch          |
 | `y` / `Y`       | yank issue key / URL            |
 | `o`             | open in browser                 |
+| `r`             | refresh                         |
 | `Esc` / `q`     | close                           |
 
 ### Editable fields
 
 Assignee, priority, parent, story points, labels, components, fix versions, due date. Tab to the fields pane, Enter to edit, `x` to clear. Array fields (labels, components, fix versions) give you add/remove/clear options.
+
+### Custom fields
+
+Project-specific custom fields (team-managed or classic) show up read-only in the side panel — whatever your project exposes via `editmeta`, rendered as display text. Editing them well would mean covering Jira's whole type surface (user pickers, cascades, rich-text ADF, etc.) and the partial story is worse than honest read-only. Flip to the web UI for changes.
 
 ### Markdown
 

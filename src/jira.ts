@@ -1,5 +1,7 @@
 import { adfToText, textToAdf } from "./adf";
 import type { JiraConfig } from "./config";
+import { type CustomField, normalizeCustomField } from "./customFields";
+export type { CustomField } from "./customFields";
 
 /**
  * Jira Cloud's default custom-field IDs. Tenants can remap these, but the
@@ -70,7 +72,6 @@ export type IssueDetail = Issue & {
   components: string[];
   fixVersions: string[];
   sprint?: string;
-  storyPoints?: number;
   dueDate?: string;
   created: string;
   updated: string;
@@ -79,6 +80,14 @@ export type IssueDetail = Issue & {
   links: IssueLink[];
   comments: Comment[];
   watching?: boolean;
+  /**
+   * Project-specific custom fields, surfaced read-only. Discovered via
+   * editmeta (so we only show fields that are at least nominally
+   * writable for this user — anything more exotic than that lives
+   * outside the TUI's scope). Minus the three we have dedicated UI for:
+   * epic, sprint, story points. Empty when editmeta fetch fails.
+   */
+  customFields: CustomField[];
 };
 
 async function jf(cfg: JiraConfig, path: string, init: RequestInit = {}): Promise<Response> {
@@ -213,10 +222,23 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
     "subtasks",
     "issuelinks",
     "watches",
+    // `*all` pulls every field — including custom ones — which we later
+    // narrow to customfield_* via editmeta. Exclude the big/noisy system
+    // fields we already fetch via their dedicated endpoints so the
+    // payload stays lean.
+    "*all",
+    "-attachment",
+    "-comment",
+    "-worklog",
   ].join(",");
-  const [data, commentsData] = await Promise.all([
+  // Editmeta tells us which custom fields Jira considers part of this
+  // project + issue type — we use it as a filter so we don't surface
+  // internal / deprecated customfield_* that show up in the main GET.
+  // Empty on failure, which just means no custom fields render.
+  const [data, commentsData, editMetaData] = await Promise.all([
     jget(cfg, `/rest/api/3/issue/${issueKey}?fields=${fields}&expand=renderedFields`),
     jget(cfg, `/rest/api/3/issue/${issueKey}/comment?orderBy=created&maxResults=100`),
+    jget(cfg, `/rest/api/3/issue/${issueKey}/editmeta`).catch(() => ({ fields: {} })),
   ]);
   const f = data.fields ?? {};
   const descRaw = f.description;
@@ -278,6 +300,17 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
       : [],
     comments,
     watching: f.watches?.isWatching ?? undefined,
+    // Walk the issue's own `fields` response in its natural key order —
+    // on Atlassian Cloud this matches the project's configured view
+    // screen ordering, which is what users see in the web UI. Filter
+    // to custom-field ids that editmeta acknowledged (keeps the noise
+    // out: non-editable internals, deprecated remnants, etc.).
+    customFields: Object.keys(f)
+      .filter((id) => id.startsWith("customfield_") && editMetaData?.fields?.[id])
+      .flatMap((id) => {
+        const normalized = normalizeCustomField(id, editMetaData.fields[id], f[id]);
+        return normalized ? [normalized] : [];
+      }),
   };
   if (f.assignee?.displayName) detail.assignee = f.assignee.displayName;
   if (f.priority?.name) detail.priority = f.priority.name;

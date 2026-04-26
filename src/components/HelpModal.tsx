@@ -46,6 +46,7 @@ const DETAIL_BINDINGS: { keys: string; desc: string }[] = [
   { keys: "w", desc: "toggle watch / unwatch" },
   { keys: "y / Y", desc: "yank issue key / URL" },
   { keys: "o", desc: "open in browser" },
+  { keys: "r", desc: "refresh" },
   { keys: "esc / q", desc: "close" },
 ];
 

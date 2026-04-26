@@ -12,7 +12,7 @@ import type { JiraUser } from "./jira";
  *   - `IfhjMentionComplete(findstart, base)` is the completefunc. Returns
  *     the `@` index on the first call; filtered candidates on the second.
  *   - Inserting from the menu yields `[@Display Name](jira-mention:<id>)`,
- *     which `textToAdf` in jira.ts turns into a real ADF mention.
+ *     which `textToAdf` in adf.ts turns into a real ADF mention.
  *   - Buffer-local: we only touch the buffer we're invoked on, so we don't
  *     leak into other buffers the user happens to have open.
  *
