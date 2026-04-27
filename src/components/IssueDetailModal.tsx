@@ -1111,7 +1111,7 @@ export function IssueDetailModal({
     sideLines.push({
       key: `slot-${slot}`,
       text: pointer + labelCell + valueCell,
-      color: focused ? theme.selectedFg : parked ? theme.fg : theme.muted,
+      color: focused ? theme.fg : parked ? theme.fg : theme.muted,
       bold: focused,
       focused,
     });
@@ -1167,7 +1167,8 @@ export function IssueDetailModal({
                 {...fg(ln.color)}
                 bold={ln.bold ?? false}
                 wrap="truncate"
-                {...bg(isCommentHeader ? theme.selectedBg : ln.codeBg ? theme.divider : undefined)}
+                inverse={isCommentHeader}
+                {...bg(ln.codeBg ? theme.divider : undefined)}
               >
                 {ln.text || " "}
               </Text>
@@ -1193,7 +1194,7 @@ export function IssueDetailModal({
               {...fg(ln.color)}
               bold={ln.bold}
               wrap="truncate"
-              {...bg(ln.focused ? theme.selectedBg : undefined)}
+              inverse={ln.focused}
             >
               {ln.text}
             </Text>

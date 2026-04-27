@@ -1,7 +1,7 @@
 import { Box, Text } from "ink";
 
 import type { BoardColumn, Issue } from "../jira";
-import { assigneeColor, bg, initials, theme, truncate, typeColor, typeGlyph } from "../ui";
+import { assigneeColor, bg, fg, initials, theme, truncate, typeColor, typeGlyph } from "../ui";
 
 export type Column = BoardColumn & { issues: Issue[] };
 
@@ -139,14 +139,11 @@ function Card({
   const meta = [issue.assignee ?? "Unassigned", issue.priority, issue.epicKey]
     .filter(Boolean)
     .join(" · ");
-  // Selected wins over match for the row background.
-  const rowBgProps = bg(selected ? theme.selectedBg : isMatch ? theme.matchBg : undefined);
-  /**
-   * Pad summary + meta so the bg fills evenly — otherwise the highlight is
-   * ragged on shorter lines.
-   */
-  const summaryText = truncate(issue.summary, Math.max(4, innerWidth)).padEnd(innerWidth);
-  const metaText = truncate(meta, Math.max(4, innerWidth)).padEnd(innerWidth);
+  // Only search-match rows get a painted background; selection uses
+  // `inverse` on text cells only so icons/badges keep their meaning.
+  const matchBgProps = bg(!selected && isMatch ? theme.matchBg : undefined);
+  const summaryText = truncate(issue.summary, Math.max(4, innerWidth));
+  const metaText = truncate(meta, Math.max(4, innerWidth));
   return (
     <Box flexDirection="row" marginBottom={1} paddingLeft={1} paddingRight={1}>
       {/* Left color bar — 3 rows to match the card body. */}
@@ -158,21 +155,31 @@ function Card({
       <Box flexDirection="column" flexGrow={1}>
         <Box justifyContent="space-between">
           <Box>
-            <Text color={accent} {...rowBgProps}>
+            <Text {...fg(selected ? theme.fg : accent)} inverse={selected} {...matchBgProps}>
               {typeGlyph(issue.issueType)}{" "}
             </Text>
-            <Text color={selected ? theme.selectedFg : theme.fgDim} bold={selected} {...rowBgProps}>
+            <Text
+              {...fg(selected ? theme.fg : theme.fgDim)}
+              bold={selected}
+              inverse={selected}
+              {...matchBgProps}
+            >
               {truncate(issue.key, keyMaxLen)}
             </Text>
           </Box>
-          <Text color={badgeColor} bold {...rowBgProps}>
+          <Text {...fg(selected ? theme.fg : badgeColor)} bold inverse={selected} {...matchBgProps}>
             {badge}
           </Text>
         </Box>
-        <Text color={selected ? theme.selectedFg : theme.fgDim} bold={selected} {...rowBgProps}>
+        <Text
+          {...fg(selected ? theme.fg : theme.fgDim)}
+          bold={selected}
+          inverse={selected}
+          {...matchBgProps}
+        >
           {summaryText}
         </Text>
-        <Text color={selected ? theme.selectedFg : theme.muted} {...rowBgProps}>
+        <Text {...fg(selected ? theme.fg : theme.muted)} inverse={selected} {...matchBgProps}>
           {metaText}
         </Text>
       </Box>
