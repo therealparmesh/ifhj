@@ -30,9 +30,12 @@ function App() {
   if (err)
     return (
       <Box flexDirection="column" padding={1}>
-        <Text color={theme.accent} bold>
-          ifhj
-        </Text>
+        <Box>
+          <Text color={theme.accent} bold>
+            ifhj{" "}
+          </Text>
+          <Text color={theme.muted}>— startup</Text>
+        </Box>
         <Box marginTop={1}>
           <Text color={theme.err}>{err}</Text>
         </Box>
@@ -42,9 +45,12 @@ function App() {
   if (!cfg || !settings)
     return (
       <Box flexDirection="column" padding={1}>
-        <Text color={theme.accent} bold>
-          ifhj
-        </Text>
+        <Box>
+          <Text color={theme.accent} bold>
+            ifhj{" "}
+          </Text>
+          <Text color={theme.muted}>— startup</Text>
+        </Box>
         <Box marginTop={1}>
           <Text color={theme.cyan}>◴ </Text>
           <Text color={theme.muted}>loading…</Text>

@@ -832,20 +832,40 @@ export function BoardView({ cfg, board, onExit }: Props) {
   if (!conf) {
     /**
      * First-load states only — spinner or fatal error. Once `conf` lands,
-     * reload errors surface as a toast so the grid stays up.
+     * reload errors surface as a toast so the grid stays up. Title
+     * column matches the board-picker's layout so the app doesn't feel
+     * shifty between screens.
      */
     if (loadError) {
       return (
         <Box flexDirection="column" padding={1}>
-          <Text color={theme.err}>{loadError}</Text>
-          <Text color={theme.muted}>press q to go back</Text>
+          <Box>
+            <Text color={theme.accent} bold>
+              ifhj{" "}
+            </Text>
+            <Text color={theme.muted}>— {board.name}</Text>
+          </Box>
+          <Box marginTop={1}>
+            <Text color={theme.err}>{loadError}</Text>
+          </Box>
+          <Box marginTop={1}>
+            <Text color={theme.muted}>press q to go back</Text>
+          </Box>
         </Box>
       );
     }
     return (
-      <Box padding={1}>
-        <Text color={theme.accent}>◴ </Text>
-        <Text color={theme.fg}>loading {board.name}…</Text>
+      <Box flexDirection="column" padding={1}>
+        <Box>
+          <Text color={theme.accent} bold>
+            ifhj{" "}
+          </Text>
+          <Text color={theme.muted}>— {board.name}</Text>
+        </Box>
+        <Box marginTop={1}>
+          <Text color={theme.cyan}>◴ </Text>
+          <Text color={theme.muted}>loading board…</Text>
+        </Box>
       </Box>
     );
   }
