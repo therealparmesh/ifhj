@@ -38,7 +38,7 @@ export function ListPicker({
         {items.map((it, i) => (
           <Box key={it.id}>
             <Text color={i === idx ? theme.accent : theme.muted}>{i === idx ? "> " : "  "}</Text>
-            <Text {...fg(i === idx ? theme.fg : theme.fgDim)} inverse={i === idx}>
+            <Text {...fg(i === idx ? theme.fg : theme.fgDim)} bold={i === idx} inverse={i === idx}>
               {it.label}
             </Text>
           </Box>
