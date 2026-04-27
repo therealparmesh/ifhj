@@ -100,7 +100,20 @@ export const terminalTheme: Theme = {
   matchBg: "yellow",
   divider: "gray",
 
-  palette: ["red", "green", "yellow", "blue", "magenta", "cyan"],
+  palette: [
+    "red",
+    "green",
+    "yellow",
+    "blue",
+    "magenta",
+    "cyan",
+    "redBright",
+    "greenBright",
+    "yellowBright",
+    "blueBright",
+    "magentaBright",
+    "cyanBright",
+  ],
 };
 
 export type ThemeName = "synthwave" | "terminal";
