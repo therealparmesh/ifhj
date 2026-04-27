@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -8,41 +9,83 @@ export type JiraConfig = {
   authHeader: string;
 };
 
+/**
+ * User preferences persisted at ~/.config/ifhj/settings.json. Every field
+ * has a default, so on-disk settings may omit any subset of keys. Add a
+ * new setting by extending this type, adding its default to DEFAULTS, and
+ * adding a parser to PARSERS — TS will force the latter two.
+ */
 export type Settings = {
   theme: ThemeName;
 };
 
 const SETTINGS_PATH = join(homedir(), ".config", "ifhj", "settings.json");
 
-const DEFAULT_SETTINGS: Settings = {
+const DEFAULTS: Settings = {
   theme: "synthwave",
 };
 
-function isThemeName(v: unknown): v is ThemeName {
-  return v === "synthwave" || v === "terminal";
+/**
+ * One parser per Settings field. Returns the value when it fits the
+ * field's type, or undefined to reject it. Keyed by `keyof Settings` so
+ * the type system enforces completeness.
+ */
+const PARSERS: { [K in keyof Settings]: (v: unknown) => Settings[K] | undefined } = {
+  theme: (v) => (v === "synthwave" || v === "terminal" ? v : undefined),
+};
+
+/**
+ * Optional env-var override per setting. Env var wins over the file; its
+ * value runs through the same PARSERS entry, so validation is identical.
+ * Partial — not every setting needs or deserves an env override.
+ */
+const ENV_OVERRIDES: Partial<Record<keyof Settings, string>> = {
+  theme: "IFHJ_THEME",
+};
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
 /**
- * Load settings from ~/.config/ifhj/settings.json, then overlay the
- * IFHJ_THEME env var as a runtime override. Unknown keys in the file are
- * ignored; malformed values fall back to defaults so the app always boots.
+ * Load settings from ~/.config/ifhj/settings.json, then overlay env
+ * overrides. Unknown keys in the file are ignored; invalid values fall
+ * back to defaults so the app always boots. Env var values are strict:
+ * an invalid override throws so the user notices the typo immediately.
+ *
+ * Synchronous so callers can apply settings (e.g. `setTheme`) *before*
+ * the first Ink render — otherwise the loading screen paints in the
+ * default theme and we get a one-frame flash on terminal-themed setups.
  */
-export async function loadSettings(): Promise<Settings> {
+export function loadSettings(): Settings {
   let raw: Record<string, unknown> = {};
   try {
-    const f = Bun.file(SETTINGS_PATH);
-    if (await f.exists()) raw = (await f.json()) as Record<string, unknown>;
+    if (existsSync(SETTINGS_PATH)) {
+      const parsed: unknown = JSON.parse(readFileSync(SETTINGS_PATH, "utf8"));
+      if (isRecord(parsed)) raw = parsed;
+    }
   } catch {
     // malformed JSON — fall through to defaults
   }
-  const settings: Settings = { ...DEFAULT_SETTINGS };
-  if (isThemeName(raw["theme"])) settings.theme = raw["theme"];
-  const envTheme = Bun.env["IFHJ_THEME"];
-  if (envTheme !== undefined) {
-    if (!isThemeName(envTheme)) {
-      throw new Error(`Invalid IFHJ_THEME "${envTheme}". Expected: synthwave | terminal`);
+  const settings: Settings = { ...DEFAULTS };
+  // The loop below writes back under each parser's narrowed return type.
+  // TS can't express "PARSERS[k]'s return type matches settings[k]" when k
+  // is unioned at the call site, so we widen to a bag and trust the
+  // mapped-type constraint on PARSERS.
+  const bag = settings as Record<string, unknown>;
+  for (const key of Object.keys(PARSERS) as (keyof Settings)[]) {
+    const parse = PARSERS[key] as (v: unknown) => unknown;
+    const parsed = parse(raw[key]);
+    if (parsed !== undefined) bag[key] = parsed;
+    const envName = ENV_OVERRIDES[key];
+    if (envName === undefined) continue;
+    const envValue = Bun.env[envName];
+    if (envValue === undefined) continue;
+    const envParsed = parse(envValue);
+    if (envParsed === undefined) {
+      throw new Error(`Invalid ${envName} "${envValue}"`);
     }
-    settings.theme = envTheme;
+    bag[key] = envParsed;
   }
   return settings;
 }
