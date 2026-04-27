@@ -1,6 +1,7 @@
-import { adfToMd, mdToAdf } from "github-markdown-adf";
-
+import { adfToText, textToAdf } from "./adf";
 import type { JiraConfig } from "./config";
+import { type CustomField, normalizeCustomField } from "./customFields";
+export type { CustomField } from "./customFields";
 
 /**
  * Jira Cloud's default custom-field IDs. Tenants can remap these, but the
@@ -21,6 +22,8 @@ export type Board = {
 export type BoardColumn = {
   name: string;
   statusIds: string[];
+  /** WIP max from board config. 0 (or unset) means no limit. */
+  max?: number;
 };
 
 export type BoardConfig = {
@@ -41,6 +44,7 @@ export type Issue = {
   epicKey?: string;
   labels: string[];
   sprintName?: string;
+  storyPoints?: number;
 };
 
 export type Transition = { id: string; name: string; toStatusId: string };
@@ -68,7 +72,6 @@ export type IssueDetail = Issue & {
   components: string[];
   fixVersions: string[];
   sprint?: string;
-  storyPoints?: number;
   dueDate?: string;
   created: string;
   updated: string;
@@ -77,6 +80,14 @@ export type IssueDetail = Issue & {
   links: IssueLink[];
   comments: Comment[];
   watching?: boolean;
+  /**
+   * Project-specific custom fields, surfaced read-only. Discovered via
+   * editmeta (so we only show fields that are at least nominally
+   * writable for this user — anything more exotic than that lives
+   * outside the TUI's scope). Minus the three we have dedicated UI for:
+   * epic, sprint, story points. Empty when editmeta fetch fails.
+   */
+  customFields: CustomField[];
 };
 
 async function jf(cfg: JiraConfig, path: string, init: RequestInit = {}): Promise<Response> {
@@ -120,48 +131,21 @@ export async function listBoards(cfg: JiraConfig): Promise<Board[]> {
 
 export async function getBoardConfig(cfg: JiraConfig, boardId: number): Promise<BoardConfig> {
   const data = await jget(cfg, `/rest/agile/1.0/board/${boardId}/configuration`);
-  const columns: BoardColumn[] = (data.columnConfig?.columns ?? []).map((c: any) => ({
-    name: c.name,
-    statusIds: (c.statuses ?? []).map((s: any) => String(s.id)),
-  }));
+  const columns: BoardColumn[] = (data.columnConfig?.columns ?? []).map((c: any) => {
+    const out: BoardColumn = {
+      name: c.name,
+      statusIds: (c.statuses ?? []).map((s: any) => String(s.id)),
+    };
+    // Jira sends 0 when no limit is set — treat as absent.
+    const max = Number(c.max);
+    if (Number.isFinite(max) && max > 0) out.max = max;
+    return out;
+  });
   return {
     name: data.name,
     projectKey: data.location?.key,
     columns,
   };
-}
-
-function adfToText(node: any): string {
-  if (!node) return "";
-  if (typeof node === "string") return node;
-  if (node.type === "doc" && node.version === 1) {
-    try {
-      return adfToMd(node).replaceAll("\t", "  ");
-    } catch {}
-  }
-  // Tabs desync Ink's column math with terminal width — normalize to spaces.
-  if (node.type === "text") return (node.text ?? "").replaceAll("\t", "  ");
-  if (node.type === "hardBreak") return "\n";
-  if (node.type === "mention") return `@${node.attrs?.text ?? node.attrs?.displayName ?? ""}`;
-  if (node.type === "emoji") return node.attrs?.text ?? node.attrs?.shortName ?? "";
-  if (node.type === "inlineCard") return node.attrs?.url ?? "";
-  if (node.type === "media" || node.type === "mediaSingle" || node.type === "mediaGroup")
-    return "[media]\n";
-  if (node.type === "rule") return "\n───\n";
-  if (node.type === "codeBlock") {
-    const lang = node.attrs?.language ?? "";
-    const body = Array.isArray(node.content) ? node.content.map(adfToText).join("") : "";
-    return `\n\`\`\`${lang}\n${body}\n\`\`\`\n`;
-  }
-  const children = Array.isArray(node.content) ? node.content.map(adfToText).join("") : "";
-  if (node.type === "listItem") return `• ${children.trim()}\n`;
-  const block =
-    node.type === "paragraph" ||
-    node.type === "heading" ||
-    node.type === "bulletList" ||
-    node.type === "orderedList" ||
-    node.type === "blockquote";
-  return block ? children + "\n" : children;
 }
 
 export async function getBoardIssues(cfg: JiraConfig, boardId: number): Promise<Issue[]> {
@@ -175,6 +159,7 @@ export async function getBoardIssues(cfg: JiraConfig, boardId: number): Promise<
     "labels",
     CF_EPIC_LINK,
     CF_SPRINT,
+    CF_STORY_POINTS,
     "parent",
   ].join(",");
   const all: Issue[] = [];
@@ -202,6 +187,7 @@ export async function getBoardIssues(cfg: JiraConfig, boardId: number): Promise<
       if (f.assignee?.displayName) issue.assignee = f.assignee.displayName;
       if (f.priority?.name) issue.priority = f.priority.name;
       if (activeSprint?.name) issue.sprintName = activeSprint.name;
+      if (typeof f[CF_STORY_POINTS] === "number") issue.storyPoints = f[CF_STORY_POINTS];
       const epic = f[CF_EPIC_LINK] || f.parent?.key;
       if (epic) issue.epicKey = epic;
       all.push(issue);
@@ -236,10 +222,23 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
     "subtasks",
     "issuelinks",
     "watches",
+    // `*all` pulls every field — including custom ones — which we later
+    // narrow to customfield_* via editmeta. Exclude the big/noisy system
+    // fields we already fetch via their dedicated endpoints so the
+    // payload stays lean.
+    "*all",
+    "-attachment",
+    "-comment",
+    "-worklog",
   ].join(",");
-  const [data, commentsData] = await Promise.all([
+  // Editmeta tells us which custom fields Jira considers part of this
+  // project + issue type — we use it as a filter so we don't surface
+  // internal / deprecated customfield_* that show up in the main GET.
+  // Empty on failure, which just means no custom fields render.
+  const [data, commentsData, editMetaData] = await Promise.all([
     jget(cfg, `/rest/api/3/issue/${issueKey}?fields=${fields}&expand=renderedFields`),
     jget(cfg, `/rest/api/3/issue/${issueKey}/comment?orderBy=created&maxResults=100`),
+    jget(cfg, `/rest/api/3/issue/${issueKey}/editmeta`).catch(() => ({ fields: {} })),
   ]);
   const f = data.fields ?? {};
   const descRaw = f.description;
@@ -301,6 +300,17 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
       : [],
     comments,
     watching: f.watches?.isWatching ?? undefined,
+    // Walk the issue's own `fields` response in its natural key order —
+    // on Atlassian Cloud this matches the project's configured view
+    // screen ordering, which is what users see in the web UI. Filter
+    // to custom-field ids that editmeta acknowledged (keeps the noise
+    // out: non-editable internals, deprecated remnants, etc.).
+    customFields: Object.keys(f)
+      .filter((id) => id.startsWith("customfield_") && editMetaData?.fields?.[id])
+      .flatMap((id) => {
+        const normalized = normalizeCustomField(id, editMetaData.fields[id], f[id]);
+        return normalized ? [normalized] : [];
+      }),
   };
   if (f.assignee?.displayName) detail.assignee = f.assignee.displayName;
   if (f.priority?.name) detail.priority = f.priority.name;
@@ -312,6 +322,16 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
   if (f.duedate) detail.dueDate = f.duedate;
   if (f.parent?.key) detail.parentKey = f.parent.key;
   return detail;
+}
+
+/**
+ * Cheap lookup for just the current status id — used after create to decide
+ * whether the fresh issue already sits in the column we want, or needs a
+ * transition to get there.
+ */
+export async function getIssueStatusId(cfg: JiraConfig, issueKey: string): Promise<string> {
+  const data = await jget(cfg, `/rest/api/3/issue/${issueKey}?fields=status`);
+  return String(data.fields?.status?.id ?? "");
 }
 
 export async function getTransitions(cfg: JiraConfig, issueKey: string): Promise<Transition[]> {
@@ -333,11 +353,6 @@ export async function transitionIssue(
     body: JSON.stringify({ transition: { id: transitionId } }),
   });
   if (!res.ok) throw new Error(`transition failed ${res.status}: ${await res.text()}`);
-}
-
-function textToAdf(text: string): any {
-  const cleaned = text.replaceAll(/\r\n/g, "\n");
-  return mdToAdf(cleaned);
 }
 
 export async function updateSummary(

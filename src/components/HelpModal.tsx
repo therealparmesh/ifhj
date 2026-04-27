@@ -17,6 +17,7 @@ const BOARD_BINDINGS: { keys: string; desc: string }[] = [
   { keys: "e", desc: "edit title (inline)" },
   { keys: "E", desc: "edit description (Neovim)" },
   { keys: "c", desc: "create issue" },
+  { keys: "a", desc: "quick add to current column" },
   { keys: "y / Y", desc: "yank issue key / URL to clipboard" },
   { keys: "o / O", desc: "open current card / board in browser" },
   { keys: "/", desc: "search" },
@@ -45,6 +46,7 @@ const DETAIL_BINDINGS: { keys: string; desc: string }[] = [
   { keys: "w", desc: "toggle watch / unwatch" },
   { keys: "y / Y", desc: "yank issue key / URL" },
   { keys: "o", desc: "open in browser" },
+  { keys: "r", desc: "refresh" },
   { keys: "esc / q", desc: "close" },
 ];
 

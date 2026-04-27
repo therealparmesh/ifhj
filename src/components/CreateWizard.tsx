@@ -8,6 +8,7 @@ import {
   type IssueLinkType,
   type IssueSearchResult,
   type IssueType,
+  type JiraUser,
   createIssue,
   createIssueLink,
   searchIssues,
@@ -87,6 +88,7 @@ export function CreateWizard({
   types,
   linkTypes,
   defaultParent,
+  ensureUsers,
   onCancel,
   onDone,
   onError,
@@ -96,6 +98,9 @@ export function CreateWizard({
   types: IssueType[];
   linkTypes: IssueLinkType[];
   defaultParent?: string | undefined;
+  /** Supplied by the caller so Neovim's @-completion is fed the same
+   *  user list the caller cached. Optional. */
+  ensureUsers?: () => Promise<JiraUser[]>;
   onCancel: () => void;
   onDone: (result: { key: string; title: string; linkSummary?: string }) => void;
   onError: (msg: string) => void;
@@ -157,7 +162,8 @@ export function CreateWizard({
     } else if (mode.kind === "nvim-desc") {
       (async () => {
         try {
-          const raw = await editInNeovim(form.description, "new-issue-desc.md");
+          const mentionUsers = (await ensureUsers?.()) ?? [];
+          const raw = await editInNeovim(form.description, "new-issue-desc.md", { mentionUsers });
           setForm((f) => ({ ...f, description: raw.trim() }));
           setMode({ kind: "browse" });
         } catch (e) {
@@ -196,7 +202,7 @@ export function CreateWizard({
         }
       })();
     }
-  }, [mode, form, cfg, projectKey, onDone, onError]);
+  }, [mode, form, cfg, projectKey, ensureUsers, onDone, onError]);
 
   // Browse-mode keys — navigate, activate, submit.
   useInput(

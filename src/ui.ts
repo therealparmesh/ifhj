@@ -180,6 +180,10 @@ export function fg(color: string | undefined): { color: string } | Record<string
   return color ? { color } : {};
 }
 
+export function bg(color: string | undefined): { backgroundColor: string } | Record<string, never> {
+  return color ? { backgroundColor: color } : {};
+}
+
 export function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }

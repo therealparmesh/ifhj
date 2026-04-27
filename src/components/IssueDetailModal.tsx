@@ -6,6 +6,7 @@ import { editInNeovim } from "../editor";
 import { useDimensions } from "../hooks";
 import {
   type Comment,
+  type CustomField,
   type IssueDetail,
   type JiraUser,
   type Priority,
@@ -28,6 +29,7 @@ import {
   watchIssue,
 } from "../jira";
 import {
+  bg,
   clamp,
   copyToClipboard,
   errorMessage,
@@ -40,85 +42,12 @@ import {
 } from "../ui";
 import { FilterPicker } from "./FilterPicker";
 import { Hint } from "./Hint";
+import { formatShortDate, renderDetailLines } from "./IssueDetailLines";
+import { InlineFieldInput } from "./IssueDetailSide";
 import { ListPicker } from "./ListPicker";
-import { TextInput } from "./TextInput";
 import { ToastStack, useToasts } from "./Toasts";
 
-const DETAIL_LABEL_WIDTH = 11;
 const CF_STORY_POINTS = "customfield_10016";
-
-const pad2 = (n: number) => String(n).padStart(2, "0");
-
-function formatShortDate(iso: string | undefined): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-}
-
-type DetailLine = {
-  text: string;
-  color: string | undefined;
-  bold?: boolean;
-  commentIdx?: number | undefined;
-};
-
-function renderDetailLines(detail: IssueDetail, mainWidth: number): DetailLine[] {
-  const out: DetailLine[] = [];
-  const push = (
-    text: string,
-    color: string | undefined = theme.fg,
-    bold = false,
-    commentIdx?: number,
-  ) => out.push({ text, color, bold, commentIdx });
-  const pushLine = (text: string, color: string | undefined = theme.fg, commentIdx?: number) => {
-    if (text.length === 0) {
-      push("", color, false, commentIdx);
-      return;
-    }
-    for (let i = 0; i < text.length; i += mainWidth)
-      push(text.slice(i, i + mainWidth), color, false, commentIdx);
-  };
-  const pushSection = (label: string) => {
-    push("");
-    push(label.toUpperCase(), theme.accent, true);
-    push("─".repeat(Math.min(mainWidth, label.length + 6)), theme.divider);
-  };
-
-  pushSection("description");
-  for (const ln of (detail.description || "—").split(/\n/)) pushLine(ln);
-
-  if (detail.subtasks.length > 0) {
-    pushSection(`sub-tasks (${detail.subtasks.length})`);
-    for (const s of detail.subtasks)
-      push(
-        `${s.key} · ${s.statusName} · ${truncate(s.summary, mainWidth - s.key.length - 16)}`,
-        theme.fgDim,
-      );
-  }
-
-  if (detail.links.length > 0) {
-    pushSection(`linked issues (${detail.links.length})`);
-    for (const l of detail.links)
-      push(
-        `${l.direction} ${l.key} · ${l.statusName} · ${truncate(l.summary, mainWidth - l.key.length - l.direction.length - 16)}`,
-        theme.fgDim,
-      );
-  }
-
-  pushSection(`comments (${detail.comments.length})`);
-  if (detail.comments.length === 0) {
-    push("no comments yet", theme.muted);
-    return out;
-  }
-  detail.comments.forEach((c, i) => {
-    if (i > 0) push("·".repeat(Math.min(mainWidth, 20)), theme.divider, false, i);
-    push(c.author, theme.info, true, i);
-    push(formatShortDate(c.created), theme.muted, false, i);
-    for (const ln of (c.body || "").split(/\n/)) pushLine(` ${ln}`, theme.fg, i);
-  });
-  return out;
-}
 
 type Pane = "body" | "fields";
 
@@ -225,11 +154,34 @@ export function IssueDetailModal({
 
   const [pane, setPane] = useState<Pane>("body");
   const [bodyScroll, setBodyScroll] = useState(0);
+  // The side pane has exactly one piece of state: the cursor row. Scroll
+  // is derived at render time from the cursor + a sticky anchor in a ref,
+  // so there's no way for cursor and scroll to disagree on a frame.
   const [fieldIdx, setFieldIdx] = useState(0);
+  const fieldScrollRef = useRef(0);
   const [overlay, setOverlay] = useState<Overlay>({ kind: "none" });
   const [saving, setSaving] = useState(false);
 
   const [myAccountId, setMyAccountId] = useState<string | null>(null);
+
+  /**
+   * Assignable-users cache, feeding Neovim's `@`-completion menu on every
+   * description/comment edit. Lazy-fetched once per modal open — project
+   * membership doesn't churn fast enough to be worth refreshing. The
+   * `assignee`-field editor fetches its own list; keeping them separate
+   * avoids reshuffling that path.
+   */
+  const usersRef = useRef<JiraUser[] | null>(null);
+  const ensureUsers = useCallback(async (): Promise<JiraUser[]> => {
+    try {
+      if (!usersRef.current) {
+        usersRef.current = await getAssignableUsers(cfg, projectKey);
+      }
+      return usersRef.current;
+    } catch {
+      return [];
+    }
+  }, [cfg, projectKey]);
 
   const [searchResults, setSearchResults] = useState<
     { key: string; summary: string; issueType: string }[]
@@ -275,12 +227,18 @@ export function IssueDetailModal({
     [fetchDetail, showFlash, onRefresh],
   );
 
-  // Layout
+  // Layout. Fixed siblings inside the modal box: header row (1) + summary
+  // row (1) + top separator (1) + bottom separator (1) + footer row (1) = 5
+  // lines. The body row takes whatever's left. Earlier math said `-4` which
+  // off-by-one'd the body by a line, causing Yoga to clip the last row in
+  // both the main pane and the side pane — which showed up as "the cursor
+  // disappears after pressing down 3-4 times" because the focused slot was
+  // the clipped one.
   const innerHeight = Math.max(10, termRows - 4);
   const innerWidth = Math.max(60, termCols - 4);
   const sideWidth = Math.min(Math.max(26, Math.floor(innerWidth * 0.34)), innerWidth - 30);
   const mainWidth = innerWidth - sideWidth;
-  const bodyHeight = innerHeight - 4;
+  const bodyHeight = Math.max(3, innerHeight - 5);
 
   const mainLines = useMemo(
     () => (detail ? renderDetailLines(detail, mainWidth) : []),
@@ -313,8 +271,70 @@ export function IssueDetailModal({
     return -1;
   }, [pane, bodyScroll, bodyHeight, mainLines]);
 
-  const currentField = ALL_FIELDS[fieldIdx];
-  const isEditable = currentField ? EDITABLE_FIELDS.includes(currentField) : false;
+  /**
+   * Unified list of side-panel rows — baked fields first, then the
+   * project's custom fields discovered via editmeta. Cursor `fieldIdx`
+   * indexes into this.
+   */
+  type FieldRow = { kind: "baked"; id: FieldId } | { kind: "custom"; field: CustomField };
+  const fieldRows: FieldRow[] = useMemo(() => {
+    const out: FieldRow[] = ALL_FIELDS.map((id) => ({ kind: "baked", id }));
+    for (const cf of detail?.customFields ?? []) out.push({ kind: "custom", field: cf });
+    return out;
+  }, [detail]);
+  // Clamp before indexing — state can lag fieldRows.length when
+  // editmeta shrinks between a fetch and the invariant effect firing.
+  // Without this, currentRow is undefined and keypresses no-op.
+  const currentRow = fieldRows[clamp(fieldIdx, 0, Math.max(0, fieldRows.length - 1))];
+  const currentField = currentRow?.kind === "baked" ? currentRow.id : undefined;
+  const isEditable = currentRow?.kind === "baked" && EDITABLE_FIELDS.includes(currentRow.id);
+
+  /**
+   * Side pane: one terminal line per row. `bodyHeight - 1` rows leaves a
+   * row of vertical slack so the last slot can't be clipped by flex
+   * rounding — which is EXACTLY what was eating the cursor whenever scroll
+   * advanced (cursor pins to the last slot after overflow, and the last
+   * slot was the clipped one). Position counter lives in the modal
+   * footer, so we don't need dedicated indicator rows.
+   */
+  const fieldWindow = Math.max(3, bodyHeight - 1);
+
+  /**
+   * Custom field labels can be long ("Technical Owner", "Target Release
+   * Date") — widen the label column up to 20 chars to fit them, but cap
+   * so values still have room. Baked fields are all under 11 by design,
+   * so they just pad to whatever the custom fields demand.
+   */
+  const customLabelWidth = useMemo(() => {
+    const base = 11;
+    const customs = detail?.customFields ?? [];
+    if (customs.length === 0) return base;
+    const longest = customs.reduce((m, f) => Math.max(m, f.name.length), 0);
+    return clamp(longest, base, Math.min(20, Math.floor(sideWidth / 2)));
+  }, [detail, sideWidth]);
+
+  /**
+   * Move the cursor by `delta` rows with bound-clamping. Scroll is a
+   * pure derivation at render time — this just updates `fieldIdx` via
+   * the functional form so rapid key-repeat chains correctly.
+   */
+  const moveFieldCursor = useCallback(
+    (delta: number) => {
+      const length = fieldRows.length;
+      if (length === 0) return;
+      setFieldIdx((i) => clamp(i + delta, 0, length - 1));
+    },
+    [fieldRows.length],
+  );
+
+  const jumpFieldCursor = useCallback(
+    (to: number) => {
+      const length = fieldRows.length;
+      if (length === 0) return;
+      setFieldIdx(clamp(to, 0, length - 1));
+    },
+    [fieldRows.length],
+  );
 
   const doEditTitle = useCallback(() => {
     if (!detail) return;
@@ -325,7 +345,8 @@ export function IssueDetailModal({
     if (!detail) return;
     setOverlay({ kind: "nvim" });
     try {
-      const raw = await editInNeovim(detail.description, `${detail.key}-desc.md`);
+      const mentionUsers = await ensureUsers();
+      const raw = await editInNeovim(detail.description, `${detail.key}-desc.md`, { mentionUsers });
       if (raw.trim() === detail.description.trim()) {
         showFlash("no change");
         setOverlay({ kind: "none" });
@@ -337,13 +358,14 @@ export function IssueDetailModal({
       showFlash(errorMessage(e), "err");
       setOverlay({ kind: "none" });
     }
-  }, [detail, cfg, showFlash, doSave]);
+  }, [detail, cfg, showFlash, doSave, ensureUsers]);
 
   const doAddComment = useCallback(async () => {
     if (!detail) return;
     setOverlay({ kind: "nvim" });
     try {
-      const raw = await editInNeovim("", `${detail.key}-comment.md`);
+      const mentionUsers = await ensureUsers();
+      const raw = await editInNeovim("", `${detail.key}-comment.md`, { mentionUsers });
       if (!raw.trim()) {
         showFlash("empty comment, not saved");
         setOverlay({ kind: "none" });
@@ -355,14 +377,17 @@ export function IssueDetailModal({
       showFlash(errorMessage(e), "err");
       setOverlay({ kind: "none" });
     }
-  }, [detail, cfg, showFlash, doSave]);
+  }, [detail, cfg, showFlash, doSave, ensureUsers]);
 
   const doEditComment = useCallback(
     async (comment: Comment) => {
       if (!detail) return;
       setOverlay({ kind: "nvim" });
       try {
-        const raw = await editInNeovim(comment.body, `${detail.key}-comment-${comment.id}.md`);
+        const mentionUsers = await ensureUsers();
+        const raw = await editInNeovim(comment.body, `${detail.key}-comment-${comment.id}.md`, {
+          mentionUsers,
+        });
         if (raw.trim() === comment.body.trim()) {
           showFlash("no change");
           setOverlay({ kind: "none" });
@@ -375,11 +400,11 @@ export function IssueDetailModal({
         setOverlay({ kind: "none" });
       }
     },
-    [detail, cfg, showFlash, doSave],
+    [detail, cfg, showFlash, doSave, ensureUsers],
   );
 
   const openFieldEditor = useCallback(async () => {
-    if (!detail || !currentField || !isEditable) return;
+    if (!detail || !currentRow || !isEditable) return;
 
     if (currentField === "assignee") {
       try {
@@ -416,10 +441,10 @@ export function IssueDetailModal({
     } else if (currentField === "fixVersions") {
       setOverlay({ kind: "pick-versions-action" });
     }
-  }, [detail, currentField, isEditable, cfg, projectKey, showFlash]);
+  }, [detail, currentRow, currentField, isEditable, cfg, projectKey, showFlash]);
 
   const clearField = useCallback(async () => {
-    if (!detail || !currentField || !isEditable) return;
+    if (!detail || !currentRow || !isEditable) return;
     if (currentField === "assignee") {
       await doSave(() => updateIssueField(cfg, detail.key, { assignee: null }), "assignee cleared");
     } else if (currentField === "priority") {
@@ -458,7 +483,7 @@ export function IssueDetailModal({
         "fix versions cleared",
       );
     }
-  }, [detail, currentField, isEditable, cfg, doSave, showFlash]);
+  }, [detail, currentRow, currentField, isEditable, cfg, doSave, showFlash]);
 
   // Main input handler
   useInput(
@@ -495,6 +520,11 @@ export function IssueDetailModal({
         void doSave(fn, watching ? "unwatched" : "watching");
         return;
       }
+      if (input === "r") {
+        void fetchDetail();
+        showFlash("refreshing…");
+        return;
+      }
       if (key.tab) {
         setPane((p) => (p === "body" ? "fields" : "body"));
         return;
@@ -526,12 +556,12 @@ export function IssueDetailModal({
           }
         }
       } else {
-        if (key.downArrow || input === "j")
-          setFieldIdx((i) => clamp(i + 1, 0, ALL_FIELDS.length - 1));
-        else if (key.upArrow || input === "k")
-          setFieldIdx((i) => clamp(i - 1, 0, ALL_FIELDS.length - 1));
-        else if (input === "g") setFieldIdx(0);
-        else if (input === "G") setFieldIdx(ALL_FIELDS.length - 1);
+        if (key.downArrow || input === "j") moveFieldCursor(1);
+        else if (key.upArrow || input === "k") moveFieldCursor(-1);
+        else if (key.pageDown) moveFieldCursor(fieldWindow);
+        else if (key.pageUp) moveFieldCursor(-fieldWindow);
+        else if (input === "g") jumpFieldCursor(0);
+        else if (input === "G") jumpFieldCursor(fieldRows.length - 1);
         else if (key.return) void openFieldEditor();
         else if (input === "x" || (key.ctrl && input === "x")) void clearField();
       }
@@ -1018,6 +1048,67 @@ export function IssueDetailModal({
   const clampedScroll = Math.min(bodyScroll, maxScroll);
   const visibleMain = mainLines.slice(clampedScroll, clampedScroll + bodyHeight);
 
+  /**
+   * Pure-function scroll derivation: one source of truth (fieldIdx),
+   * scroll anchored in a ref so the window only shifts when the cursor
+   * hits an edge. No state, no effects, no race. Cursor and scroll
+   * always agree because we compute scroll *from* cursor at render.
+   */
+  const fieldCursor = clamp(fieldIdx, 0, Math.max(0, fieldRows.length - 1));
+  let fieldScroll = fieldScrollRef.current;
+  const scrollCeiling = Math.max(0, fieldRows.length - fieldWindow);
+  if (fieldScroll > scrollCeiling) fieldScroll = scrollCeiling;
+  if (fieldCursor < fieldScroll) fieldScroll = fieldCursor;
+  else if (fieldCursor >= fieldScroll + fieldWindow) fieldScroll = fieldCursor - fieldWindow + 1;
+  if (fieldScroll < 0) fieldScroll = 0;
+  fieldScrollRef.current = fieldScroll;
+  const visibleFields = fieldRows.slice(fieldScroll, fieldScroll + fieldWindow);
+  // Inner width of the side pane: sideWidth box - borderLeft (1) - paddingX * 2.
+  const sidePaneInner = Math.max(8, sideWidth - 3);
+  /**
+   * Each slot is one flat line. EXACTLY `fieldWindow` slots — no indicator
+   * rows, no variable child count. Position-based keys (slot-N) so React
+   * never reorders children on scroll. Highlight is `> ` prefix + accent
+   * color + bold — no backgroundColor anywhere, because an asymmetric bg
+   * between focused and unfocused rows is where Ink's terminal diff leaves
+   * partial-paint artifacts that look like "nothing is selected."
+   */
+  type SideLine = { key: string; text: string; color: string | undefined; bold: boolean };
+  const sideLines: SideLine[] = [];
+  for (let slot = 0; slot < fieldWindow; slot++) {
+    const row = visibleFields[slot];
+    const absIdx = fieldScroll + slot;
+    if (!row) {
+      sideLines.push({
+        key: `slot-${slot}`,
+        text: padToWidth("", sidePaneInner),
+        color: theme.muted,
+        bold: false,
+      });
+      continue;
+    }
+    const focused = pane === "fields" && absIdx === fieldCursor;
+    const parked = pane === "body" && absIdx === fieldCursor;
+    const { label, value } =
+      row.kind === "baked"
+        ? { label: FIELD_LABELS[row.id], value: fieldDisplayValue(row.id, detail) }
+        : { label: row.field.name.toLowerCase(), value: customFieldValue(row.field) };
+    // Pointer is always exactly 2 ASCII cells. `>` when the pane is
+    // focused, `·` when it's parked (pane=body but cursor is remembered),
+    // spaces otherwise. Symmetric width means string-width can't disagree
+    // with the terminal on column count.
+    const pointer = focused ? "> " : parked ? ". " : "  ";
+    const labelCell = truncate(label, customLabelWidth).padEnd(customLabelWidth);
+    const valueBudget = Math.max(1, sidePaneInner - pointer.length - labelCell.length);
+    const valueCell = truncate(value, valueBudget).padEnd(valueBudget);
+    sideLines.push({
+      key: `slot-${slot}`,
+      text: pointer + labelCell + valueCell,
+      color: focused ? theme.accent : parked ? theme.fg : theme.muted,
+      bold: focused,
+    });
+  }
+
   return (
     <Box
       flexDirection="column"
@@ -1053,8 +1144,8 @@ export function IssueDetailModal({
       </Box>
 
       {/* Body: main + side */}
-      <Box flexDirection="row" flexGrow={1}>
-        <Box flexDirection="column" width={mainWidth} paddingX={1}>
+      <Box flexDirection="row" height={bodyHeight}>
+        <Box flexDirection="column" width={mainWidth} height={bodyHeight} paddingX={1}>
           {visibleMain.map((ln, i) => {
             const lineCommentIdx = ln.commentIdx;
             const isCommentHeader =
@@ -1069,6 +1160,7 @@ export function IssueDetailModal({
                 bold={ln.bold ?? false}
                 wrap="truncate"
                 inverse={isCommentHeader}
+                {...bg(ln.codeBg ? theme.divider : undefined)}
               >
                 {ln.text || " "}
               </Text>
@@ -1079,6 +1171,7 @@ export function IssueDetailModal({
         <Box
           flexDirection="column"
           width={sideWidth}
+          height={bodyHeight}
           paddingX={1}
           borderLeft
           borderTop={false}
@@ -1087,15 +1180,10 @@ export function IssueDetailModal({
           borderStyle="single"
           borderColor={pane === "fields" ? theme.accent : theme.divider}
         >
-          {ALL_FIELDS.map((f, i) => (
-            <SideField
-              key={f}
-              field={f}
-              detail={detail}
-              focused={pane === "fields" && i === fieldIdx}
-              editable={EDITABLE_FIELDS.includes(f)}
-              sideWidth={sideWidth - 3}
-            />
+          {sideLines.map((ln) => (
+            <Text key={ln.key} {...fg(ln.color)} bold={ln.bold} wrap="truncate">
+              {ln.text}
+            </Text>
           ))}
         </Box>
       </Box>
@@ -1128,8 +1216,9 @@ export function IssueDetailModal({
           <Hint k="esc" label="close" />
         </Box>
         <Text color={theme.muted}>
-          {clampedScroll + 1}-{Math.min(clampedScroll + bodyHeight, mainLines.length)} /{" "}
-          {mainLines.length}
+          {pane === "fields"
+            ? `${fieldRows.length === 0 ? 0 : fieldCursor + 1}/${fieldRows.length}`
+            : `${clampedScroll + 1}-${Math.min(clampedScroll + bodyHeight, mainLines.length)}/${mainLines.length}`}
         </Text>
       </Box>
       <ToastStack toasts={toasts} maxWidth={innerWidth} />
@@ -1137,36 +1226,19 @@ export function IssueDetailModal({
   );
 }
 
-function SideField({
-  field,
-  detail,
-  focused,
-  editable,
-  sideWidth,
-}: {
-  field: FieldId;
-  detail: IssueDetail;
-  focused: boolean;
-  editable: boolean;
-  sideWidth: number;
-}) {
-  const value = fieldDisplayValue(field, detail);
-  const color = fieldColor(field, detail);
-  const pointer = focused ? "▶" : " ";
-  const pointerColor = focused ? theme.accent : theme.muted;
-  const valueMax = Math.max(4, sideWidth - DETAIL_LABEL_WIDTH - 2);
-  return (
-    <Box>
-      <Text color={pointerColor}>{pointer}</Text>
-      <Text color={focused ? theme.accent : theme.muted}>
-        {FIELD_LABELS[field].padEnd(DETAIL_LABEL_WIDTH)}
-      </Text>
-      <Text {...fg(focused ? theme.fg : color)} bold={focused} wrap="truncate" inverse={focused}>
-        {truncate(value, valueMax)}
-      </Text>
-      {focused && editable ? <Text color={theme.muted}> ⏎</Text> : null}
-    </Box>
-  );
+/**
+ * Pad a string to a fixed cell count so every side-pane row — field rows
+ * AND the top/bottom indicator slots — is the exact same width every
+ * render. Keeps Ink's terminal diff clean under fast cursor movement.
+ */
+function padToWidth(s: string, width: number): string {
+  return truncate(s, width).padEnd(width);
+}
+
+function customFieldValue(f: CustomField): string {
+  if (f.value === null) return "—";
+  if (Array.isArray(f.value)) return f.value.length === 0 ? "—" : f.value.join(", ");
+  return String(f.value);
 }
 
 function fieldDisplayValue(field: FieldId, d: IssueDetail): string {
@@ -1184,53 +1256,4 @@ function fieldDisplayValue(field: FieldId, d: IssueDetail): string {
   if (field === "created") return formatShortDate(d.created);
   if (field === "updated") return formatShortDate(d.updated);
   return "—";
-}
-
-function fieldColor(field: FieldId, _d: IssueDetail): string | undefined {
-  if (field === "status") return theme.success;
-  if (field === "parent") return theme.accentAlt;
-  if (field === "labels") return theme.info;
-  if (field === "due") return theme.warning;
-  return theme.fg;
-}
-
-function InlineFieldInput({
-  field,
-  initial,
-  onCancel,
-  onSubmit,
-}: {
-  field: string;
-  initial: string;
-  onCancel: () => void;
-  onSubmit: (value: string) => void;
-}) {
-  const [value, setValue] = useState(initial);
-  const hint =
-    field === "title"
-      ? "issue title"
-      : field === "points"
-        ? "enter a number (empty to clear)"
-        : "YYYY-MM-DD (empty to clear)";
-  return (
-    <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.accent}>
-      <Text color={theme.accent} bold>
-        {field}
-      </Text>
-      <Box marginTop={1}>
-        <Text color={theme.muted}>› </Text>
-        <TextInput
-          value={value}
-          placeholder={hint}
-          onChange={setValue}
-          onSubmit={() => onSubmit(value)}
-          onCancel={onCancel}
-        />
-      </Box>
-      <Box marginTop={1}>
-        <Hint k="⏎" label="save" />
-        <Hint k="esc" label="cancel" />
-      </Box>
-    </Box>
-  );
 }

@@ -6,8 +6,17 @@ import { assigneeColor, fg, initials, theme, truncate, typeColor, typeGlyph } fr
 export type Column = BoardColumn & { issues: Issue[] };
 
 /**
- * Single kanban column: header (name + count), optional ▲/▼ hidden-count
- * indicators, and the visible card slice.
+ * Float-friendly formatter for the points badge — keeps 0.5 intact but
+ * drops the trailing `.0` on integers so "5p" beats "5.0p".
+ */
+function fmtPoints(sum: number): string {
+  return Number.isInteger(sum) ? String(sum) : sum.toFixed(1);
+}
+
+/**
+ * Single kanban column: header (name + count + optional WIP + optional
+ * point sum), optional ▲/▼ hidden-count indicators, and the visible card
+ * slice.
  */
 export function ColumnView({
   column,
@@ -33,6 +42,13 @@ export function ColumnView({
   const visible = column.issues.slice(scroll, scroll + cardsVisible);
   const hiddenAbove = scroll;
   const hiddenBelow = Math.max(0, column.issues.length - (scroll + cardsVisible));
+  const pointSum = column.issues.reduce((a, i) => a + (i.storyPoints ?? 0), 0);
+  const overWip = column.max !== undefined && column.issues.length > column.max;
+  const countText =
+    column.max !== undefined
+      ? `${column.issues.length}/${column.max}`
+      : String(column.issues.length);
+  const countColor = overWip ? theme.error : theme.muted;
   return (
     <Box
       width={width}
@@ -43,13 +59,18 @@ export function ColumnView({
     >
       <Box paddingX={1} justifyContent="space-between">
         <Text color={isActive ? theme.accent : theme.fgDim} bold>
-          {truncate(column.name.toUpperCase(), width - 8)}
+          {truncate(column.name.toUpperCase(), Math.max(4, width - 14))}
         </Text>
-        <Text color={theme.muted}>{column.issues.length}</Text>
+        <Box>
+          {pointSum > 0 ? <Text color={theme.muted}>{fmtPoints(pointSum)}p · </Text> : null}
+          <Text color={countColor} bold={overWip}>
+            {countText}
+          </Text>
+        </Box>
       </Box>
       {hiddenAbove > 0 ? (
         <Box paddingX={1}>
-          <Text color={theme.muted}>▲ {hiddenAbove} more</Text>
+          <Text color={theme.muted}>^ {hiddenAbove} more</Text>
         </Box>
       ) : null}
       <Box flexDirection="column" flexGrow={1}>
@@ -71,7 +92,7 @@ export function ColumnView({
       </Box>
       {hiddenBelow > 0 ? (
         <Box paddingX={1}>
-          <Text color={theme.muted}>▼ {hiddenBelow} more</Text>
+          <Text color={theme.muted}>v {hiddenBelow} more</Text>
         </Box>
       ) : null}
     </Box>
@@ -86,7 +107,7 @@ export function PagingArrow({
   direction: "left" | "right";
   active: boolean;
 }) {
-  const glyph = direction === "left" ? " ◀" : "▶ ";
+  const glyph = direction === "left" ? " <" : "> ";
   return (
     <Box width={2} flexDirection="column" justifyContent="center">
       <Text color={active ? theme.accent : theme.divider}>{active ? glyph : "  "}</Text>
