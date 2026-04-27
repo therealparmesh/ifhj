@@ -19,7 +19,7 @@ function App() {
     (async () => {
       try {
         const [c, s] = await Promise.all([loadConfig(), loadSettings()]);
-        setTheme(c.theme);
+        setTheme(s.theme);
         setCfg(c);
         setSettings(s);
       } catch (e) {

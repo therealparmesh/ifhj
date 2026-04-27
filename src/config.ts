@@ -6,21 +6,45 @@ import type { ThemeName } from "./ui";
 export type JiraConfig = {
   server: string;
   authHeader: string;
+};
+
+export type Settings = {
   theme: ThemeName;
 };
 
-export type Settings = Record<string, unknown>;
-
 const SETTINGS_PATH = join(homedir(), ".config", "ifhj", "settings.json");
 
+const DEFAULT_SETTINGS: Settings = {
+  theme: "synthwave",
+};
+
+function isThemeName(v: unknown): v is ThemeName {
+  return v === "synthwave" || v === "terminal";
+}
+
+/**
+ * Load settings from ~/.config/ifhj/settings.json, then overlay the
+ * IFHJ_THEME env var as a runtime override. Unknown keys in the file are
+ * ignored; malformed values fall back to defaults so the app always boots.
+ */
 export async function loadSettings(): Promise<Settings> {
+  let raw: Record<string, unknown> = {};
   try {
     const f = Bun.file(SETTINGS_PATH);
-    if (!(await f.exists())) return {};
-    return (await f.json()) as Settings;
+    if (await f.exists()) raw = (await f.json()) as Record<string, unknown>;
   } catch {
-    return {};
+    // malformed JSON — fall through to defaults
   }
+  const settings: Settings = { ...DEFAULT_SETTINGS };
+  if (isThemeName(raw["theme"])) settings.theme = raw["theme"];
+  const envTheme = Bun.env["IFHJ_THEME"];
+  if (envTheme !== undefined) {
+    if (!isThemeName(envTheme)) {
+      throw new Error(`Invalid IFHJ_THEME "${envTheme}". Expected: synthwave | terminal`);
+    }
+    settings.theme = envTheme;
+  }
+  return settings;
 }
 
 export async function saveSettings(settings: Settings): Promise<void> {
@@ -37,7 +61,7 @@ function unquote(s: string): string {
   return t;
 }
 
-async function readConfigYaml(): Promise<{ server?: string; login?: string; theme?: string }> {
+async function readConfigYaml(): Promise<{ server?: string; login?: string }> {
   const paths = [
     join(homedir(), ".config", ".jira", ".config.yml"),
     join(homedir(), ".config", "jira", ".config.yml"),
@@ -46,13 +70,11 @@ async function readConfigYaml(): Promise<{ server?: string; login?: string; them
     const f = Bun.file(p);
     if (!(await f.exists())) continue;
     const text = await f.text();
-    const out: { server?: string; login?: string; theme?: string } = {};
+    const out: { server?: string; login?: string } = {};
     const server = /^server:\s*(.+)$/m.exec(text)?.[1];
     const login = /^login:\s*(.+)$/m.exec(text)?.[1];
-    const theme = /^theme:\s*(.+)$/m.exec(text)?.[1];
     if (server) out.server = unquote(server);
     if (login) out.login = unquote(login);
-    if (theme) out.theme = unquote(theme);
     return out;
   }
   return {};
@@ -69,13 +91,6 @@ export async function loadConfig(): Promise<JiraConfig> {
   if (!email)
     throw new Error("Missing Jira login email (set JIRA_LOGIN or ~/.config/.jira/.config.yml)");
   if (!token) throw new Error("Missing JIRA_API_TOKEN environment variable");
-  const themeRaw = env["IFHJ_THEME"] || yaml.theme || "synthwave";
-  if (themeRaw !== "synthwave" && themeRaw !== "terminal") {
-    throw new Error(
-      `Invalid theme "${themeRaw}" (IFHJ_THEME or theme: in config). Expected: synthwave | terminal`,
-    );
-  }
-  const theme: ThemeName = themeRaw;
   const authHeader = "Basic " + Buffer.from(`${email}:${token}`).toString("base64");
-  return { server: server.replace(/\/$/, ""), authHeader, theme };
+  return { server: server.replace(/\/$/, ""), authHeader };
 }
