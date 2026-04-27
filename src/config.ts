@@ -34,7 +34,7 @@ function unquote(s: string): string {
   return t;
 }
 
-async function readConfigYaml(): Promise<{ server?: string; login?: string }> {
+async function readConfigYaml(): Promise<{ server?: string; login?: string; maxColumns?: number }> {
   const paths = [
     join(homedir(), ".config", ".jira", ".config.yml"),
     join(homedir(), ".config", "jira", ".config.yml"),
@@ -43,17 +43,29 @@ async function readConfigYaml(): Promise<{ server?: string; login?: string }> {
     const f = Bun.file(p);
     if (!(await f.exists())) continue;
     const text = await f.text();
-    const out: { server?: string; login?: string } = {};
+    const out: { server?: string; login?: string; maxColumns?: number } = {};
     const server = /^server:\s*(.+)$/m.exec(text)?.[1];
     const login = /^login:\s*(.+)$/m.exec(text)?.[1];
+    const maxCols = /^max_columns:\s*(.+)$/m.exec(text)?.[1];
     if (server) out.server = unquote(server);
     if (login) out.login = unquote(login);
+    if (maxCols) {
+      const n = Number.parseInt(unquote(maxCols), 10);
+      if (Number.isFinite(n) && n >= 1) out.maxColumns = n;
+    }
     return out;
   }
   return {};
 }
 
-export async function loadConfig(): Promise<JiraConfig> {
+export type AppConfig = {
+  jira: JiraConfig;
+  maxVisibleCols: number;
+};
+
+const DEFAULT_MAX_VISIBLE_COLS = 4;
+
+export async function loadConfig(): Promise<AppConfig> {
   const env = Bun.env;
   const yaml = await readConfigYaml();
   const server = env["JIRA_SERVER"] || yaml.server;
@@ -65,5 +77,8 @@ export async function loadConfig(): Promise<JiraConfig> {
     throw new Error("Missing Jira login email (set JIRA_LOGIN or ~/.config/.jira/.config.yml)");
   if (!token) throw new Error("Missing JIRA_API_TOKEN environment variable");
   const authHeader = "Basic " + Buffer.from(`${email}:${token}`).toString("base64");
-  return { server: server.replace(/\/$/, ""), authHeader };
+  return {
+    jira: { server: server.replace(/\/$/, ""), authHeader },
+    maxVisibleCols: yaml.maxColumns ?? DEFAULT_MAX_VISIBLE_COLS,
+  };
 }
