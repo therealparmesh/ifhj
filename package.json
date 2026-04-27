@@ -1,6 +1,6 @@
 {
   "name": "ifhj",
-  "version": "0.0.30",
+  "version": "0.0.31",
   "private": true,
   "description": "i freaking have jira — a TUI for Jira",
   "license": "MIT",
