@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { JiraConfig } from "../config";
 import { useDimensions } from "../hooks";
 import { type Board, listBoards } from "../jira";
-import { bg, clamp, errorMessage, theme, truncate } from "../ui";
+import { clamp, errorMessage, theme, truncate } from "../ui";
 import { TextInput } from "./TextInput";
 
 type Props = {
@@ -156,7 +156,7 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
           <Text color={theme.muted}>no boards match</Text>
         ) : (
           <>
-            {scroll > 0 ? <Text color={theme.muted}> ▲ {scroll} more above</Text> : null}
+            {scroll > 0 ? <Text color={theme.muted}> ^ {scroll} more above</Text> : null}
             {visible.map((b, i) => {
               const absolute = scroll + i;
               const selected = absolute === cursor;
@@ -167,13 +167,9 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
               return (
                 <Box key={b.id}>
                   <Text color={selected ? theme.accent : theme.muted}>
-                    {selected ? "▶ " : "  "}
+                    {selected ? "> " : "  "}
                   </Text>
-                  <Text
-                    color={selected ? theme.fg : theme.fgDim}
-                    bold={selected}
-                    {...bg(selected ? theme.accentDim : undefined)}
-                  >
+                  <Text color={selected ? theme.accent : theme.fgDim} bold={selected}>
                     {label}
                   </Text>
                 </Box>
@@ -181,7 +177,7 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
             })}
             {filtered.length > scroll + viewportHeight ? (
               <Text color={theme.muted}>
-                {"  "}▼ {filtered.length - scroll - viewportHeight} more below
+                {"  "}v {filtered.length - scroll - viewportHeight} more below
               </Text>
             ) : null}
           </>

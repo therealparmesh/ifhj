@@ -70,7 +70,7 @@ export function ColumnView({
       </Box>
       {hiddenAbove > 0 ? (
         <Box paddingX={1}>
-          <Text color={theme.muted}>▲ {hiddenAbove} more</Text>
+          <Text color={theme.muted}>^ {hiddenAbove} more</Text>
         </Box>
       ) : null}
       <Box flexDirection="column" flexGrow={1}>
@@ -92,7 +92,7 @@ export function ColumnView({
       </Box>
       {hiddenBelow > 0 ? (
         <Box paddingX={1}>
-          <Text color={theme.muted}>▼ {hiddenBelow} more</Text>
+          <Text color={theme.muted}>v {hiddenBelow} more</Text>
         </Box>
       ) : null}
     </Box>
@@ -107,7 +107,7 @@ export function PagingArrow({
   direction: "left" | "right";
   active: boolean;
 }) {
-  const glyph = direction === "left" ? " ◀" : "▶ ";
+  const glyph = direction === "left" ? " <" : "> ";
   return (
     <Box width={2} flexDirection="column" justifyContent="center">
       <Text color={active ? theme.accent : theme.accentDim}>{active ? glyph : "  "}</Text>

@@ -130,14 +130,14 @@ function JqlResults({
       <Text color={theme.muted}>
         {results.length} result{results.length === 1 ? "" : "s"}
       </Text>
-      {scroll > 0 ? <Text color={theme.muted}> ▲ {scroll} more</Text> : null}
+      {scroll > 0 ? <Text color={theme.muted}> ^ {scroll} more</Text> : null}
       {visible.map((r, i) => {
         const abs = scroll + i;
         const sel = abs === cursor;
         return (
           <Box key={r.key}>
-            <Text color={sel ? theme.accent : theme.muted}>{sel ? "▶ " : "  "}</Text>
-            <Text color={sel ? theme.pink : theme.fgDim} bold={sel}>
+            <Text color={sel ? theme.accent : theme.muted}>{sel ? "> " : "  "}</Text>
+            <Text color={sel ? theme.accent : theme.fgDim} bold={sel}>
               {r.key}
             </Text>
             <Text color={theme.muted}> · </Text>
@@ -147,7 +147,7 @@ function JqlResults({
         );
       })}
       {results.length > scroll + maxVisible ? (
-        <Text color={theme.muted}> ▼ {results.length - scroll - maxVisible} more</Text>
+        <Text color={theme.muted}> v {results.length - scroll - maxVisible} more</Text>
       ) : null}
     </Box>
   );

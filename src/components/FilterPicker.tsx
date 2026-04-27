@@ -1,7 +1,7 @@
 import { Box, Text, useInput } from "ink";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { bg, clamp, theme } from "../ui";
+import { clamp, theme } from "../ui";
 import { Hint } from "./Hint";
 import { TextInput } from "./TextInput";
 
@@ -161,8 +161,12 @@ export function FilterPicker({
 }
 
 /**
- * Windowed row slice with ▲/▼ hidden-count indicators. Split out to keep
- * the FilterPicker body readable.
+ * Windowed row slice with ^/v hidden-count indicators. All glyphs are
+ * ASCII so string-width and the terminal agree on column counts — the
+ * old ▶/▲/▼ are east-asian ambiguous-width and caused inconsistent
+ * paints. Selection is `>` + accent color + bold (no bg), because an
+ * asymmetric backgroundColor between selected and unselected rows is
+ * where Ink's row diff left partial-paint artifacts on fast nav.
  */
 function PickerRows({
   filtered,
@@ -180,18 +184,14 @@ function PickerRows({
   const hiddenBelow = filtered.length - end;
   return (
     <>
-      {hiddenAbove > 0 ? <Text color={theme.muted}> ▲ {hiddenAbove} more above</Text> : null}
+      {hiddenAbove > 0 ? <Text color={theme.muted}> ^ {hiddenAbove} more above</Text> : null}
       {filtered.slice(scroll, end).map((it, i) => {
         const absolute = scroll + i;
         const selected = absolute === idx;
         return (
           <Box key={it.id}>
-            <Text color={selected ? theme.accent : theme.muted}>{selected ? "▶ " : "  "}</Text>
-            <Text
-              color={selected ? theme.fg : theme.fgDim}
-              bold={selected}
-              {...bg(selected ? theme.accentDim : undefined)}
-            >
+            <Text color={selected ? theme.accent : theme.muted}>{selected ? "> " : "  "}</Text>
+            <Text color={selected ? theme.accent : theme.fgDim} bold={selected}>
               {it.label}
             </Text>
             {it.hint ? <Text color={theme.muted}> {it.hint}</Text> : null}
@@ -199,7 +199,7 @@ function PickerRows({
           </Box>
         );
       })}
-      {hiddenBelow > 0 ? <Text color={theme.muted}> ▼ {hiddenBelow} more below</Text> : null}
+      {hiddenBelow > 0 ? <Text color={theme.muted}> v {hiddenBelow} more below</Text> : null}
     </>
   );
 }

@@ -226,12 +226,18 @@ export function IssueDetailModal({
     [fetchDetail, showFlash, onRefresh],
   );
 
-  // Layout
+  // Layout. Fixed siblings inside the modal box: header row (1) + summary
+  // row (1) + top separator (1) + bottom separator (1) + footer row (1) = 5
+  // lines. The body row takes whatever's left. Earlier math said `-4` which
+  // off-by-one'd the body by a line, causing Yoga to clip the last row in
+  // both the main pane and the side pane — which showed up as "the cursor
+  // disappears after pressing down 3-4 times" because the focused slot was
+  // the clipped one.
   const innerHeight = Math.max(10, termRows - 4);
   const innerWidth = Math.max(60, termCols - 4);
   const sideWidth = Math.min(Math.max(26, Math.floor(innerWidth * 0.34)), innerWidth - 30);
   const mainWidth = innerWidth - sideWidth;
-  const bodyHeight = innerHeight - 4;
+  const bodyHeight = Math.max(3, innerHeight - 5);
 
   const mainLines = useMemo(
     () => (detail ? renderDetailLines(detail, mainWidth) : []),
@@ -283,11 +289,12 @@ export function IssueDetailModal({
   const isEditable = currentRow?.kind === "baked" && EDITABLE_FIELDS.includes(currentRow.id);
 
   /**
-   * How many side-panel rows fit alongside the body. Each row is one
-   * terminal line; reserve 2 for the ▲/▼ indicators so they don't push
-   * the last row off-screen when we scroll.
+   * Side pane: one terminal line per row, `bodyHeight` rows total. No
+   * overflow indicators — the current cursor position moves to the modal
+   * footer instead, so every row of the window is a real field row. That
+   * kills a whole class of "row clipped off the bottom" bugs.
    */
-  const fieldWindow = Math.max(3, bodyHeight - 2);
+  const fieldWindow = Math.max(3, bodyHeight);
 
   /**
    * Custom field labels can be long ("Technical Owner", "Target Release
@@ -1052,42 +1059,25 @@ export function IssueDetailModal({
   else if (fieldCursor >= fieldScroll + fieldWindow) fieldScroll = fieldCursor - fieldWindow + 1;
   if (fieldScroll < 0) fieldScroll = 0;
   fieldScrollRef.current = fieldScroll;
-  const hiddenAbove = fieldScroll;
-  const hiddenBelow = Math.max(0, fieldRows.length - fieldScroll - fieldWindow);
   const visibleFields = fieldRows.slice(fieldScroll, fieldScroll + fieldWindow);
   // Inner width of the side pane: sideWidth box - borderLeft (1) - paddingX * 2.
   const sidePaneInner = Math.max(8, sideWidth - 3);
   /**
-   * Build a fixed-height list of side lines: one top indicator slot, a
-   * fixed number of field slots, one bottom indicator slot. Slots are
-   * always emitted — blank-padded when empty — so Yoga never reflows the
-   * pane. Each line is ONE flat <Text> with uniform styling: nested
-   * <Text> children concatenate to ANSI sequences where adjacent runs
-   * have different bg, which Ink's row diff can botch on repaint. Flat
-   * strings with position-based keys sidestep the whole class.
+   * Each slot is one flat line. EXACTLY `fieldWindow` slots — no indicator
+   * rows, no variable child count. Position-based keys (slot-N) so React
+   * never reorders children on scroll. Highlight is `> ` prefix + accent
+   * color + bold — no backgroundColor anywhere, because an asymmetric bg
+   * between focused and unfocused rows is where Ink's terminal diff leaves
+   * partial-paint artifacts that look like "nothing is selected."
    */
-  type SideLine = {
-    key: string;
-    text: string;
-    color: string;
-    bold: boolean;
-    bg?: string;
-  };
+  type SideLine = { key: string; text: string; color: string; bold: boolean };
   const sideLines: SideLine[] = [];
-  // Slot 0: top indicator. ASCII `^` — the original ▲ is east-asian
-  // ambiguous-width and can desync string-width vs terminal paint.
-  sideLines.push({
-    key: "slot-0",
-    text: padToWidth(hiddenAbove > 0 ? ` ^ ${hiddenAbove} more` : "", sidePaneInner),
-    color: theme.muted,
-    bold: false,
-  });
   for (let slot = 0; slot < fieldWindow; slot++) {
     const row = visibleFields[slot];
     const absIdx = fieldScroll + slot;
     if (!row) {
       sideLines.push({
-        key: `slot-${slot + 1}`,
+        key: `slot-${slot}`,
         text: padToWidth("", sidePaneInner),
         color: theme.muted,
         bold: false,
@@ -1095,39 +1085,26 @@ export function IssueDetailModal({
       continue;
     }
     const focused = pane === "fields" && absIdx === fieldCursor;
-    const atCursor = absIdx === fieldCursor;
+    const parked = pane === "body" && absIdx === fieldCursor;
     const { label, value } =
       row.kind === "baked"
-        ? {
-            label: FIELD_LABELS[row.id],
-            value: fieldDisplayValue(row.id, detail),
-          }
-        : {
-            label: row.field.name.toLowerCase(),
-            value: customFieldValue(row.field),
-          };
-    // Pointer is always 2 ASCII cells so string-width and the terminal
-    // agree on column count.
-    const pointer = focused ? "> " : "  ";
+        ? { label: FIELD_LABELS[row.id], value: fieldDisplayValue(row.id, detail) }
+        : { label: row.field.name.toLowerCase(), value: customFieldValue(row.field) };
+    // Pointer is always exactly 2 ASCII cells. `>` when the pane is
+    // focused, `·` when it's parked (pane=body but cursor is remembered),
+    // spaces otherwise. Symmetric width means string-width can't disagree
+    // with the terminal on column count.
+    const pointer = focused ? "> " : parked ? ". " : "  ";
     const labelCell = truncate(label, customLabelWidth).padEnd(customLabelWidth);
     const valueBudget = Math.max(1, sidePaneInner - pointer.length - labelCell.length);
     const valueCell = truncate(value, valueBudget).padEnd(valueBudget);
-    const text = pointer + labelCell + valueCell;
-    const color = focused ? theme.accent : atCursor && pane === "body" ? theme.fg : theme.muted;
     sideLines.push({
-      key: `slot-${slot + 1}`,
-      text,
-      color,
+      key: `slot-${slot}`,
+      text: pointer + labelCell + valueCell,
+      color: focused ? theme.accent : parked ? theme.fg : theme.muted,
       bold: focused,
-      ...(focused ? { bg: theme.accentDim } : {}),
     });
   }
-  sideLines.push({
-    key: `slot-${fieldWindow + 1}`,
-    text: padToWidth(hiddenBelow > 0 ? ` v ${hiddenBelow} more` : "", sidePaneInner),
-    color: theme.muted,
-    bold: false,
-  });
 
   return (
     <Box
@@ -1164,8 +1141,8 @@ export function IssueDetailModal({
       </Box>
 
       {/* Body: main + side */}
-      <Box flexDirection="row" flexGrow={1}>
-        <Box flexDirection="column" width={mainWidth} paddingX={1}>
+      <Box flexDirection="row" height={bodyHeight}>
+        <Box flexDirection="column" width={mainWidth} height={bodyHeight} paddingX={1}>
           {visibleMain.map((ln, i) => {
             const lineCommentIdx = ln.commentIdx;
             const isCommentHeader =
@@ -1190,6 +1167,7 @@ export function IssueDetailModal({
         <Box
           flexDirection="column"
           width={sideWidth}
+          height={bodyHeight}
           paddingX={1}
           borderLeft
           borderTop={false}
@@ -1199,7 +1177,7 @@ export function IssueDetailModal({
           borderColor={pane === "fields" ? theme.accent : theme.accentDim}
         >
           {sideLines.map((ln) => (
-            <Text key={ln.key} color={ln.color} bold={ln.bold} wrap="truncate" {...bg(ln.bg)}>
+            <Text key={ln.key} color={ln.color} bold={ln.bold} wrap="truncate">
               {ln.text}
             </Text>
           ))}
@@ -1234,8 +1212,9 @@ export function IssueDetailModal({
           <Hint k="esc" label="close" />
         </Box>
         <Text color={theme.muted}>
-          {clampedScroll + 1}-{Math.min(clampedScroll + bodyHeight, mainLines.length)} /{" "}
-          {mainLines.length}
+          {pane === "fields"
+            ? `${fieldRows.length === 0 ? 0 : fieldCursor + 1}/${fieldRows.length}`
+            : `${clampedScroll + 1}-${Math.min(clampedScroll + bodyHeight, mainLines.length)}/${mainLines.length}`}
         </Text>
       </Box>
       <ToastStack toasts={toasts} maxWidth={innerWidth} />
