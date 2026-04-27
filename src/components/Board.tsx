@@ -119,10 +119,12 @@ export function BoardView({ cfg, board, onExit }: Props) {
   const [issues, setIssues] = useState<Issue[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  // Cursor / scroll state
+  // Cursor / scroll state. Per-column scroll offsets live in a ref, not
+  // useState — they're derived from each column's active row at render time
+  // so cursor and scroll can't disagree on a frame. (See scrollFor below.)
   const [activeCol, setActiveCol] = useState(0);
   const [activeRows, setActiveRows] = useState<number[]>([]);
-  const [scrolls, setScrolls] = useState<number[]>([]);
+  const scrollsRef = useRef<number[]>([]);
 
   // UI state
   const { toasts, flash } = useToasts();
@@ -198,7 +200,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
     setConf(c);
     setIssues(is);
     setActiveRows((prev) => c.columns.map((_, i) => prev[i] ?? 0));
-    setScrolls((prev) => c.columns.map((_, i) => prev[i] ?? 0));
+    scrollsRef.current = c.columns.map((_, i) => scrollsRef.current[i] ?? 0);
   }, []);
 
   const load = useCallback(async () => {
@@ -332,29 +334,22 @@ export function BoardView({ cfg, board, onExit }: Props) {
   }, [columns]);
 
   /**
-   * Keep each column's scroll offset in sync with its active row so the
-   * cursor never scrolls off screen. Returns prev unchanged when nothing
-   * shifted so we don't trigger pointless re-renders.
+   * Per-column scroll is derived at render from activeRow + a ref anchor.
+   * Pure function — same inputs produce same output, no useState cycle.
+   * Only shifts when the cursor would leave the viewport.
    */
-  useEffect(() => {
-    if (columns.length === 0) return;
-    setScrolls((prev) => {
-      let changed = false;
-      const arr = prev.slice();
-      columns.forEach((_, i) => {
-        const row = activeRows[i] ?? 0;
-        const scroll = arr[i] ?? 0;
-        if (row < scroll) {
-          arr[i] = row;
-          changed = true;
-        } else if (row >= scroll + cardsVisible) {
-          arr[i] = row - cardsVisible + 1;
-          changed = true;
-        }
-      });
-      return changed ? arr : prev;
-    });
-  }, [activeRows, cardsVisible, columns]);
+  const scrollFor = (colIdx: number, issueCount: number): number => {
+    const row = activeRows[colIdx] ?? 0;
+    const cursor = clamp(row, 0, Math.max(0, issueCount - 1));
+    let scroll = scrollsRef.current[colIdx] ?? 0;
+    const ceiling = Math.max(0, issueCount - cardsVisible);
+    if (scroll > ceiling) scroll = ceiling;
+    if (cursor < scroll) scroll = cursor;
+    else if (cursor >= scroll + cardsVisible) scroll = cursor - cardsVisible + 1;
+    if (scroll < 0) scroll = 0;
+    scrollsRef.current[colIdx] = scroll;
+    return scroll;
+  };
 
   const currentIssue: Issue | null = useMemo(() => {
     const col = columns[activeCol];
@@ -1244,7 +1239,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
                 marginRight={vi === visibleCols.length - 1 ? 0 : gap}
                 isActive={ci === activeCol}
                 activeRow={activeRows[ci] ?? 0}
-                scroll={scrolls[ci] ?? 0}
+                scroll={scrollFor(ci, col.issues.length)}
                 cardsVisible={cardsVisible}
                 matchSet={matchSet}
                 colIdx={ci}

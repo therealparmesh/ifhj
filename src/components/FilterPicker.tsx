@@ -59,12 +59,12 @@ export function FilterPicker({
     : 0;
   const [idx, setIdx] = useState(initialIdx);
   /**
-   * Seed scroll too, otherwise there's a one-frame flash of the wrong window
-   * when `currentId` sits deep in the list.
+   * Scroll anchor lives in a ref, not useState. The actual scroll value is
+   * derived from cursor + anchor every render (see below), so cursor and
+   * scroll can never disagree on a frame. Seeded so `currentId` deep in the
+   * list doesn't flash the wrong window.
    */
-  const [scroll, setScroll] = useState(() =>
-    initialIdx >= MAX_PICKER_ROWS ? initialIdx - MAX_PICKER_ROWS + 1 : 0,
-  );
+  const scrollRef = useRef(initialIdx >= MAX_PICKER_ROWS ? initialIdx - MAX_PICKER_ROWS + 1 : 0);
 
   // Async caller owns filtering — pass items through. Otherwise filter locally.
   const filtered = useMemo(() => {
@@ -78,26 +78,6 @@ export function FilterPicker({
         it.id.toLowerCase().includes(lower),
     );
   }, [items, q, onQueryChange]);
-
-  useEffect(() => {
-    setIdx((i) => Math.min(i, Math.max(0, filtered.length - 1)));
-  }, [filtered]);
-
-  /**
-   * Sticky scroll: only shift the window when the cursor hits an edge.
-   * Avoids the jittery center-on-cursor behavior where one keystroke
-   * snaps the list by half the viewport.
-   */
-  useEffect(() => {
-    setScroll((s) => {
-      if (idx < s) return idx;
-      if (idx >= s + MAX_PICKER_ROWS) return idx - MAX_PICKER_ROWS + 1;
-      // Pull back if the list shrank past where we were scrolled.
-      const maxStart = Math.max(0, filtered.length - MAX_PICKER_ROWS);
-      if (s > maxStart) return maxStart;
-      return s;
-    });
-  }, [idx, filtered.length]);
 
   /**
    * Debounce keystrokes when the caller owns filtering. The callback goes
@@ -121,6 +101,17 @@ export function FilterPicker({
     },
     { isActive: !!onClear },
   );
+
+  // Sticky scroll: only shift when cursor hits an edge. Pure derivation at
+  // render time — no useEffect, no setState cycle.
+  const cursor = clamp(idx, 0, Math.max(0, filtered.length - 1));
+  let scroll = scrollRef.current;
+  const ceiling = Math.max(0, filtered.length - MAX_PICKER_ROWS);
+  if (scroll > ceiling) scroll = ceiling;
+  if (cursor < scroll) scroll = cursor;
+  else if (cursor >= scroll + MAX_PICKER_ROWS) scroll = cursor - MAX_PICKER_ROWS + 1;
+  if (scroll < 0) scroll = 0;
+  scrollRef.current = scroll;
 
   const accent = borderColor ?? theme.pink;
   return (
@@ -153,8 +144,8 @@ export function FilterPicker({
         ) : (
           <PickerRows
             filtered={filtered}
-            idx={idx}
-            scroll={Math.min(scroll, Math.max(0, filtered.length - MAX_PICKER_ROWS))}
+            idx={cursor}
+            scroll={scroll}
             {...(currentId ? { currentId } : {})}
           />
         )}

@@ -1,5 +1,5 @@
 import { Box, Text, useInput } from "ink";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { JiraConfig } from "../config";
 import { useDimensions } from "../hooks";
@@ -18,7 +18,9 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState(0);
-  const [scroll, setScroll] = useState(0);
+  // Scroll is derived from the cursor at render time via a ref anchor. No
+  // useState for scroll means cursor/scroll can't disagree on a frame.
+  const scrollRef = useRef(0);
   const { cols, rows } = useDimensions();
 
   useEffect(() => {
@@ -60,13 +62,8 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
   const viewportHeight = Math.max(5, rows - 8);
 
   useEffect(() => {
-    if (index < scroll) setScroll(index);
-    else if (index >= scroll + viewportHeight) setScroll(index - viewportHeight + 1);
-  }, [index, scroll, viewportHeight]);
-
-  useEffect(() => {
     setIndex(0);
-    setScroll(0);
+    scrollRef.current = 0;
   }, [query]);
 
   /**
@@ -116,6 +113,16 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
     );
   }
 
+  // Pure derived scroll: anchor in ref, shift only when cursor hits an edge.
+  const cursor = clamp(index, 0, Math.max(0, filtered.length - 1));
+  let scroll = scrollRef.current;
+  const ceiling = Math.max(0, filtered.length - viewportHeight);
+  if (scroll > ceiling) scroll = ceiling;
+  if (cursor < scroll) scroll = cursor;
+  else if (cursor >= scroll + viewportHeight) scroll = cursor - viewportHeight + 1;
+  if (scroll < 0) scroll = 0;
+  scrollRef.current = scroll;
+
   const visible = filtered.slice(scroll, scroll + viewportHeight);
   const rowWidth = cols - 4;
 
@@ -152,7 +159,7 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
             {scroll > 0 ? <Text color={theme.muted}> ▲ {scroll} more above</Text> : null}
             {visible.map((b, i) => {
               const absolute = scroll + i;
-              const selected = absolute === index;
+              const selected = absolute === cursor;
               const label = truncate(
                 `${b.name}  ${b.projectKey ? `[${b.projectKey}]` : ""}  ${b.type}`,
                 Math.max(10, rowWidth - 2),
