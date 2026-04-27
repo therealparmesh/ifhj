@@ -158,7 +158,7 @@ export function TextInput({
       <Text {...fg(theme.fg)}>{before}</Text>
       {isActive ? (
         at.length > 0 ? (
-          <Text color={theme.bg} backgroundColor={theme.accent}>
+          <Text color={theme.accent} inverse>
             {at}
           </Text>
         ) : (

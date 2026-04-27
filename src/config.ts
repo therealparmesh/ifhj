@@ -1,4 +1,3 @@
-import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -52,16 +51,13 @@ function isRecord(v: unknown): v is Record<string, unknown> {
  * overrides. Unknown keys in the file are ignored; invalid values fall
  * back to defaults so the app always boots. Env var values are strict:
  * an invalid override throws so the user notices the typo immediately.
- *
- * Synchronous so callers can apply settings (e.g. `setTheme`) *before*
- * the first Ink render — otherwise the loading screen paints in the
- * default theme and we get a one-frame flash on terminal-themed setups.
  */
-export function loadSettings(): Settings {
+export async function loadSettings(): Promise<Settings> {
   let raw: Record<string, unknown> = {};
   try {
-    if (existsSync(SETTINGS_PATH)) {
-      const parsed: unknown = JSON.parse(readFileSync(SETTINGS_PATH, "utf8"));
+    const f = Bun.file(SETTINGS_PATH);
+    if (await f.exists()) {
+      const parsed: unknown = await f.json();
       if (isRecord(parsed)) raw = parsed;
     }
   } catch {
@@ -88,12 +84,6 @@ export function loadSettings(): Settings {
     bag[key] = envParsed;
   }
   return settings;
-}
-
-export async function saveSettings(settings: Settings): Promise<void> {
-  const { mkdirSync } = await import("node:fs");
-  mkdirSync(join(homedir(), ".config", "ifhj"), { recursive: true });
-  await Bun.write(SETTINGS_PATH, JSON.stringify(settings, null, 2) + "\n");
 }
 
 // Strip matching single or double quotes around a YAML scalar.

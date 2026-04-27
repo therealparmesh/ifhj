@@ -12,7 +12,7 @@ import { errorMessage, setTheme, theme } from "./ui";
 // user's chosen palette, not the default.
 let initErr: string | null = null;
 try {
-  setTheme(loadSettings().theme);
+  setTheme((await loadSettings()).theme);
 } catch (e) {
   initErr = errorMessage(e);
 }

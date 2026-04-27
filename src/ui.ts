@@ -8,11 +8,6 @@
  * binary.
  */
 export type Theme = {
-  // ─── Surfaces ───────────────────────────────────────────────────
-  bg: string; // used as a foreground for inverted-cursor contrast, so must be concrete
-  bgPanel: string;
-  bgDeep: string;
-
   // ─── Text tones ─────────────────────────────────────────────────
   fg: string | undefined; // primary text — undefined ⇒ terminal default
   fgDim: string; // secondary text
@@ -43,11 +38,6 @@ export type Theme = {
  * the VSCode theme, mapped to semantic slots.
  */
 export const synthwaveTheme: Theme = {
-  // Chrome / surfaces
-  bg: "#262335", // editor.background
-  bgPanel: "#241b2f", // sideBar / statusBar / tab group
-  bgDeep: "#171520", // activityBar (darkest chrome)
-
   // Text
   fg: "#f9f9fa", // generic off-white
   fgDim: "#b6b1b1", // punctuation / separators
@@ -76,16 +66,8 @@ export const synthwaveTheme: Theme = {
  * colors (Ink emits e.g. \e[36m for "cyan"). `fg` is `undefined` so primary
  * text uses the terminal's own default foreground, guaranteeing readability
  * on both dark and light terminal themes.
- *
- * `bg` stays concrete ("black") because it's used as a foreground for the
- * inverted cursor (dark-text-on-bright-accent), where black is a safe
- * contrast pick on any background the cursor itself sits on.
  */
 export const terminalTheme: Theme = {
-  bg: "black",
-  bgPanel: "black",
-  bgDeep: "black",
-
   fg: undefined, // terminal default — readable on both light and dark
   fgDim: "gray",
   muted: "gray",

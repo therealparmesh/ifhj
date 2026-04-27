@@ -1111,7 +1111,7 @@ export function IssueDetailModal({
     sideLines.push({
       key: `slot-${slot}`,
       text: pointer + labelCell + valueCell,
-      color: focused ? theme.fg : parked ? theme.fg : theme.muted,
+      color: focused ? theme.fg : parked ? theme.accent : theme.muted,
       bold: focused,
       focused,
     });

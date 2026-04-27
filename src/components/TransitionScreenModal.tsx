@@ -9,7 +9,7 @@ import {
   type TransitionFieldValue,
   getAssignableUsers,
 } from "../jira";
-import { clamp, errorMessage, theme, truncate } from "../ui";
+import { clamp, errorMessage, fg, theme, truncate } from "../ui";
 import { FilterPicker } from "./FilterPicker";
 import { Hint } from "./Hint";
 import { InlineFieldInput } from "./IssueDetailSide";
@@ -329,14 +329,14 @@ export function TransitionScreenModal({
             const valueCell = truncate(valueStr, valueWidth).padEnd(valueWidth);
             const color =
               f.kind === "unsupported"
-                ? theme.err
+                ? theme.error
                 : focused
                   ? theme.accent
                   : hasValue
                     ? theme.fg
                     : theme.muted;
             return (
-              <Text key={`f-${f.id}`} color={color} bold={focused} wrap="truncate">
+              <Text key={`f-${f.id}`} {...fg(color)} bold={focused} wrap="truncate">
                 {pointer + labelCell + "  " + valueCell}
               </Text>
             );

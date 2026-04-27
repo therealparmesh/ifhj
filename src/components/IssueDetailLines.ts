@@ -81,8 +81,12 @@ export function renderDetailLines(detail: IssueDetail, mainWidth: number): Detai
     for (const ln of (c.body || "").split(/\n/)) pushLine(` ${ln}`, theme.fg, i);
   });
 
+  // Code-fence scan runs across body lines only — section titles and
+  // comment-author headers are rendered with their own bg behavior
+  // (inverse when focused), so mixing codeBg in would compound awkwardly.
   let inCode = false;
   for (const ln of out) {
+    if (ln.bold === true) continue;
     if (ln.text.trimStart().startsWith("```")) {
       inCode = !inCode;
       ln.codeBg = true;
