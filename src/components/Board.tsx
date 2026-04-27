@@ -13,6 +13,7 @@ import {
   type IssueType,
   type JiraUser,
   type Transition,
+  type TransitionFieldValue,
   assignIssueToMe,
   createIssue,
   getAssignableUsers,
@@ -42,6 +43,7 @@ import { ListPicker } from "./ListPicker";
 import { QuickAddModal } from "./QuickAddModal";
 import { TitleEditModal } from "./TitleEditModal";
 import { ToastStack, useToasts } from "./Toasts";
+import { TransitionScreenModal } from "./TransitionScreenModal";
 
 const MAX_VISIBLE_COLS = 4;
 
@@ -60,6 +62,7 @@ type Modal =
   | { kind: "card-action" }
   | { kind: "move-picker"; issueKey?: string }
   | { kind: "transition-picker"; transitions: Transition[]; issueKey: string }
+  | { kind: "transition-screen"; transition: Transition; issueKey: string; targetColIdx?: number }
   | { kind: "filter-menu" }
   | { kind: "filter-assignee"; names: string[] }
   | { kind: "filter-type"; types: string[] }
@@ -359,6 +362,43 @@ export function BoardView({ cfg, board, onExit }: Props) {
 
   const moving = useRef(false);
 
+  /**
+   * Execute a transition POST, following the card to its new column. If
+   * the workflow attaches a required-fields screen (`requiredFields` is
+   * non-empty), open the TransitionScreenModal instead and let its
+   * submit handler call back here. `targetColIdx` is threaded through
+   * purely so we can snap `activeCol` to the destination after a card
+   * transitions across columns — unrelated to the POST itself.
+   */
+  const commitTransition = useCallback(
+    async (
+      issueKey: string,
+      transition: Transition,
+      opts: { targetColIdx?: number; fields?: Record<string, TransitionFieldValue> } = {},
+    ) => {
+      if (transition.requiredFields.length > 0 && !opts.fields) {
+        setModal({
+          kind: "transition-screen",
+          transition,
+          issueKey,
+          ...(opts.targetColIdx !== undefined ? { targetColIdx: opts.targetColIdx } : {}),
+        });
+        return;
+      }
+      try {
+        await transitionIssue(cfg, issueKey, transition.id, opts.fields);
+        flash(`${issueKey} → ${transition.name}`, "ok");
+        if (opts.targetColIdx !== undefined) setActiveCol(opts.targetColIdx);
+        pendingFocusKey.current = issueKey;
+        await load();
+      } catch (e) {
+        pendingFocusKey.current = null;
+        flash(errorMessage(e), "err");
+      }
+    },
+    [cfg, flash, load],
+  );
+
   const moveToColumn = useCallback(
     async (targetColIdx: number, issueOverride?: Issue) => {
       const issue = issueOverride ?? currentIssue;
@@ -382,23 +422,17 @@ export function BoardView({ cfg, board, onExit }: Props) {
           return;
         }
         if (candidates.length === 1) {
-          await transitionIssue(cfg, issue.key, candidates[0]!.id);
-          flash(`${issue.key} → ${targetCol.name}`, "ok");
-          // Follow the card so focus doesn't get lost after reload.
-          setActiveCol(targetColIdx);
-          pendingFocusKey.current = issue.key;
-          await load();
+          await commitTransition(issue.key, candidates[0]!, { targetColIdx });
         } else {
           setModal({ kind: "transition-picker", transitions: candidates, issueKey: issue.key });
         }
       } catch (e) {
-        pendingFocusKey.current = null;
         flash(errorMessage(e), "err");
       } finally {
         moving.current = false;
       }
     },
-    [currentIssue, conf, cfg, flash, load],
+    [currentIssue, conf, cfg, flash, commitTransition],
   );
 
   /**
@@ -1037,21 +1071,42 @@ export function BoardView({ cfg, board, onExit }: Props) {
         title={`transition ${pickerKey}`}
         items={trs.map((t) => ({ id: t.id, label: t.name }))}
         onCancel={closeModal}
-        onPick={async (id) => {
-          closeModal();
+        onPick={(id) => {
           const tr = trs.find((t) => t.id === id);
-          if (!tr) return;
-          try {
-            await transitionIssue(cfg, pickerKey, tr.id);
-            flash(`${pickerKey} → ${tr.name}`, "ok");
-            const targetIdx = conf.columns.findIndex((c) => c.statusIds.includes(tr.toStatusId));
-            if (targetIdx !== -1) setActiveCol(targetIdx);
-            pendingFocusKey.current = pickerKey;
-            await load();
-          } catch (e) {
-            pendingFocusKey.current = null;
-            flash(errorMessage(e), "err");
+          if (!tr) {
+            closeModal();
+            return;
           }
+          // Route through commitTransition so workflow-screen fields get
+          // collected before the POST. Don't closeModal() here — the gate
+          // either opens the screen modal (replacing this one) or the
+          // direct POST closes the modal via setModal inside load().
+          const targetIdx = conf.columns.findIndex((c) => c.statusIds.includes(tr.toStatusId));
+          closeModal();
+          void commitTransition(pickerKey, tr, targetIdx !== -1 ? { targetColIdx: targetIdx } : {});
+        }}
+      />
+    );
+  }
+  if (modal.kind === "transition-screen") {
+    const screenKey = modal.issueKey;
+    const screenTr = modal.transition;
+    const screenTargetIdx = modal.targetColIdx;
+    return (
+      <TransitionScreenModal
+        cfg={cfg}
+        projectKey={conf.projectKey}
+        issueKey={screenKey}
+        transition={screenTr}
+        onCancel={closeModal}
+        onError={(msg) => flash(msg, "err")}
+        onSubmit={(fields) => {
+          closeModal();
+          void commitTransition(
+            screenKey,
+            screenTr,
+            screenTargetIdx !== undefined ? { targetColIdx: screenTargetIdx, fields } : { fields },
+          );
         }}
       />
     );
