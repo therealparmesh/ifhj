@@ -13,7 +13,7 @@ import {
   type IssueType,
   type JiraUser,
   type Transition,
-  type TransitionFieldValue,
+  type EditableFieldValue,
   assignIssueToMe,
   createIssue,
   getAssignableUsers,
@@ -374,7 +374,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
     async (
       issueKey: string,
       transition: Transition,
-      opts: { targetColIdx?: number; fields?: Record<string, TransitionFieldValue> } = {},
+      opts: { targetColIdx?: number; fields?: Record<string, EditableFieldValue> } = {},
     ) => {
       if (transition.requiredFields.length > 0 && !opts.fields) {
         setModal({

@@ -56,85 +56,88 @@ export type Transition = {
    * transition POST. Empty for transitions with no screen, which is the
    * common case — callers can short-circuit straight to `transitionIssue`.
    */
-  requiredFields: TransitionField[];
+  requiredFields: EditableField[];
 };
 
-export type TransitionField =
-  | TransitionOptionField
-  | TransitionOptionListField
-  | TransitionUserField
-  | TransitionUserListField
-  | TransitionTextField
-  | TransitionNumberField
-  | TransitionDateField
-  | TransitionUnsupportedField;
+/**
+ * Normalized view of a Jira field's edit metadata. Derived from both the
+ * workflow-transition screen expand and the per-issue /editmeta — the shape
+ * is identical in both responses, so one parser covers both call sites.
+ * The closed union lets the field-editor component dispatch by `kind`
+ * without re-inspecting loose schema strings.
+ */
+export type EditableField =
+  | EditableOptionField
+  | EditableOptionListField
+  | EditableUserField
+  | EditableUserListField
+  | EditableTextField
+  | EditableStringListField
+  | EditableNumberField
+  | EditableDateField
+  | EditableUnsupportedField;
 
 /**
- * Common head — every transition field carries the Jira-side key (e.g.
+ * Common head — every editable field carries the Jira-side key (e.g.
  * `customfield_10042` or `resolution`) and the display name shown in
- * Jira's UI (e.g. "Implementer"). `hasDefaultValue` is surfaced for
- * completeness; we don't seed from it because Jira's API doesn't tell us
- * which allowedValue is actually the default, and a wrong guess
- * ("Won't Do" vs "Done") is a meaningful mistake.
+ * Jira's UI (e.g. "Implementer"). `required` is meaningful for transition
+ * screens and lets custom-field callers ignore it. `hasDefaultValue` is
+ * kept for completeness; we don't seed from it because Jira doesn't tell
+ * us which allowedValue is the default, and a wrong guess is worse than
+ * asking.
  */
-type TransitionFieldBase = {
+type EditableFieldBase = {
   id: string;
   name: string;
+  required: boolean;
   hasDefaultValue: boolean;
 };
 
-export type TransitionOption = { id: string; name: string };
+export type EditableOption = { id: string; name: string };
 
-export type TransitionOptionField = TransitionFieldBase & {
+export type EditableOptionField = EditableFieldBase & {
   kind: "option";
-  allowedValues: TransitionOption[];
+  allowedValues: EditableOption[];
 };
 
-export type TransitionOptionListField = TransitionFieldBase & {
+export type EditableOptionListField = EditableFieldBase & {
   kind: "option-list";
-  allowedValues: TransitionOption[];
+  allowedValues: EditableOption[];
 };
 
-export type TransitionUserField = TransitionFieldBase & {
-  kind: "user";
-};
-
-export type TransitionUserListField = TransitionFieldBase & {
-  kind: "user-list";
-};
-
-export type TransitionTextField = TransitionFieldBase & {
-  kind: "text";
-};
-
-export type TransitionNumberField = TransitionFieldBase & {
-  kind: "number";
-};
-
-export type TransitionDateField = TransitionFieldBase & {
-  kind: "date";
-};
+export type EditableUserField = EditableFieldBase & { kind: "user" };
+export type EditableUserListField = EditableFieldBase & { kind: "user-list" };
+export type EditableTextField = EditableFieldBase & { kind: "text" };
+/**
+ * Plain string arrays — labels-style. Edited as a comma-separated list in
+ * an inline input. Distinct from option-list because the shape Jira wants
+ * is `["foo", "bar"]`, not `[{id}]`.
+ */
+export type EditableStringListField = EditableFieldBase & { kind: "string-list" };
+export type EditableNumberField = EditableFieldBase & { kind: "number" };
+export type EditableDateField = EditableFieldBase & { kind: "date" };
 
 /**
- * Field types Jira lets workflow screens collect but we can't sensibly edit
- * from a TUI (cascading selects, ADF rich-text bodies, etc.). Surfaced
- * explicitly so the modal can tell the user to complete it in the browser.
+ * Field types we can't sensibly edit from a TUI (cascading selects, ADF
+ * rich-text bodies, etc.). Surfaced explicitly so the UI can mark them
+ * read-only with a "complete in browser" hint.
  */
-export type TransitionUnsupportedField = TransitionFieldBase & {
+export type EditableUnsupportedField = EditableFieldBase & {
   kind: "unsupported";
   schemaType: string;
 };
 
 /**
  * Values the user has supplied, keyed by the Jira field id. Shape matches
- * what Jira's transition endpoint wants in `body.fields[id]`.
+ * what Jira's REST endpoint wants in `body.fields[id]`.
  */
-export type TransitionFieldValue =
+export type EditableFieldValue =
   | { id: string } // option-typed single
   | { id: string }[] // option-typed list
   | { accountId: string } // user single
   | { accountId: string }[] // user list
   | string // text / date
+  | string[] // labels / string-list
   | number; // number
 
 export type IssueType = { id: string; name: string; subtask: boolean };
@@ -393,12 +396,24 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
     // screen ordering, which is what users see in the web UI. Filter
     // to custom-field ids that editmeta acknowledged (keeps the noise
     // out: non-editable internals, deprecated remnants, etc.).
-    customFields: Object.keys(f)
-      .filter((id) => id.startsWith("customfield_") && editMetaData?.fields?.[id])
-      .flatMap((id) => {
-        const normalized = normalizeCustomField(id, editMetaData.fields[id], f[id]);
-        return normalized ? [normalized] : [];
-      }),
+    customFields: (() => {
+      const metaFields = editMetaData?.fields ?? {};
+      // Parse the editmeta once so every custom-field row carries the
+      // same EditableField shape used by transitions — the detail modal
+      // can pass these directly to FieldEditor without re-inspecting.
+      const editable = new Map<string, EditableField>();
+      for (const ef of parseEditableFields(metaFields)) editable.set(ef.id, ef);
+      // Walk editmeta, not the issue's fields — so fields that are
+      // editable but currently unset still appear (user can click in to
+      // set them). Preserves editmeta key order, which on Atlassian
+      // Cloud matches the project's view screen ordering.
+      return Object.keys(metaFields)
+        .filter((id) => id.startsWith("customfield_"))
+        .flatMap((id) => {
+          const normalized = normalizeCustomField(id, metaFields[id], f[id], editable.get(id));
+          return normalized ? [normalized] : [];
+        });
+    })(),
   };
   if (f.assignee?.displayName) detail.assignee = f.assignee.displayName;
   if (f.priority?.name) detail.priority = f.priority.name;
@@ -434,27 +449,31 @@ export async function getTransitions(cfg: JiraConfig, issueKey: string): Promise
     id: String(t.id),
     name: String(t.name),
     toStatusId: String(t.to?.id ?? ""),
-    requiredFields: parseTransitionFields(t.fields ?? {}),
+    // Only required fields block a transition — optional screen fields
+    // are noise for the uniform "show the screen modal" path.
+    requiredFields: parseEditableFields(t.fields ?? {}).filter((f) => f.required),
   }));
 }
 
 /**
- * Normalize Jira's loose field-metadata shape into a closed union. Only
- * `required: true` fields are surfaced — optional screen fields don't
- * block the transition, so offering them would just noise up the UI.
+ * Normalize Jira's loose field-metadata shape — the same structure appears
+ * in both `/transitions?expand=transitions.fields` and `/editmeta` — into
+ * a closed union of field kinds the UI can dispatch against. Callers
+ * decide whether to filter by `required`.
  */
-function parseTransitionFields(fields: Record<string, any>): TransitionField[] {
-  const out: TransitionField[] = [];
+export function parseEditableFields(fields: Record<string, any>): EditableField[] {
+  const out: EditableField[] = [];
   for (const [id, raw] of Object.entries(fields)) {
-    if (!raw?.required) continue;
-    const base: TransitionFieldBase = {
+    if (!raw) continue;
+    const base: EditableFieldBase = {
       id,
       name: String(raw.name ?? id),
+      required: Boolean(raw.required),
       hasDefaultValue: Boolean(raw.hasDefaultValue),
     };
     const schemaType = String(raw.schema?.type ?? "");
     const itemsType = String(raw.schema?.items ?? "");
-    const allowedValues: TransitionOption[] = Array.isArray(raw.allowedValues)
+    const allowedValues: EditableOption[] = Array.isArray(raw.allowedValues)
       ? raw.allowedValues.map((v: any) => ({
           id: String(v.id ?? v.value ?? v.name),
           name: String(v.name ?? v.value ?? v.id),
@@ -464,6 +483,9 @@ function parseTransitionFields(fields: Record<string, any>): TransitionField[] {
     if (schemaType === "array") {
       if (itemsType === "user") {
         out.push({ ...base, kind: "user-list" });
+      } else if (itemsType === "string") {
+        // labels-shaped: plain strings, no picker catalog.
+        out.push({ ...base, kind: "string-list" });
       } else if (
         itemsType === "option" ||
         itemsType === "priority" ||
@@ -505,9 +527,9 @@ export async function transitionIssue(
   cfg: JiraConfig,
   issueKey: string,
   transitionId: string,
-  fields?: Record<string, TransitionFieldValue>,
+  fields?: Record<string, EditableFieldValue>,
 ): Promise<void> {
-  const body: { transition: { id: string }; fields?: Record<string, TransitionFieldValue> } = {
+  const body: { transition: { id: string }; fields?: Record<string, EditableFieldValue> } = {
     transition: { id: transitionId },
   };
   if (fields && Object.keys(fields).length > 0) body.fields = fields;

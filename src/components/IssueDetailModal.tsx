@@ -7,6 +7,7 @@ import { useDimensions } from "../hooks";
 import {
   type Comment,
   type CustomField,
+  type EditableFieldValue,
   type IssueDetail,
   type JiraUser,
   type Priority,
@@ -39,6 +40,7 @@ import {
   typeColors,
   typeGlyph,
 } from "../ui";
+import { FieldEditor } from "./FieldEditor";
 import { FilterPicker } from "./FilterPicker";
 import { Hint } from "./Hint";
 import { formatShortDate, renderDetailLines } from "./IssueDetailLines";
@@ -124,7 +126,11 @@ type Overlay =
   | { kind: "pick-versions-add"; all: ProjectVersion[] }
   | { kind: "pick-versions-remove" }
   | { kind: "pick-comment-action"; comment: Comment }
-  | { kind: "search-target" };
+  | { kind: "search-target" }
+  // Editing a project custom field via the shared FieldEditor — the same
+  // dispatch the transition screen uses. Carries enough state to submit
+  // back to updateIssueField on pick.
+  | { kind: "custom-edit"; field: CustomField };
 
 export function IssueDetailModal({
   cfg,
@@ -286,7 +292,12 @@ export function IssueDetailModal({
   // Without this, currentRow is undefined and keypresses no-op.
   const currentRow = fieldRows[clamp(fieldIdx, 0, Math.max(0, fieldRows.length - 1))];
   const currentField = currentRow?.kind === "baked" ? currentRow.id : undefined;
-  const isEditable = currentRow?.kind === "baked" && EDITABLE_FIELDS.includes(currentRow.id);
+  // A row is editable either because it's a baked field we have bespoke
+  // UI for, or a custom field whose editmeta surfaced a supported kind.
+  // The shared FieldEditor handles the latter uniformly.
+  const isEditable =
+    (currentRow?.kind === "baked" && EDITABLE_FIELDS.includes(currentRow.id)) ||
+    (currentRow?.kind === "custom" && currentRow.field.meta.kind !== "unsupported");
 
   /**
    * Side pane: one terminal line per row. `bodyHeight - 1` rows leaves a
@@ -403,7 +414,24 @@ export function IssueDetailModal({
   );
 
   const openFieldEditor = useCallback(async () => {
-    if (!detail || !currentRow || !isEditable) return;
+    if (!detail || !currentRow) return;
+    // Unsupported custom fields get an honest "why nothing happened" toast
+    // instead of a silent no-op, so the user knows to use the web UI.
+    if (currentRow.kind === "custom" && currentRow.field.meta.kind === "unsupported") {
+      showFlash(
+        `${currentRow.field.name}: ${currentRow.field.meta.schemaType} isn't editable from the TUI`,
+      );
+      return;
+    }
+    if (!isEditable) return;
+
+    if (currentRow.kind === "custom") {
+      // All project custom-field edits go through the shared FieldEditor —
+      // the overlay branch below calls updateIssueField with the value it
+      // returns. Unsupported kinds were already filtered by isEditable.
+      setOverlay({ kind: "custom-edit", field: currentRow.field });
+      return;
+    }
 
     if (currentField === "assignee") {
       try {
@@ -444,6 +472,16 @@ export function IssueDetailModal({
 
   const clearField = useCallback(async () => {
     if (!detail || !currentRow || !isEditable) return;
+    if (currentRow.kind === "custom") {
+      // null clears virtually every custom-field kind Jira supports. If
+      // the backend rejects it (e.g. required field), the save error
+      // surfaces via the usual toast — no silent swallow.
+      await doSave(
+        () => updateIssueField(cfg, detail.key, { [currentRow.field.id]: null }),
+        `${currentRow.field.name} cleared`,
+      );
+      return;
+    }
     if (currentField === "assignee") {
       await doSave(() => updateIssueField(cfg, detail.key, { assignee: null }), "assignee cleared");
     } else if (currentField === "priority") {
@@ -1003,6 +1041,31 @@ export function IssueDetailModal({
     );
   }
 
+  if (overlay.kind === "custom-edit" && detail) {
+    const cf = overlay.field;
+    // Re-resolve from the live detail in case editmeta / value changed
+    // between modal-open and submit (fetchDetail side-effects).
+    const latest = detail.customFields.find((c) => c.id === cf.id) ?? cf;
+    return (
+      <FieldEditor
+        cfg={cfg}
+        projectKey={projectKey}
+        field={latest.meta}
+        {...(latest.current !== undefined ? { current: latest.current } : {})}
+        onCancel={() => setOverlay({ kind: "none" })}
+        onSubmit={async (value: EditableFieldValue | null) => {
+          setOverlay({ kind: "none" });
+          // `null` clears — Jira accepts that for most field kinds. If
+          // one rejects, the error toast surfaces naturally.
+          await doSave(
+            () => updateIssueField(cfg, detail.key, { [latest.id]: value }),
+            `${latest.name} ${value === null ? "cleared" : "updated"}`,
+          );
+        }}
+      />
+    );
+  }
+
   // Error state
   if (loadError) {
     return (
@@ -1234,9 +1297,9 @@ function padToWidth(s: string, width: number): string {
 }
 
 function customFieldValue(f: CustomField): string {
-  if (f.value === null) return "—";
-  if (Array.isArray(f.value)) return f.value.length === 0 ? "—" : f.value.join(", ");
-  return String(f.value);
+  if (f.display === null) return "—";
+  if (Array.isArray(f.display)) return f.display.length === 0 ? "—" : f.display.join(", ");
+  return String(f.display);
 }
 
 function fieldDisplayValue(field: FieldId, d: IssueDetail): string {
