@@ -71,10 +71,11 @@ export type TransitionField =
 
 /**
  * Common head — every transition field carries the Jira-side key (e.g.
- * `customfield_10042` or `resolution`) and the display name shown in Jira's
- * UI (e.g. "Implementer"). `hasDefaultValue` lets the modal seed from the
- * workflow's default so a common case ("Resolution = Done") submits without
- * an extra keystroke.
+ * `customfield_10042` or `resolution`) and the display name shown in
+ * Jira's UI (e.g. "Implementer"). `hasDefaultValue` is surfaced for
+ * completeness; we don't seed from it because Jira's API doesn't tell us
+ * which allowedValue is actually the default, and a wrong guess
+ * ("Won't Do" vs "Done") is a meaningful mistake.
  */
 type TransitionFieldBase = {
   id: string;
