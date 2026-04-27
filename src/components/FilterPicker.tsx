@@ -1,7 +1,7 @@
 import { Box, Text, useInput } from "ink";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { bg, clamp, fg, theme } from "../ui";
+import { bg, clamp, theme } from "../ui";
 import { Hint } from "./Hint";
 import { TextInput } from "./TextInput";
 
@@ -197,7 +197,7 @@ function PickerRows({
               {selected ? "> " : "  "}
             </Text>
             <Text
-              {...fg(selected ? theme.fg : theme.fgDim)}
+              color={selected ? theme.selectedFg : theme.fgDim}
               bold={selected}
               {...bg(selected ? theme.selectedBg : undefined)}
             >

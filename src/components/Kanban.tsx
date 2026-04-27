@@ -1,7 +1,7 @@
 import { Box, Text } from "ink";
 
 import type { BoardColumn, Issue } from "../jira";
-import { assigneeColor, bg, fg, initials, theme, truncate, typeColor, typeGlyph } from "../ui";
+import { assigneeColor, bg, initials, theme, truncate, typeColor, typeGlyph } from "../ui";
 
 export type Column = BoardColumn & { issues: Issue[] };
 
@@ -161,7 +161,7 @@ function Card({
             <Text color={accent} {...rowBgProps}>
               {typeGlyph(issue.issueType)}{" "}
             </Text>
-            <Text color={selected ? theme.accent : theme.fgDim} bold={selected} {...rowBgProps}>
+            <Text color={selected ? theme.selectedFg : theme.fgDim} bold={selected} {...rowBgProps}>
               {truncate(issue.key, keyMaxLen)}
             </Text>
           </Box>
@@ -169,10 +169,10 @@ function Card({
             {badge}
           </Text>
         </Box>
-        <Text {...fg(selected ? theme.fg : theme.fgDim)} bold={selected} {...rowBgProps}>
+        <Text color={selected ? theme.selectedFg : theme.fgDim} bold={selected} {...rowBgProps}>
           {summaryText}
         </Text>
-        <Text color={selected ? theme.fgDim : theme.muted} {...rowBgProps}>
+        <Text color={selected ? theme.selectedFg : theme.muted} {...rowBgProps}>
           {metaText}
         </Text>
       </Box>

@@ -28,6 +28,7 @@ export type Theme = {
   accent: string; // primary focus / selection color
   accentAlt: string; // secondary accent (Epics, parent links, alt headings)
   selectedBg: string; // painted background for the selected row
+  selectedFg: string; // paired foreground — author guarantees contrast with selectedBg
   matchBg: string; // search-match background
   divider: string; // thin lines, inactive borders
 
@@ -66,6 +67,7 @@ export const synthwaveTheme: Theme = {
   // purple for foreground text (Epics, parent links).
   accentAlt: "#b893ce",
   selectedBg: "#2a2139", // muted violet — enough contrast against bg to read as selection
+  selectedFg: "#f9f9fa", // off-white — pairs with selectedBg for readable selected rows
   matchBg: "#463465", // menu violet — subtle highlight for search matches
   divider: "#2a2139", // muted violet — reads as thin lines
 
@@ -100,6 +102,7 @@ export const terminalTheme: Theme = {
   accent: "magenta",
   accentAlt: "blue",
   selectedBg: "blue",
+  selectedFg: "white",
   matchBg: "yellow",
   divider: "gray",
 

@@ -1,7 +1,7 @@
 import { Box, Text, useInput } from "ink";
 import { useState } from "react";
 
-import { bg, clamp, fg, theme } from "../ui";
+import { bg, clamp, theme } from "../ui";
 import { Hint } from "./Hint";
 
 /**
@@ -44,7 +44,7 @@ export function ListPicker({
               {i === idx ? "> " : "  "}
             </Text>
             <Text
-              {...fg(i === idx ? theme.fg : theme.fgDim)}
+              color={i === idx ? theme.selectedFg : theme.fgDim}
               bold={i === idx}
               {...bg(i === idx ? theme.selectedBg : undefined)}
             >

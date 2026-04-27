@@ -13,7 +13,7 @@ import {
   createIssueLink,
   searchIssues,
 } from "../jira";
-import { bg, errorMessage, fg, theme, truncate } from "../ui";
+import { bg, errorMessage, theme, truncate } from "../ui";
 import { FilterPicker } from "./FilterPicker";
 import { Hint } from "./Hint";
 
@@ -439,7 +439,7 @@ function FormRow({
   const isEmpty = value === "";
   const rowBgProps = bg(focused ? theme.selectedBg : undefined);
   const labelColor = focused ? theme.accent : theme.muted;
-  const valueColor = isEmpty ? theme.muted : focused ? theme.fg : theme.fgDim;
+  const valueColor = isEmpty ? theme.muted : focused ? theme.selectedFg : theme.fgDim;
   const valueText = isEmpty ? "(empty, ⏎ to edit)" : value;
   /**
    * Fixed label column, star sits outside it so required/optional labels
@@ -459,7 +459,7 @@ function FormRow({
       <Text color={theme.error} {...rowBgProps}>
         {REQUIRED[field] ? "* " : "  "}
       </Text>
-      <Text {...fg(valueColor)} {...rowBgProps} wrap="truncate">
+      <Text color={valueColor} {...rowBgProps} wrap="truncate">
         {truncate(valueText, valueMax)}
       </Text>
     </Box>
