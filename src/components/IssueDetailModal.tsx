@@ -289,12 +289,14 @@ export function IssueDetailModal({
   const isEditable = currentRow?.kind === "baked" && EDITABLE_FIELDS.includes(currentRow.id);
 
   /**
-   * Side pane: one terminal line per row, `bodyHeight` rows total. No
-   * overflow indicators — the current cursor position moves to the modal
-   * footer instead, so every row of the window is a real field row. That
-   * kills a whole class of "row clipped off the bottom" bugs.
+   * Side pane: one terminal line per row. `bodyHeight - 1` rows leaves a
+   * row of vertical slack so the last slot can't be clipped by flex
+   * rounding — which is EXACTLY what was eating the cursor whenever scroll
+   * advanced (cursor pins to the last slot after overflow, and the last
+   * slot was the clipped one). Position counter lives in the modal
+   * footer, so we don't need dedicated indicator rows.
    */
-  const fieldWindow = Math.max(3, bodyHeight);
+  const fieldWindow = Math.max(3, bodyHeight - 1);
 
   /**
    * Custom field labels can be long ("Technical Owner", "Target Release
