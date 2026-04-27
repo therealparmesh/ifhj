@@ -428,7 +428,7 @@ function FormRow({
     return (
       <Box marginTop={1}>
         <Text color={color} bold {...bg(rowBg)}>
-          {focused ? "▶ " : "  "}
+          {focused ? "> " : "  "}
           {text}
         </Text>
       </Box>
@@ -451,7 +451,7 @@ function FormRow({
   return (
     <Box width={width} marginBottom={1}>
       <Text color={labelColor} {...bg(rowBg)}>
-        {focused ? "▶ " : "  "}
+        {focused ? "> " : "  "}
       </Text>
       <Text color={labelColor} bold={focused} {...bg(rowBg)}>
         {labelPadded}

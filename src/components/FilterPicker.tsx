@@ -103,7 +103,10 @@ export function FilterPicker({
   );
 
   // Sticky scroll: only shift when cursor hits an edge. Pure derivation at
-  // render time — no useEffect, no setState cycle.
+  // render time — no useEffect, no setState cycle. `cursor` is the single
+  // source of truth for the row being highlighted / submitted. `idx` is
+  // just the underlying state; it can briefly exceed `filtered.length`
+  // after a filter narrows the list, and `cursor` absorbs that via clamp.
   const cursor = clamp(idx, 0, Math.max(0, filtered.length - 1));
   let scroll = scrollRef.current;
   const ceiling = Math.max(0, filtered.length - MAX_PICKER_ROWS);
@@ -125,12 +128,12 @@ export function FilterPicker({
           value={q}
           placeholder={placeholder ?? "type to filter…"}
           onChange={setQ}
-          onUpArrow={() => setIdx((i) => clamp(i - 1, 0, Math.max(0, filtered.length - 1)))}
-          onDownArrow={() => setIdx((i) => clamp(i + 1, 0, Math.max(0, filtered.length - 1)))}
+          onUpArrow={() => setIdx(clamp(cursor - 1, 0, Math.max(0, filtered.length - 1)))}
+          onDownArrow={() => setIdx(clamp(cursor + 1, 0, Math.max(0, filtered.length - 1)))}
           onSubmit={() => {
             // Visible items may be stale for the current query — don't submit.
             if (loading) return;
-            const it = filtered[idx];
+            const it = filtered[cursor];
             if (it) onPick(it.id);
           }}
           onCancel={onCancel}

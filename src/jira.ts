@@ -93,36 +93,38 @@ type EditableFieldBase = {
   hasDefaultValue: boolean;
 };
 
-export type EditableOption = { id: string; name: string };
+// Per-kind variants are internal to the union — consumers dispatch on
+// `kind` and read the per-kind fields directly without importing them.
+type EditableOption = { id: string; name: string };
 
-export type EditableOptionField = EditableFieldBase & {
+type EditableOptionField = EditableFieldBase & {
   kind: "option";
   allowedValues: EditableOption[];
 };
 
-export type EditableOptionListField = EditableFieldBase & {
+type EditableOptionListField = EditableFieldBase & {
   kind: "option-list";
   allowedValues: EditableOption[];
 };
 
-export type EditableUserField = EditableFieldBase & { kind: "user" };
-export type EditableUserListField = EditableFieldBase & { kind: "user-list" };
-export type EditableTextField = EditableFieldBase & { kind: "text" };
+type EditableUserField = EditableFieldBase & { kind: "user" };
+type EditableUserListField = EditableFieldBase & { kind: "user-list" };
+type EditableTextField = EditableFieldBase & { kind: "text" };
 /**
  * Plain string arrays — labels-style. Edited as a comma-separated list in
  * an inline input. Distinct from option-list because the shape Jira wants
  * is `["foo", "bar"]`, not `[{id}]`.
  */
-export type EditableStringListField = EditableFieldBase & { kind: "string-list" };
-export type EditableNumberField = EditableFieldBase & { kind: "number" };
-export type EditableDateField = EditableFieldBase & { kind: "date" };
+type EditableStringListField = EditableFieldBase & { kind: "string-list" };
+type EditableNumberField = EditableFieldBase & { kind: "number" };
+type EditableDateField = EditableFieldBase & { kind: "date" };
 
 /**
  * Field types we can't sensibly edit from a TUI (cascading selects, ADF
  * rich-text bodies, etc.). Surfaced explicitly so the UI can mark them
  * read-only with a "complete in browser" hint.
  */
-export type EditableUnsupportedField = EditableFieldBase & {
+type EditableUnsupportedField = EditableFieldBase & {
   kind: "unsupported";
   schemaType: string;
 };
@@ -461,7 +463,7 @@ export async function getTransitions(cfg: JiraConfig, issueKey: string): Promise
  * a closed union of field kinds the UI can dispatch against. Callers
  * decide whether to filter by `required`.
  */
-export function parseEditableFields(fields: Record<string, any>): EditableField[] {
+function parseEditableFields(fields: Record<string, any>): EditableField[] {
   const out: EditableField[] = [];
   for (const [id, raw] of Object.entries(fields)) {
     if (!raw) continue;
