@@ -1058,95 +1058,75 @@ export function IssueDetailModal({
   // Inner width of the side pane: sideWidth box - borderLeft (1) - paddingX * 2.
   const sidePaneInner = Math.max(8, sideWidth - 3);
   /**
-   * Build a fixed-height list of side lines: one indicator slot on top, a
-   * fixed number of field rows, one indicator slot on the bottom. Slots are
-   * ALWAYS rendered — they go blank when there's no overflow — so the pane's
-   * line count never changes between frames. Any time the side box's child
-   * count flipped (e.g. from 9 → 10 rows when "▲ N more" appears), Ink's
-   * Yoga layout reflowed the whole column, producing the "cursor vanishes
-   * for a frame" artifact the user was hitting on fast j/k.
+   * Build a fixed-height list of side lines: one top indicator slot, a
+   * fixed number of field slots, one bottom indicator slot. Slots are
+   * always emitted — blank-padded when empty — so Yoga never reflows the
+   * pane. Each line is ONE flat <Text> with uniform styling: nested
+   * <Text> children concatenate to ANSI sequences where adjacent runs
+   * have different bg, which Ink's row diff can botch on repaint. Flat
+   * strings with position-based keys sidestep the whole class.
    */
-  const sideLines: {
+  type SideLine = {
     key: string;
-    pointer: string;
-    pointerColor: string;
-    labelCell: string;
-    labelColor: string;
-    valueCell: string;
-    valueColor: string;
-    focused: boolean;
-  }[] = [];
+    text: string;
+    color: string;
+    bold: boolean;
+    bg?: string;
+  };
+  const sideLines: SideLine[] = [];
+  // Slot 0: top indicator. ASCII `^` — the original ▲ is east-asian
+  // ambiguous-width and can desync string-width vs terminal paint.
   sideLines.push({
-    key: "top",
-    pointer: "",
-    pointerColor: theme.muted,
-    labelCell: "",
-    labelColor: theme.muted,
-    // ASCII-only — the old ▲ glyph is east-asian ambiguous width, which
-    // some terminals render 2 wide and some 1, leaving stale cells on
-    // diff repaints when the row above/below changes focus.
-    valueCell: padToWidth(hiddenAbove > 0 ? ` ^ ${hiddenAbove} more` : "", sidePaneInner),
-    valueColor: theme.muted,
-    focused: false,
+    key: "slot-0",
+    text: padToWidth(hiddenAbove > 0 ? ` ^ ${hiddenAbove} more` : "", sidePaneInner),
+    color: theme.muted,
+    bold: false,
   });
   for (let slot = 0; slot < fieldWindow; slot++) {
     const row = visibleFields[slot];
     const absIdx = fieldScroll + slot;
     if (!row) {
       sideLines.push({
-        key: `empty-${slot}`,
-        pointer: "",
-        pointerColor: theme.muted,
-        labelCell: "",
-        labelColor: theme.muted,
-        valueCell: padToWidth("", sidePaneInner),
-        valueColor: theme.muted,
-        focused: false,
+        key: `slot-${slot + 1}`,
+        text: padToWidth("", sidePaneInner),
+        color: theme.muted,
+        bold: false,
       });
       continue;
     }
     const focused = pane === "fields" && absIdx === fieldCursor;
     const atCursor = absIdx === fieldCursor;
-    const { label, value, valueColor } =
+    const { label, value } =
       row.kind === "baked"
         ? {
             label: FIELD_LABELS[row.id],
             value: fieldDisplayValue(row.id, detail),
-            valueColor: fieldColor(row.id, detail),
           }
         : {
             label: row.field.name.toLowerCase(),
             value: customFieldValue(row.field),
-            valueColor: theme.fg,
           };
-    // Pointer is always 2 ASCII cells so it can never miscount. "> " for
-    // focused, "  " otherwise — we don't draw an at-cursor dot when the
-    // body pane has focus, to avoid an ambiguous-width glyph that can
-    // leave diff artifacts on repaint.
+    // Pointer is always 2 ASCII cells so string-width and the terminal
+    // agree on column count.
     const pointer = focused ? "> " : "  ";
     const labelCell = truncate(label, customLabelWidth).padEnd(customLabelWidth);
     const valueBudget = Math.max(1, sidePaneInner - pointer.length - labelCell.length);
     const valueCell = truncate(value, valueBudget).padEnd(valueBudget);
+    const text = pointer + labelCell + valueCell;
+    const color = focused ? theme.accent : atCursor && pane === "body" ? theme.fg : theme.muted;
     sideLines.push({
-      key: row.kind === "baked" ? `b-${row.id}` : `c-${row.field.id}`,
-      pointer,
-      pointerColor: focused ? theme.accent : atCursor && pane === "body" ? theme.fg : theme.muted,
-      labelCell,
-      labelColor: focused ? theme.accent : atCursor && pane === "body" ? theme.fg : theme.muted,
-      valueCell,
-      valueColor: focused ? theme.fg : valueColor,
-      focused,
+      key: `slot-${slot + 1}`,
+      text,
+      color,
+      bold: focused,
+      ...(focused ? { bg: theme.accentDim } : {}),
     });
   }
   sideLines.push({
-    key: "bot",
-    pointer: "",
-    pointerColor: theme.muted,
-    labelCell: "",
-    labelColor: theme.muted,
-    valueCell: padToWidth(hiddenBelow > 0 ? ` v ${hiddenBelow} more` : "", sidePaneInner),
-    valueColor: theme.muted,
-    focused: false,
+    key: `slot-${fieldWindow + 1}`,
+    text: padToWidth(hiddenBelow > 0 ? ` v ${hiddenBelow} more` : "", sidePaneInner),
+    color: theme.muted,
+    bold: false,
   });
 
   return (
@@ -1219,28 +1199,8 @@ export function IssueDetailModal({
           borderColor={pane === "fields" ? theme.accent : theme.accentDim}
         >
           {sideLines.map((ln) => (
-            <Text key={ln.key} wrap="truncate">
-              <Text
-                color={ln.pointerColor}
-                bold={ln.focused}
-                {...bg(ln.focused ? theme.accentDim : undefined)}
-              >
-                {ln.pointer}
-              </Text>
-              <Text
-                color={ln.labelColor}
-                bold={ln.focused}
-                {...bg(ln.focused ? theme.accentDim : undefined)}
-              >
-                {ln.labelCell}
-              </Text>
-              <Text
-                color={ln.valueColor}
-                bold={ln.focused}
-                {...bg(ln.focused ? theme.accentDim : undefined)}
-              >
-                {ln.valueCell}
-              </Text>
+            <Text key={ln.key} color={ln.color} bold={ln.bold} wrap="truncate" {...bg(ln.bg)}>
+              {ln.text}
             </Text>
           ))}
         </Box>
@@ -1313,12 +1273,4 @@ function fieldDisplayValue(field: FieldId, d: IssueDetail): string {
   if (field === "created") return formatShortDate(d.created);
   if (field === "updated") return formatShortDate(d.updated);
   return "—";
-}
-
-function fieldColor(field: FieldId, _d: IssueDetail): string {
-  if (field === "status") return theme.ok;
-  if (field === "parent") return theme.violet;
-  if (field === "labels") return theme.cyan;
-  if (field === "due") return theme.warn;
-  return theme.fg;
 }
