@@ -1,7 +1,7 @@
 import { Box, Text, useInput } from "ink";
 import { useState } from "react";
 
-import { clamp, fg, theme } from "../ui";
+import { bg, clamp, fg, theme } from "../ui";
 import { Hint } from "./Hint";
 
 /**
@@ -37,8 +37,17 @@ export function ListPicker({
       <Box flexDirection="column" marginTop={1}>
         {items.map((it, i) => (
           <Box key={it.id}>
-            <Text color={i === idx ? theme.accent : theme.muted}>{i === idx ? "> " : "  "}</Text>
-            <Text {...fg(i === idx ? theme.fg : theme.fgDim)} bold={i === idx} inverse={i === idx}>
+            <Text
+              color={i === idx ? theme.accent : theme.muted}
+              {...bg(i === idx ? theme.selectedBg : undefined)}
+            >
+              {i === idx ? "> " : "  "}
+            </Text>
+            <Text
+              {...fg(i === idx ? theme.fg : theme.fgDim)}
+              bold={i === idx}
+              {...bg(i === idx ? theme.selectedBg : undefined)}
+            >
               {it.label}
             </Text>
           </Box>

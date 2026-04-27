@@ -1068,12 +1068,18 @@ export function IssueDetailModal({
   /**
    * Each slot is one flat line. EXACTLY `fieldWindow` slots — no indicator
    * rows, no variable child count. Position-based keys (slot-N) so React
-   * never reorders children on scroll. Highlight is `> ` prefix + accent
-   * color + bold — no backgroundColor anywhere, because an asymmetric bg
-   * between focused and unfocused rows is where Ink's terminal diff leaves
-   * partial-paint artifacts that look like "nothing is selected."
+   * never reorders children on scroll. The focused row's text is padded
+   * to the pane's full inner width so the painted selection bg fills a
+   * rectangular stripe, not a ragged one — ragged asymmetric bg is where
+   * Ink's terminal diff leaves partial-paint artifacts.
    */
-  type SideLine = { key: string; text: string; color: string | undefined; bold: boolean };
+  type SideLine = {
+    key: string;
+    text: string;
+    color: string | undefined;
+    bold: boolean;
+    focused: boolean;
+  };
   const sideLines: SideLine[] = [];
   for (let slot = 0; slot < fieldWindow; slot++) {
     const row = visibleFields[slot];
@@ -1084,6 +1090,7 @@ export function IssueDetailModal({
         text: padToWidth("", sidePaneInner),
         color: theme.muted,
         bold: false,
+        focused: false,
       });
       continue;
     }
@@ -1104,8 +1111,9 @@ export function IssueDetailModal({
     sideLines.push({
       key: `slot-${slot}`,
       text: pointer + labelCell + valueCell,
-      color: focused ? theme.accent : parked ? theme.fg : theme.muted,
+      color: focused ? theme.fg : parked ? theme.fg : theme.muted,
       bold: focused,
+      focused,
     });
   }
 
@@ -1159,8 +1167,7 @@ export function IssueDetailModal({
                 {...fg(ln.color)}
                 bold={ln.bold ?? false}
                 wrap="truncate"
-                inverse={isCommentHeader}
-                {...bg(ln.codeBg ? theme.divider : undefined)}
+                {...bg(isCommentHeader ? theme.selectedBg : ln.codeBg ? theme.divider : undefined)}
               >
                 {ln.text || " "}
               </Text>
@@ -1181,7 +1188,13 @@ export function IssueDetailModal({
           borderColor={pane === "fields" ? theme.accent : theme.divider}
         >
           {sideLines.map((ln) => (
-            <Text key={ln.key} {...fg(ln.color)} bold={ln.bold} wrap="truncate">
+            <Text
+              key={ln.key}
+              {...fg(ln.color)}
+              bold={ln.bold}
+              wrap="truncate"
+              {...bg(ln.focused ? theme.selectedBg : undefined)}
+            >
               {ln.text}
             </Text>
           ))}

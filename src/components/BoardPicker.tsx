@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { JiraConfig } from "../config";
 import { useDimensions } from "../hooks";
 import { type Board, listBoards } from "../jira";
-import { clamp, errorMessage, fg, theme, truncate } from "../ui";
+import { bg, clamp, errorMessage, fg, theme, truncate } from "../ui";
 import { TextInput } from "./TextInput";
 
 type Props = {
@@ -166,13 +166,16 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
               );
               return (
                 <Box key={b.id}>
-                  <Text color={selected ? theme.accent : theme.muted}>
+                  <Text
+                    color={selected ? theme.accent : theme.muted}
+                    {...bg(selected ? theme.selectedBg : undefined)}
+                  >
                     {selected ? "> " : "  "}
                   </Text>
                   <Text
                     {...fg(selected ? theme.fg : theme.fgDim)}
                     bold={selected}
-                    inverse={selected}
+                    {...bg(selected ? theme.selectedBg : undefined)}
                   >
                     {label}
                   </Text>

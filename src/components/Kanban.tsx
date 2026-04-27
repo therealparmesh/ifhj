@@ -1,7 +1,7 @@
 import { Box, Text } from "ink";
 
 import type { BoardColumn, Issue } from "../jira";
-import { assigneeColor, fg, initials, theme, truncate, typeColor, typeGlyph } from "../ui";
+import { assigneeColor, bg, fg, initials, theme, truncate, typeColor, typeGlyph } from "../ui";
 
 export type Column = BoardColumn & { issues: Issue[] };
 
@@ -139,8 +139,8 @@ function Card({
   const meta = [issue.assignee ?? "Unassigned", issue.priority, issue.epicKey]
     .filter(Boolean)
     .join(" · ");
-  // Match gets a painted background; selection wins via inverse (terminal-native).
-  const matchBgProps = !selected && isMatch ? { backgroundColor: theme.matchBg } : {};
+  // Selected wins over match for the row background.
+  const rowBgProps = bg(selected ? theme.selectedBg : isMatch ? theme.matchBg : undefined);
   /**
    * Pad summary + meta so the bg fills evenly — otherwise the highlight is
    * ragged on shorter lines.
@@ -158,31 +158,21 @@ function Card({
       <Box flexDirection="column" flexGrow={1}>
         <Box justifyContent="space-between">
           <Box>
-            <Text color={accent} inverse={selected} {...matchBgProps}>
+            <Text color={accent} {...rowBgProps}>
               {typeGlyph(issue.issueType)}{" "}
             </Text>
-            <Text
-              color={selected ? theme.accent : theme.fgDim}
-              bold={selected}
-              inverse={selected}
-              {...matchBgProps}
-            >
+            <Text color={selected ? theme.accent : theme.fgDim} bold={selected} {...rowBgProps}>
               {truncate(issue.key, keyMaxLen)}
             </Text>
           </Box>
-          <Text color={badgeColor} bold inverse={selected} {...matchBgProps}>
+          <Text color={badgeColor} bold {...rowBgProps}>
             {badge}
           </Text>
         </Box>
-        <Text
-          {...fg(selected ? theme.fg : theme.fgDim)}
-          bold={selected}
-          inverse={selected}
-          {...matchBgProps}
-        >
+        <Text {...fg(selected ? theme.fg : theme.fgDim)} bold={selected} {...rowBgProps}>
           {summaryText}
         </Text>
-        <Text color={selected ? theme.fgDim : theme.muted} inverse={selected} {...matchBgProps}>
+        <Text color={selected ? theme.fgDim : theme.muted} {...rowBgProps}>
           {metaText}
         </Text>
       </Box>
