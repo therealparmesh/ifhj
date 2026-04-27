@@ -47,7 +47,94 @@ export type Issue = {
   storyPoints?: number;
 };
 
-export type Transition = { id: string; name: string; toStatusId: string };
+export type Transition = {
+  id: string;
+  name: string;
+  toStatusId: string;
+  /**
+   * Workflow-screen fields that must be filled in before Jira will accept the
+   * transition POST. Empty for transitions with no screen, which is the
+   * common case — callers can short-circuit straight to `transitionIssue`.
+   */
+  requiredFields: TransitionField[];
+};
+
+export type TransitionField =
+  | TransitionOptionField
+  | TransitionOptionListField
+  | TransitionUserField
+  | TransitionUserListField
+  | TransitionTextField
+  | TransitionNumberField
+  | TransitionDateField
+  | TransitionUnsupportedField;
+
+/**
+ * Common head — every transition field carries the Jira-side key (e.g.
+ * `customfield_10042` or `resolution`) and the display name shown in Jira's
+ * UI (e.g. "Implementer"). `hasDefaultValue` lets the modal seed from the
+ * workflow's default so a common case ("Resolution = Done") submits without
+ * an extra keystroke.
+ */
+type TransitionFieldBase = {
+  id: string;
+  name: string;
+  hasDefaultValue: boolean;
+};
+
+export type TransitionOption = { id: string; name: string };
+
+export type TransitionOptionField = TransitionFieldBase & {
+  kind: "option";
+  allowedValues: TransitionOption[];
+};
+
+export type TransitionOptionListField = TransitionFieldBase & {
+  kind: "option-list";
+  allowedValues: TransitionOption[];
+};
+
+export type TransitionUserField = TransitionFieldBase & {
+  kind: "user";
+};
+
+export type TransitionUserListField = TransitionFieldBase & {
+  kind: "user-list";
+};
+
+export type TransitionTextField = TransitionFieldBase & {
+  kind: "text";
+};
+
+export type TransitionNumberField = TransitionFieldBase & {
+  kind: "number";
+};
+
+export type TransitionDateField = TransitionFieldBase & {
+  kind: "date";
+};
+
+/**
+ * Field types Jira lets workflow screens collect but we can't sensibly edit
+ * from a TUI (cascading selects, ADF rich-text bodies, etc.). Surfaced
+ * explicitly so the modal can tell the user to complete it in the browser.
+ */
+export type TransitionUnsupportedField = TransitionFieldBase & {
+  kind: "unsupported";
+  schemaType: string;
+};
+
+/**
+ * Values the user has supplied, keyed by the Jira field id. Shape matches
+ * what Jira's transition endpoint wants in `body.fields[id]`.
+ */
+export type TransitionFieldValue =
+  | { id: string } // option-typed single
+  | { id: string }[] // option-typed list
+  | { accountId: string } // user single
+  | { accountId: string }[] // user list
+  | string // text / date
+  | number; // number
 
 export type IssueType = { id: string; name: string; subtask: boolean };
 
@@ -335,22 +422,97 @@ export async function getIssueStatusId(cfg: JiraConfig, issueKey: string): Promi
 }
 
 export async function getTransitions(cfg: JiraConfig, issueKey: string): Promise<Transition[]> {
-  const data = await jget(cfg, `/rest/api/3/issue/${issueKey}/transitions`);
+  // `expand=transitions.fields` surfaces the workflow screen's required
+  // fields inline — lets the caller decide up front whether it needs to
+  // prompt the user or can POST silently.
+  const data = await jget(
+    cfg,
+    `/rest/api/3/issue/${issueKey}/transitions?expand=transitions.fields`,
+  );
   return (data.transitions ?? []).map((t: any) => ({
-    id: t.id,
-    name: t.name,
+    id: String(t.id),
+    name: String(t.name),
     toStatusId: String(t.to?.id ?? ""),
+    requiredFields: parseTransitionFields(t.fields ?? {}),
   }));
+}
+
+/**
+ * Normalize Jira's loose field-metadata shape into a closed union. Only
+ * `required: true` fields are surfaced — optional screen fields don't
+ * block the transition, so offering them would just noise up the UI.
+ */
+function parseTransitionFields(fields: Record<string, any>): TransitionField[] {
+  const out: TransitionField[] = [];
+  for (const [id, raw] of Object.entries(fields)) {
+    if (!raw?.required) continue;
+    const base: TransitionFieldBase = {
+      id,
+      name: String(raw.name ?? id),
+      hasDefaultValue: Boolean(raw.hasDefaultValue),
+    };
+    const schemaType = String(raw.schema?.type ?? "");
+    const itemsType = String(raw.schema?.items ?? "");
+    const allowedValues: TransitionOption[] = Array.isArray(raw.allowedValues)
+      ? raw.allowedValues.map((v: any) => ({
+          id: String(v.id ?? v.value ?? v.name),
+          name: String(v.name ?? v.value ?? v.id),
+        }))
+      : [];
+
+    if (schemaType === "array") {
+      if (itemsType === "user") {
+        out.push({ ...base, kind: "user-list" });
+      } else if (
+        itemsType === "option" ||
+        itemsType === "priority" ||
+        itemsType === "resolution" ||
+        itemsType === "version" ||
+        itemsType === "component"
+      ) {
+        out.push({ ...base, kind: "option-list", allowedValues });
+      } else {
+        out.push({ ...base, kind: "unsupported", schemaType: `array<${itemsType}>` });
+      }
+      continue;
+    }
+
+    if (schemaType === "user") {
+      out.push({ ...base, kind: "user" });
+    } else if (
+      schemaType === "option" ||
+      schemaType === "priority" ||
+      schemaType === "resolution" ||
+      schemaType === "version" ||
+      schemaType === "component"
+    ) {
+      out.push({ ...base, kind: "option", allowedValues });
+    } else if (schemaType === "string") {
+      out.push({ ...base, kind: "text" });
+    } else if (schemaType === "number") {
+      out.push({ ...base, kind: "number" });
+    } else if (schemaType === "date" || schemaType === "datetime") {
+      out.push({ ...base, kind: "date" });
+    } else {
+      out.push({ ...base, kind: "unsupported", schemaType });
+    }
+  }
+  return out;
 }
 
 export async function transitionIssue(
   cfg: JiraConfig,
   issueKey: string,
   transitionId: string,
+  fields?: Record<string, TransitionFieldValue>,
 ): Promise<void> {
+  const body: { transition: { id: string }; fields?: Record<string, TransitionFieldValue> } = {
+    transition: { id: transitionId },
+  };
+  if (fields && Object.keys(fields).length > 0) body.fields = fields;
   const res = await jf(cfg, `/rest/api/3/issue/${issueKey}/transitions`, {
     method: "POST",
-    body: JSON.stringify({ transition: { id: transitionId } }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`transition failed ${res.status}: ${await res.text()}`);
 }
