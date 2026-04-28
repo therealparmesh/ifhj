@@ -875,7 +875,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
             <Text color={theme.muted}>— {board.name}</Text>
           </Box>
           <Box marginTop={1}>
-            <Text color={theme.err}>{loadError}</Text>
+            <Text color={theme.error}>{loadError}</Text>
           </Box>
           <Box marginTop={1}>
             <Text color={theme.muted}>press q to go back</Text>
@@ -892,7 +892,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
           <Text color={theme.muted}>— {board.name}</Text>
         </Box>
         <Box marginTop={1}>
-          <Text color={theme.cyan}>◴ </Text>
+          <Text color={theme.info}>◴ </Text>
           <Text color={theme.muted}>loading board…</Text>
         </Box>
       </Box>

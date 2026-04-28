@@ -1,7 +1,7 @@
 import { Box, Text, useInput } from "ink";
 import { useEffect, useState } from "react";
 
-import { theme } from "../ui";
+import { fg, theme } from "../ui";
 
 /**
  * Always used in controlled mode — the caller owns `value` and updates it
@@ -155,19 +155,19 @@ export function TextInput({
 
   return (
     <Box>
-      <Text color={theme.fg}>{before}</Text>
+      <Text {...fg(theme.fg)}>{before}</Text>
       {isActive ? (
         at.length > 0 ? (
-          <Text color={theme.bg} backgroundColor={theme.accent}>
+          <Text color={theme.accent} inverse>
             {at}
           </Text>
         ) : (
           <Text color={theme.accent}>▍</Text>
         )
       ) : (
-        <Text color={theme.fg}>{at}</Text>
+        <Text {...fg(theme.fg)}>{at}</Text>
       )}
-      <Text color={theme.fg}>{after}</Text>
+      <Text {...fg(theme.fg)}>{after}</Text>
     </Box>
   );
 }

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { JiraConfig } from "../config";
 import { useDimensions } from "../hooks";
 import { type Board, listBoards } from "../jira";
-import { clamp, errorMessage, theme, truncate } from "../ui";
+import { clamp, errorMessage, fg, theme, truncate } from "../ui";
 import { TextInput } from "./TextInput";
 
 type Props = {
@@ -96,7 +96,7 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
           ifhj
         </Text>
         <Box marginTop={1}>
-          <Text color={theme.err}>{error}</Text>
+          <Text color={theme.error}>{error}</Text>
         </Box>
         <Box marginTop={1}>
           <Text color={theme.muted}>press esc or ⌃c to quit</Text>
@@ -112,7 +112,7 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
           ifhj
         </Text>
         <Box marginTop={1}>
-          <Text color={theme.cyan}>◴ </Text>
+          <Text color={theme.info}>◴ </Text>
           <Text color={theme.muted}>loading boards…</Text>
         </Box>
       </Box>
@@ -174,7 +174,11 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
                   <Text color={selected ? theme.accent : theme.muted}>
                     {selected ? "> " : "  "}
                   </Text>
-                  <Text color={selected ? theme.accent : theme.fgDim} bold={selected}>
+                  <Text
+                    {...fg(selected ? theme.fg : theme.fgDim)}
+                    bold={selected}
+                    inverse={selected}
+                  >
                     {label}
                   </Text>
                 </Box>

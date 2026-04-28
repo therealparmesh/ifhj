@@ -3,7 +3,7 @@ import { useCallback, useMemo, useState } from "react";
 
 import type { JiraConfig } from "../config";
 import type { EditableField, EditableFieldValue, Transition } from "../jira";
-import { clamp, theme, truncate } from "../ui";
+import { clamp, fg, theme, truncate } from "../ui";
 import { FieldEditor } from "./FieldEditor";
 import { Hint } from "./Hint";
 
@@ -174,14 +174,14 @@ export function TransitionScreenModal({
           const valueCell = truncate(valueStr, valueWidth).padEnd(valueWidth);
           const color =
             f.kind === "unsupported"
-              ? theme.err
+              ? theme.error
               : focused
                 ? theme.accent
                 : hasValue
                   ? theme.fg
                   : theme.muted;
           return (
-            <Text key={`f-${f.id}`} color={color} bold={focused} wrap="truncate">
+            <Text key={`f-${f.id}`} {...fg(color)} bold={focused} wrap="truncate">
               {pointer + labelCell + "  " + valueCell}
             </Text>
           );
@@ -195,7 +195,7 @@ export function TransitionScreenModal({
       </Box>
       {statusMsg ? (
         <Box marginTop={1}>
-          <Text color={theme.err}>{statusMsg}</Text>
+          <Text color={theme.error}>{statusMsg}</Text>
         </Box>
       ) : missing.length > 0 ? (
         <Box marginTop={1}>

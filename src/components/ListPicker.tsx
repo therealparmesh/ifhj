@@ -1,7 +1,7 @@
 import { Box, Text, useInput } from "ink";
 import { useState } from "react";
 
-import { clamp, theme } from "../ui";
+import { clamp, fg, theme } from "../ui";
 import { Hint } from "./Hint";
 
 /**
@@ -38,7 +38,7 @@ export function ListPicker({
         {items.map((it, i) => (
           <Box key={it.id}>
             <Text color={i === idx ? theme.accent : theme.muted}>{i === idx ? "> " : "  "}</Text>
-            <Text color={i === idx ? theme.accent : theme.fgDim} bold={i === idx}>
+            <Text {...fg(i === idx ? theme.fg : theme.fgDim)} bold={i === idx} inverse={i === idx}>
               {it.label}
             </Text>
           </Box>

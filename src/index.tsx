@@ -4,23 +4,30 @@ import { useEffect, useState } from "react";
 
 import { BoardView } from "./components/Board";
 import { BoardPicker } from "./components/BoardPicker";
-import { type Settings, loadConfig, type JiraConfig, loadSettings } from "./config";
+import { loadConfig, type JiraConfig, loadSettings } from "./config";
 import type { Board } from "./jira";
-import { errorMessage, theme } from "./ui";
+import { errorMessage, setTheme, theme } from "./ui";
+
+// Apply the theme before Ink mounts so the loading screen paints in the
+// user's chosen palette, not the default.
+let initErr: string | null = null;
+try {
+  setTheme((await loadSettings()).theme);
+} catch (e) {
+  initErr = errorMessage(e);
+}
 
 function App() {
   const { exit } = useApp();
   const [cfg, setCfg] = useState<JiraConfig | null>(null);
-  const [settings, setSettings] = useState<Settings | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(initErr);
   const [board, setBoard] = useState<Board | null>(null);
 
   useEffect(() => {
+    if (initErr) return;
     (async () => {
       try {
-        const [c, s] = await Promise.all([loadConfig(), loadSettings()]);
-        setCfg(c);
-        setSettings(s);
+        setCfg(await loadConfig());
       } catch (e) {
         setErr(errorMessage(e));
       }
@@ -37,12 +44,12 @@ function App() {
           <Text color={theme.muted}>— startup</Text>
         </Box>
         <Box marginTop={1}>
-          <Text color={theme.err}>{err}</Text>
+          <Text color={theme.error}>{err}</Text>
         </Box>
       </Box>
     );
 
-  if (!cfg || !settings)
+  if (!cfg)
     return (
       <Box flexDirection="column" padding={1}>
         <Box>
@@ -52,7 +59,7 @@ function App() {
           <Text color={theme.muted}>— startup</Text>
         </Box>
         <Box marginTop={1}>
-          <Text color={theme.cyan}>◴ </Text>
+          <Text color={theme.info}>◴ </Text>
           <Text color={theme.muted}>loading…</Text>
         </Box>
       </Box>

@@ -23,7 +23,7 @@ export function FilterPickerModal({ label, items, currentId, onPick, onClear, on
       title={`filter by ${label}`}
       items={items.map((v) => ({ id: v, label: v }))}
       {...(currentId ? { currentId } : {})}
-      borderColor={theme.cyan}
+      borderColor={theme.info}
       onPick={onPick}
       onClear={onClear}
       onCancel={onCancel}

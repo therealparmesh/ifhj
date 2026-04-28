@@ -68,6 +68,24 @@ login: you@your-company.com
 
 Env vars win when both are set.
 
+### Theme
+
+ifhj ships with two themes: `synthwave` (default) and `terminal`. The `terminal` theme defers to your terminal's own color palette.
+
+Set it in `~/.config/ifhj/settings.json`:
+
+```json
+{
+  "theme": "terminal"
+}
+```
+
+Or override per-invocation with `IFHJ_THEME`:
+
+```sh
+IFHJ_THEME=terminal ifhj
+```
+
 ## Usage
 
 ```sh
