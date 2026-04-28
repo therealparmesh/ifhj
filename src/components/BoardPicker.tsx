@@ -66,14 +66,20 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
     scrollRef.current = 0;
   }, [query]);
 
+  // `cursor` is the clamped, always-in-bounds view of `index` — the single
+  // source of truth for which row is selected / submitted. Referenced by
+  // both the PgUp/PgDn handler and the TextInput arrow handlers below.
+  const cursor = clamp(index, 0, Math.max(0, filtered.length - 1));
+  const clampedLen = Math.max(0, filtered.length - 1);
+
   /**
-   * PgUp/PgDn only — text entry, arrow nav, and esc-to-quit live inside
+   * Page up/down is outside TextInput so the text field's own arrow keys
+   * don't shadow them. Text entry, single-row arrows, and esc live inside
    * <TextInput/>.
    */
   useInput((_input, key) => {
-    if (key.pageUp) setIndex((i) => clamp(i - viewportHeight, 0, Math.max(0, filtered.length - 1)));
-    else if (key.pageDown)
-      setIndex((i) => clamp(i + viewportHeight, 0, Math.max(0, filtered.length - 1)));
+    if (key.pageUp) setIndex(clamp(cursor - viewportHeight, 0, clampedLen));
+    else if (key.pageDown) setIndex(clamp(cursor + viewportHeight, 0, clampedLen));
   });
 
   useInput(
@@ -114,7 +120,6 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
   }
 
   // Pure derived scroll: anchor in ref, shift only when cursor hits an edge.
-  const cursor = clamp(index, 0, Math.max(0, filtered.length - 1));
   let scroll = scrollRef.current;
   const ceiling = Math.max(0, filtered.length - viewportHeight);
   if (scroll > ceiling) scroll = ceiling;
@@ -141,10 +146,10 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
           value={query}
           placeholder="filter by name / key / type…"
           onChange={setQuery}
-          onUpArrow={() => setIndex((i) => clamp(i - 1, 0, Math.max(0, filtered.length - 1)))}
-          onDownArrow={() => setIndex((i) => clamp(i + 1, 0, Math.max(0, filtered.length - 1)))}
+          onUpArrow={() => setIndex(clamp(cursor - 1, 0, clampedLen))}
+          onDownArrow={() => setIndex(clamp(cursor + 1, 0, clampedLen))}
           onSubmit={() => {
-            const b = filtered[index];
+            const b = filtered[cursor];
             if (b) onPick(b);
           }}
           onCancel={onQuit}

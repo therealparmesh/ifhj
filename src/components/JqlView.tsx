@@ -22,14 +22,16 @@ export function JqlView({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [idx, setIdx] = useState(0);
-  const submitted = useRef(false);
+  // Sequence-guard for in-flight queries. If the user submits, cancels,
+  // and the old request resolves after, we ignore its result.
+  const searchSeq = useRef(0);
 
-  useInput(
-    (_input, key) => {
-      if (key.escape) onCancel();
-    },
-    { isActive: !submitted.current },
-  );
+  useInput((_input, key) => {
+    // Esc always cancels, even during a query — the user shouldn't be
+    // trapped by a hung network. The in-flight request's result is
+    // discarded via the seq guard.
+    if (key.escape) onCancel();
+  });
 
   return (
     <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.warning}>
@@ -47,19 +49,20 @@ export function JqlView({
           }}
           onSubmit={async () => {
             if (!jql.trim()) return;
-            submitted.current = true;
+            const seq = ++searchSeq.current;
             setLoading(true);
             setError(null);
             try {
               const r = await searchByJql(cfg, jql.trim());
+              if (seq !== searchSeq.current) return;
               setResults(r);
               setIdx(0);
             } catch (e) {
+              if (seq !== searchSeq.current) return;
               setError(errorMessage(e));
               setResults([]);
             } finally {
-              setLoading(false);
-              submitted.current = false;
+              if (seq === searchSeq.current) setLoading(false);
             }
           }}
           onCancel={onCancel}
@@ -72,15 +75,15 @@ export function JqlView({
       ) : null}
       {loading ? (
         <Box marginTop={1}>
-          <Text color={theme.accent}>◴ searching…</Text>
+          <Text color={theme.accent}>searching…</Text>
         </Box>
       ) : results.length > 0 ? (
         <JqlResults results={results} idx={idx} setIdx={setIdx} onPick={onPick} />
-      ) : submitted.current ? null : jql.trim() ? null : (
+      ) : jql.trim() === "" ? (
         <Box marginTop={1}>
           <Text color={theme.muted}>type a JQL query and press ⏎</Text>
         </Box>
-      )}
+      ) : null}
       <Box marginTop={1}>
         <Hint k="⏎" label="search" />
         <Hint k="esc" label="close" />
@@ -106,16 +109,16 @@ function JqlResults({
   // separate useState, so cursor and scroll can never disagree on a frame.
   const scrollRef = useRef(0);
 
+  const cursor = clamp(idx, 0, Math.max(0, results.length - 1));
+
   useInput((input, key) => {
-    if (key.upArrow || input === "k") setIdx(clamp(idx - 1, 0, results.length - 1));
-    else if (key.downArrow || input === "j") setIdx(clamp(idx + 1, 0, results.length - 1));
+    if (key.upArrow || input === "k") setIdx(clamp(cursor - 1, 0, results.length - 1));
+    else if (key.downArrow || input === "j") setIdx(clamp(cursor + 1, 0, results.length - 1));
     else if (key.return) {
-      const r = results[idx];
+      const r = results[cursor];
       if (r) onPick(r.key);
     }
   });
-
-  const cursor = clamp(idx, 0, Math.max(0, results.length - 1));
   let scroll = scrollRef.current;
   const ceiling = Math.max(0, results.length - maxVisible);
   if (scroll > ceiling) scroll = ceiling;

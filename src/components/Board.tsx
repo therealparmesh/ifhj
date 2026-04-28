@@ -13,7 +13,7 @@ import {
   type IssueType,
   type JiraUser,
   type Transition,
-  type TransitionFieldValue,
+  type EditableFieldValue,
   assignIssueToMe,
   createIssue,
   getAssignableUsers,
@@ -374,7 +374,7 @@ export function BoardView({ cfg, board, onExit }: Props) {
     async (
       issueKey: string,
       transition: Transition,
-      opts: { targetColIdx?: number; fields?: Record<string, TransitionFieldValue> } = {},
+      opts: { targetColIdx?: number; fields?: Record<string, EditableFieldValue> } = {},
     ) => {
       if (transition.requiredFields.length > 0 && !opts.fields) {
         setModal({
@@ -1077,10 +1077,9 @@ export function BoardView({ cfg, board, onExit }: Props) {
             closeModal();
             return;
           }
-          // Route through commitTransition so workflow-screen fields get
-          // collected before the POST. Don't closeModal() here — the gate
-          // either opens the screen modal (replacing this one) or the
-          // direct POST closes the modal via setModal inside load().
+          // Close this picker first so the gate's setModal (for a required-
+          // fields screen) isn't racing against us. If there's no screen,
+          // commitTransition runs through to POST with no modal up.
           const targetIdx = conf.columns.findIndex((c) => c.statusIds.includes(tr.toStatusId));
           closeModal();
           void commitTransition(pickerKey, tr, targetIdx !== -1 ? { targetColIdx: targetIdx } : {});
@@ -1099,7 +1098,6 @@ export function BoardView({ cfg, board, onExit }: Props) {
         issueKey={screenKey}
         transition={screenTr}
         onCancel={closeModal}
-        onError={(msg) => flash(msg, "err")}
         onSubmit={(fields) => {
           closeModal();
           void commitTransition(

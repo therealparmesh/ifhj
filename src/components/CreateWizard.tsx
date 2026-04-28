@@ -427,7 +427,7 @@ function FormRow({
     return (
       <Box marginTop={1}>
         <Text color={color} bold inverse={focused && canSubmit}>
-          {focused ? "▶ " : "  "}
+          {focused ? "> " : "  "}
           {text}
         </Text>
       </Box>
@@ -448,7 +448,7 @@ function FormRow({
   const valueMax = Math.max(4, width - 2 - LABEL_COL_WIDTH - 1);
   return (
     <Box width={width} marginBottom={1}>
-      <Text color={labelColor}>{focused ? "▶ " : "  "}</Text>
+      <Text color={labelColor}>{focused ? "> " : "  "}</Text>
       <Text color={labelColor} bold={focused} inverse={focused}>
         {labelPadded}
       </Text>
