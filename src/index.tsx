@@ -4,17 +4,18 @@ import { useEffect, useState } from "react";
 
 import { BoardView } from "./components/Board";
 import { BoardPicker } from "./components/BoardPicker";
-import { loadConfig, type JiraConfig, loadSettings } from "./config";
+import { type Settings, loadConfig, type JiraConfig, loadSettings } from "./config";
 import type { Board } from "./jira";
 import { errorMessage, setTheme, theme } from "./ui";
 
-// Apply the theme before Ink mounts so the loading screen paints in the
-// user's chosen palette, not the default.
+let settings: Settings;
 let initErr: string | null = null;
 try {
-  setTheme((await loadSettings()).theme);
+  settings = await loadSettings();
+  setTheme(settings.theme);
 } catch (e) {
   initErr = errorMessage(e);
+  settings = { theme: "synthwave", maxColumns: 4 };
 }
 
 function App() {
@@ -66,7 +67,14 @@ function App() {
     );
 
   if (!board) return <BoardPicker cfg={cfg} onPick={setBoard} onQuit={() => exit()} />;
-  return <BoardView cfg={cfg} board={board} onExit={() => setBoard(null)} />;
+  return (
+    <BoardView
+      cfg={cfg}
+      board={board}
+      maxColumns={settings.maxColumns}
+      onExit={() => setBoard(null)}
+    />
+  );
 }
 
 process.stdout.write("\x1b[?1049h\x1b[H\x1b[2J\x1b[?25l");

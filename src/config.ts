@@ -16,12 +16,14 @@ export type JiraConfig = {
  */
 export type Settings = {
   theme: ThemeName;
+  maxColumns: number;
 };
 
 const SETTINGS_PATH = join(homedir(), ".config", "ifhj", "settings.json");
 
 const DEFAULTS: Settings = {
   theme: "synthwave",
+  maxColumns: 4,
 };
 
 /**
@@ -31,6 +33,10 @@ const DEFAULTS: Settings = {
  */
 const PARSERS: { [K in keyof Settings]: (v: unknown) => Settings[K] | undefined } = {
   theme: (v) => (v === "synthwave" || v === "terminal" ? v : undefined),
+  maxColumns: (v) => {
+    const n = typeof v === "number" ? v : typeof v === "string" ? Number.parseInt(v, 10) : NaN;
+    return Number.isFinite(n) && n >= 1 ? n : undefined;
+  },
 };
 
 /**
@@ -40,6 +46,7 @@ const PARSERS: { [K in keyof Settings]: (v: unknown) => Settings[K] | undefined 
  */
 const ENV_OVERRIDES: Partial<Record<keyof Settings, string>> = {
   theme: "IFHJ_THEME",
+  maxColumns: "IFHJ_MAX_COLUMNS",
 };
 
 function isRecord(v: unknown): v is Record<string, unknown> {

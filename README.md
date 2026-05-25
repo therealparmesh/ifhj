@@ -68,23 +68,23 @@ login: you@your-company.com
 
 Env vars win when both are set.
 
-### Theme
+### Settings
 
-ifhj ships with two themes: `synthwave` (default) and `terminal`. The `terminal` theme defers to your terminal's own color palette.
-
-Set it in `~/.config/ifhj/settings.json`:
+User preferences live in `~/.config/ifhj/settings.json`:
 
 ```json
 {
-  "theme": "terminal"
+  "theme": "terminal",
+  "maxColumns": 6
 }
 ```
 
-Or override per-invocation with `IFHJ_THEME`:
+| Key          | Default       | Env override       | Description                                 |
+| ------------ | ------------- | ------------------ | ------------------------------------------- |
+| `theme`      | `"synthwave"` | `IFHJ_THEME`       | Color theme (`synthwave` or `terminal`)     |
+| `maxColumns` | `4`           | `IFHJ_MAX_COLUMNS` | Max visible board columns before ←/→ paging |
 
-```sh
-IFHJ_THEME=terminal ifhj
-```
+The `terminal` theme defers to your terminal's own color palette — readable on both light and dark backgrounds.
 
 ## Usage
 
