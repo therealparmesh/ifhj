@@ -68,7 +68,7 @@ export function HelpModal({ onClose }: { onClose: () => void }) {
       <Box marginTop={1} flexDirection="column">
         {BOARD_BINDINGS.map((b) => (
           <Box key={b.keys}>
-            <Text color={theme.pink}>{b.keys.padEnd(keyColWidth)}</Text>
+            <Text color={theme.accent}>{b.keys.padEnd(keyColWidth)}</Text>
             <Text color={theme.muted}> {b.desc}</Text>
           </Box>
         ))}
@@ -81,7 +81,7 @@ export function HelpModal({ onClose }: { onClose: () => void }) {
       <Box marginTop={1} flexDirection="column">
         {DETAIL_BINDINGS.map((b) => (
           <Box key={b.keys}>
-            <Text color={theme.pink}>{b.keys.padEnd(keyColWidth)}</Text>
+            <Text color={theme.accent}>{b.keys.padEnd(keyColWidth)}</Text>
             <Text color={theme.muted}> {b.desc}</Text>
           </Box>
         ))}

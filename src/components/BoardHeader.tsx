@@ -57,7 +57,7 @@ export function BoardHeader({
         {filterCount > 0 ? (
           <>
             <Text color={theme.muted}>{"  "}</Text>
-            <Text color={theme.cyan}>
+            <Text color={theme.info}>
               {filterCount} filter{filterCount > 1 ? "s" : ""}
             </Text>
             <Text color={theme.muted}> (F clear)</Text>
@@ -67,7 +67,7 @@ export function BoardHeader({
       <Box>
         {query ? (
           <>
-            <Text color={theme.warn}>/{query}</Text>
+            <Text color={theme.warning}>/{query}</Text>
             <Text color={theme.muted}>
               {"  "}
               {matches === 0 ? "no matches" : `${matchIdx + 1}/${matches}`}

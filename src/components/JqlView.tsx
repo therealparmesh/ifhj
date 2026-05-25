@@ -4,7 +4,7 @@ import { useRef, useState } from "react";
 import type { JiraConfig } from "../config";
 import { useDimensions } from "../hooks";
 import { type IssueSearchResult, searchByJql } from "../jira";
-import { clamp, errorMessage, theme, truncate } from "../ui";
+import { clamp, errorMessage, fg, theme, truncate } from "../ui";
 import { Hint } from "./Hint";
 import { TextInput } from "./TextInput";
 
@@ -34,8 +34,8 @@ export function JqlView({
   });
 
   return (
-    <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.warn}>
-      <Text color={theme.warn} bold>
+    <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.warning}>
+      <Text color={theme.warning} bold>
         JQL query
       </Text>
       <Box marginTop={1}>
@@ -70,7 +70,7 @@ export function JqlView({
       </Box>
       {error ? (
         <Box marginTop={1}>
-          <Text color={theme.err}>{error}</Text>
+          <Text color={theme.error}>{error}</Text>
         </Box>
       ) : null}
       {loading ? (
@@ -144,7 +144,7 @@ function JqlResults({
               {r.key}
             </Text>
             <Text color={theme.muted}> · </Text>
-            <Text color={sel ? theme.fg : theme.fgDim}>{truncate(r.summary, 60)}</Text>
+            <Text {...fg(sel ? theme.fg : theme.fgDim)}>{truncate(r.summary, 60)}</Text>
             <Text color={theme.muted}> {r.issueType}</Text>
           </Box>
         );

@@ -73,12 +73,12 @@ export function FieldEditor({
 
   if (loadError) {
     return (
-      <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.err}>
-        <Text color={theme.err} bold>
+      <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.error}>
+        <Text color={theme.error} bold>
           {field.name}
         </Text>
         <Box marginTop={1}>
-          <Text color={theme.err}>{loadError}</Text>
+          <Text color={theme.error}>{loadError}</Text>
         </Box>
         <Box marginTop={1}>
           <Text color={theme.muted}>press esc to cancel</Text>

@@ -34,10 +34,11 @@ import {
   clamp,
   copyToClipboard,
   errorMessage,
+  fg,
   openInBrowser,
   theme,
   truncate,
-  typeColors,
+  typeColor,
   typeGlyph,
 } from "../ui";
 import { FieldEditor } from "./FieldEditor";
@@ -1074,14 +1075,14 @@ export function IssueDetailModal({
         width={innerWidth + 2}
         height={innerHeight + 2}
         borderStyle="round"
-        borderColor={theme.err}
+        borderColor={theme.error}
         padding={1}
       >
-        <Text color={theme.err} bold>
+        <Text color={theme.error} bold>
           failed to load {issueKey}
         </Text>
         <Box marginTop={1}>
-          <Text color={theme.fg}>{loadError}</Text>
+          <Text {...fg(theme.fg)}>{loadError}</Text>
         </Box>
         <Box marginTop={1}>
           <Text color={theme.muted}>esc / q close</Text>
@@ -1106,7 +1107,7 @@ export function IssueDetailModal({
     );
   }
 
-  const typeColor = typeColors[detail.issueType] ?? theme.fg;
+  const typeAccent = typeColor(detail.issueType);
   const clampedScroll = Math.min(bodyScroll, maxScroll);
   const visibleMain = mainLines.slice(clampedScroll, clampedScroll + bodyHeight);
 
@@ -1130,12 +1131,18 @@ export function IssueDetailModal({
   /**
    * Each slot is one flat line. EXACTLY `fieldWindow` slots — no indicator
    * rows, no variable child count. Position-based keys (slot-N) so React
-   * never reorders children on scroll. Highlight is `> ` prefix + accent
-   * color + bold — no backgroundColor anywhere, because an asymmetric bg
-   * between focused and unfocused rows is where Ink's terminal diff leaves
-   * partial-paint artifacts that look like "nothing is selected."
+   * never reorders children on scroll. The focused row's text is padded
+   * to the pane's full inner width so the painted selection bg fills a
+   * rectangular stripe, not a ragged one — ragged asymmetric bg is where
+   * Ink's terminal diff leaves partial-paint artifacts.
    */
-  type SideLine = { key: string; text: string; color: string; bold: boolean };
+  type SideLine = {
+    key: string;
+    text: string;
+    color: string | undefined;
+    bold: boolean;
+    focused: boolean;
+  };
   const sideLines: SideLine[] = [];
   for (let slot = 0; slot < fieldWindow; slot++) {
     const row = visibleFields[slot];
@@ -1146,6 +1153,7 @@ export function IssueDetailModal({
         text: padToWidth("", sidePaneInner),
         color: theme.muted,
         bold: false,
+        focused: false,
       });
       continue;
     }
@@ -1166,8 +1174,9 @@ export function IssueDetailModal({
     sideLines.push({
       key: `slot-${slot}`,
       text: pointer + labelCell + valueCell,
-      color: focused ? theme.accent : parked ? theme.fg : theme.muted,
+      color: focused ? theme.fg : parked ? theme.accent : theme.muted,
       bold: focused,
+      focused,
     });
   }
 
@@ -1181,28 +1190,28 @@ export function IssueDetailModal({
     >
       {/* Header */}
       <Box paddingX={1}>
-        <Text color={typeColor}>{typeGlyph(detail.issueType)} </Text>
-        <Text color={theme.pink} bold>
+        <Text color={typeAccent}>{typeGlyph(detail.issueType)} </Text>
+        <Text color={theme.accent} bold>
           {detail.key}
         </Text>
         <Text color={theme.muted}> · </Text>
-        <Text color={typeColor}>{detail.issueType}</Text>
+        <Text color={typeAccent}>{detail.issueType}</Text>
         {detail.parentKey ? (
           <>
             <Text color={theme.muted}> · </Text>
-            <Text color={theme.violet}>{detail.parentKey}</Text>
+            <Text color={theme.accentAlt}>{detail.parentKey}</Text>
           </>
         ) : null}
-        {detail.watching ? <Text color={theme.cyan}> ◉</Text> : null}
-        {saving ? <Text color={theme.warn}> ◴ saving…</Text> : null}
+        {detail.watching ? <Text color={theme.info}> ◉</Text> : null}
+        {saving ? <Text color={theme.warning}> ◴ saving…</Text> : null}
       </Box>
       <Box paddingX={1}>
-        <Text color={theme.fg} bold>
+        <Text {...fg(theme.fg)} bold>
           {truncate(detail.summary, innerWidth - 4)}
         </Text>
       </Box>
       <Box paddingX={1}>
-        <Text color={theme.accentDim}>{"─".repeat(Math.max(0, innerWidth))}</Text>
+        <Text color={theme.divider}>{"─".repeat(Math.max(0, innerWidth))}</Text>
       </Box>
 
       {/* Body: main + side */}
@@ -1212,16 +1221,17 @@ export function IssueDetailModal({
             const lineCommentIdx = ln.commentIdx;
             const isCommentHeader =
               lineCommentIdx !== undefined &&
-              ln.bold &&
+              ln.bold === true &&
               pane === "body" &&
               lineCommentIdx === focusedCommentIdx;
             return (
               <Text
                 key={`${clampedScroll + i}`}
-                color={ln.color}
+                {...fg(ln.color)}
                 bold={ln.bold ?? false}
                 wrap="truncate"
-                {...bg(isCommentHeader ? theme.accentDim : ln.codeBg ? theme.accentDim : undefined)}
+                inverse={isCommentHeader}
+                {...bg(ln.codeBg ? theme.divider : undefined)}
               >
                 {ln.text || " "}
               </Text>
@@ -1239,10 +1249,16 @@ export function IssueDetailModal({
           borderBottom={false}
           borderRight={false}
           borderStyle="single"
-          borderColor={pane === "fields" ? theme.accent : theme.accentDim}
+          borderColor={pane === "fields" ? theme.accent : theme.divider}
         >
           {sideLines.map((ln) => (
-            <Text key={ln.key} color={ln.color} bold={ln.bold} wrap="truncate">
+            <Text
+              key={ln.key}
+              {...fg(ln.color)}
+              bold={ln.bold}
+              wrap="truncate"
+              inverse={ln.focused}
+            >
               {ln.text}
             </Text>
           ))}
@@ -1251,7 +1267,7 @@ export function IssueDetailModal({
 
       {/* Footer */}
       <Box paddingX={1}>
-        <Text color={theme.accentDim}>{"─".repeat(Math.max(0, innerWidth))}</Text>
+        <Text color={theme.divider}>{"─".repeat(Math.max(0, innerWidth))}</Text>
       </Box>
       <Box paddingX={1} justifyContent="space-between">
         <Box flexWrap="wrap">

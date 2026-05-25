@@ -6,7 +6,7 @@ import { theme } from "../ui";
 export function Hint({ k, label }: { k: string; label: string }) {
   return (
     <Box marginRight={2}>
-      <Text color={theme.pink} bold>
+      <Text color={theme.accent} bold>
         {k}
       </Text>
       <Text color={theme.muted}> {label}</Text>

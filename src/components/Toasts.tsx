@@ -37,9 +37,9 @@ export function useToasts() {
 }
 
 function toneStyle(tone: Tone): { color: string; glyph: string } {
-  if (tone === "ok") return { color: theme.ok, glyph: "✓" };
-  if (tone === "err") return { color: theme.err, glyph: "✗" };
-  return { color: theme.cyan, glyph: "·" };
+  if (tone === "ok") return { color: theme.success, glyph: "✓" };
+  if (tone === "err") return { color: theme.error, glyph: "✗" };
+  return { color: theme.info, glyph: "·" };
 }
 
 export function ToastStack({ toasts, maxWidth }: { toasts: Toast[]; maxWidth: number }) {

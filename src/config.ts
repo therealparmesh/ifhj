@@ -1,29 +1,89 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import type { ThemeName } from "./ui";
+
 export type JiraConfig = {
   server: string;
   authHeader: string;
 };
 
-export type Settings = Record<string, unknown>;
+/**
+ * User preferences persisted at ~/.config/ifhj/settings.json. Every field
+ * has a default, so on-disk settings may omit any subset of keys. Add a
+ * new setting by extending this type, adding its default to DEFAULTS, and
+ * adding a parser to PARSERS — TS will force the latter two.
+ */
+export type Settings = {
+  theme: ThemeName;
+};
 
 const SETTINGS_PATH = join(homedir(), ".config", "ifhj", "settings.json");
 
-export async function loadSettings(): Promise<Settings> {
-  try {
-    const f = Bun.file(SETTINGS_PATH);
-    if (!(await f.exists())) return {};
-    return (await f.json()) as Settings;
-  } catch {
-    return {};
-  }
+const DEFAULTS: Settings = {
+  theme: "synthwave",
+};
+
+/**
+ * One parser per Settings field. Returns the value when it fits the
+ * field's type, or undefined to reject it. Keyed by `keyof Settings` so
+ * the type system enforces completeness.
+ */
+const PARSERS: { [K in keyof Settings]: (v: unknown) => Settings[K] | undefined } = {
+  theme: (v) => (v === "synthwave" || v === "terminal" ? v : undefined),
+};
+
+/**
+ * Optional env-var override per setting. Env var wins over the file; its
+ * value runs through the same PARSERS entry, so validation is identical.
+ * Partial — not every setting needs or deserves an env override.
+ */
+const ENV_OVERRIDES: Partial<Record<keyof Settings, string>> = {
+  theme: "IFHJ_THEME",
+};
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
-export async function saveSettings(settings: Settings): Promise<void> {
-  const { mkdirSync } = await import("node:fs");
-  mkdirSync(join(homedir(), ".config", "ifhj"), { recursive: true });
-  await Bun.write(SETTINGS_PATH, JSON.stringify(settings, null, 2) + "\n");
+/**
+ * Load settings from ~/.config/ifhj/settings.json, then overlay env
+ * overrides. Unknown keys in the file are ignored; invalid values fall
+ * back to defaults so the app always boots. Env var values are strict:
+ * an invalid override throws so the user notices the typo immediately.
+ */
+export async function loadSettings(): Promise<Settings> {
+  let raw: Record<string, unknown> = {};
+  try {
+    const f = Bun.file(SETTINGS_PATH);
+    if (await f.exists()) {
+      const parsed: unknown = await f.json();
+      if (isRecord(parsed)) raw = parsed;
+    }
+  } catch {
+    // malformed JSON — fall through to defaults
+  }
+  const settings: Settings = { ...DEFAULTS };
+  // The loop below writes back under each parser's narrowed return type.
+  // TS can't express "PARSERS[k]'s return type matches settings[k]" when k
+  // is unioned at the call site, so we widen to a bag and trust the
+  // mapped-type constraint on PARSERS.
+  const bag = settings as Record<string, unknown>;
+  for (const key of Object.keys(PARSERS) as (keyof Settings)[]) {
+    const parse = PARSERS[key] as (v: unknown) => unknown;
+    const parsed = parse(raw[key]);
+    if (parsed !== undefined) bag[key] = parsed;
+    const envName = ENV_OVERRIDES[key];
+    if (envName === undefined) continue;
+    const envValue = Bun.env[envName];
+    if (envValue === undefined) continue;
+    const envParsed = parse(envValue);
+    if (envParsed === undefined) {
+      throw new Error(`Invalid ${envName} "${envValue}"`);
+    }
+    bag[key] = envParsed;
+  }
+  return settings;
 }
 
 // Strip matching single or double quotes around a YAML scalar.

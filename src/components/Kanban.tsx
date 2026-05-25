@@ -1,7 +1,7 @@
 import { Box, Text } from "ink";
 
 import type { BoardColumn, Issue } from "../jira";
-import { assigneeColor, bg, initials, theme, truncate, typeColors, typeGlyph } from "../ui";
+import { assigneeColor, bg, fg, initials, theme, truncate, typeColor, typeGlyph } from "../ui";
 
 export type Column = BoardColumn & { issues: Issue[] };
 
@@ -48,14 +48,14 @@ export function ColumnView({
     column.max !== undefined
       ? `${column.issues.length}/${column.max}`
       : String(column.issues.length);
-  const countColor = overWip ? theme.err : theme.muted;
+  const countColor = overWip ? theme.error : theme.muted;
   return (
     <Box
       width={width}
       marginRight={marginRight}
       flexDirection="column"
       borderStyle="round"
-      borderColor={isActive ? theme.accent : theme.accentDim}
+      borderColor={isActive ? theme.accent : theme.divider}
     >
       <Box paddingX={1} justifyContent="space-between">
         <Text color={isActive ? theme.accent : theme.fgDim} bold>
@@ -110,7 +110,7 @@ export function PagingArrow({
   const glyph = direction === "left" ? " <" : "> ";
   return (
     <Box width={2} flexDirection="column" justifyContent="center">
-      <Text color={active ? theme.accent : theme.accentDim}>{active ? glyph : "  "}</Text>
+      <Text color={active ? theme.accent : theme.divider}>{active ? glyph : "  "}</Text>
     </Box>
   );
 }
@@ -130,7 +130,7 @@ function Card({
   selected: boolean;
   isMatch: boolean;
 }) {
-  const accent = typeColors[issue.issueType] ?? theme.fg;
+  const accent = typeColor(issue.issueType);
   const bar = selected ? theme.accent : accent;
   const badge = initials(issue.assignee);
   const badgeColor = assigneeColor(issue.assignee);
@@ -139,14 +139,11 @@ function Card({
   const meta = [issue.assignee ?? "Unassigned", issue.priority, issue.epicKey]
     .filter(Boolean)
     .join(" · ");
-  // Selected wins over match for the row background.
-  const rowBg = selected ? theme.accentDim : isMatch ? theme.matchBg : undefined;
-  /**
-   * Pad summary + meta so the bg fills evenly — otherwise the highlight is
-   * ragged on shorter lines.
-   */
-  const summaryText = truncate(issue.summary, Math.max(4, innerWidth)).padEnd(innerWidth);
-  const metaText = truncate(meta, Math.max(4, innerWidth)).padEnd(innerWidth);
+  // Only search-match rows get a painted background; selection uses
+  // `inverse` on text cells only so icons/badges keep their meaning.
+  const matchBgProps = bg(!selected && isMatch ? theme.matchBg : undefined);
+  const summaryText = truncate(issue.summary, Math.max(4, innerWidth));
+  const metaText = truncate(meta, Math.max(4, innerWidth));
   return (
     <Box flexDirection="row" marginBottom={1} paddingLeft={1} paddingRight={1}>
       {/* Left color bar — 3 rows to match the card body. */}
@@ -158,21 +155,31 @@ function Card({
       <Box flexDirection="column" flexGrow={1}>
         <Box justifyContent="space-between">
           <Box>
-            <Text color={accent} {...bg(rowBg)}>
+            <Text {...fg(selected ? theme.fg : accent)} inverse={selected} {...matchBgProps}>
               {typeGlyph(issue.issueType)}{" "}
             </Text>
-            <Text color={selected ? theme.accent : theme.fgDim} bold={selected} {...bg(rowBg)}>
+            <Text
+              {...fg(selected ? theme.fg : theme.fgDim)}
+              bold={selected}
+              inverse={selected}
+              {...matchBgProps}
+            >
               {truncate(issue.key, keyMaxLen)}
             </Text>
           </Box>
-          <Text color={badgeColor} bold {...bg(rowBg)}>
+          <Text {...fg(selected ? theme.fg : badgeColor)} bold inverse={selected} {...matchBgProps}>
             {badge}
           </Text>
         </Box>
-        <Text color={selected ? theme.fg : theme.fgDim} bold={selected} {...bg(rowBg)}>
+        <Text
+          {...fg(selected ? theme.fg : theme.fgDim)}
+          bold={selected}
+          inverse={selected}
+          {...matchBgProps}
+        >
           {summaryText}
         </Text>
-        <Text color={selected ? theme.fgDim : theme.muted} {...bg(rowBg)}>
+        <Text {...fg(selected ? theme.fg : theme.muted)} inverse={selected} {...matchBgProps}>
           {metaText}
         </Text>
       </Box>

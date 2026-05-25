@@ -3,7 +3,7 @@ import { theme, truncate } from "../ui";
 
 type DetailLine = {
   text: string;
-  color: string;
+  color: string | undefined;
   bold?: boolean;
   commentIdx?: number | undefined;
   /** Flag lines inside fenced code blocks; render with a dim bg so they
@@ -28,9 +28,13 @@ export function formatShortDate(iso: string | undefined): string {
  */
 export function renderDetailLines(detail: IssueDetail, mainWidth: number): DetailLine[] {
   const out: DetailLine[] = [];
-  const push = (text: string, color = theme.fg, bold = false, commentIdx?: number) =>
-    out.push({ text, color, bold, commentIdx });
-  const pushLine = (text: string, color = theme.fg, commentIdx?: number) => {
+  const push = (
+    text: string,
+    color: string | undefined = theme.fg,
+    bold = false,
+    commentIdx?: number,
+  ) => out.push({ text, color, bold, commentIdx });
+  const pushLine = (text: string, color: string | undefined = theme.fg, commentIdx?: number) => {
     if (text.length === 0) {
       push("", color, false, commentIdx);
       return;
@@ -40,8 +44,8 @@ export function renderDetailLines(detail: IssueDetail, mainWidth: number): Detai
   };
   const pushSection = (label: string) => {
     push("");
-    push(label.toUpperCase(), theme.pink, true);
-    push("─".repeat(Math.min(mainWidth, label.length + 6)), theme.accentDim);
+    push(label.toUpperCase(), theme.accent, true);
+    push("─".repeat(Math.min(mainWidth, label.length + 6)), theme.divider);
   };
 
   pushSection("description");
@@ -71,14 +75,18 @@ export function renderDetailLines(detail: IssueDetail, mainWidth: number): Detai
     return out;
   }
   detail.comments.forEach((c, i) => {
-    if (i > 0) push("·".repeat(Math.min(mainWidth, 20)), theme.accentDim, false, i);
-    push(c.author, theme.cyan, true, i);
+    if (i > 0) push("·".repeat(Math.min(mainWidth, 20)), theme.divider, false, i);
+    push(c.author, theme.info, true, i);
     push(formatShortDate(c.created), theme.muted, false, i);
     for (const ln of (c.body || "").split(/\n/)) pushLine(` ${ln}`, theme.fg, i);
   });
 
+  // Code-fence scan runs across body lines only — section titles and
+  // comment-author headers are rendered with their own bg behavior
+  // (inverse when focused), so mixing codeBg in would compound awkwardly.
   let inCode = false;
   for (const ln of out) {
+    if (ln.bold === true) continue;
     if (ln.text.trimStart().startsWith("```")) {
       inCode = !inCode;
       ln.codeBg = true;
