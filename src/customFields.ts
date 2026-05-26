@@ -11,15 +11,9 @@
 
 import type { EditableField, EditableFieldValue } from "./jira";
 
-/**
- * Fields we already render with dedicated UI. Skipped here so they don't
- * appear twice in the detail side panel. Jira Cloud defaults.
- */
-const BAKED_CUSTOM_FIELDS = new Set([
-  "customfield_10014",
-  "customfield_10016",
-  "customfield_10020",
-]);
+/** Epic link is rendered via the standard `parent` field; exclude it so
+ *  it doesn't double-appear in the custom field list. */
+const BAKED_CUSTOM_FIELDS = new Set(["customfield_10014"]);
 
 /**
  * A project's custom fields, normalized for display AND edit. `display`

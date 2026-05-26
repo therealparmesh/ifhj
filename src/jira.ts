@@ -173,14 +173,13 @@ export type IssueDetail = Issue & {
   links: IssueLink[];
   comments: Comment[];
   watching?: boolean;
-  /**
-   * Project-specific custom fields, surfaced read-only. Discovered via
-   * editmeta (so we only show fields that are at least nominally
-   * writable for this user — anything more exotic than that lives
-   * outside the TUI's scope). Minus the three we have dedicated UI for:
-   * epic, sprint, story points. Empty when editmeta fetch fails.
-   */
   customFields: CustomField[];
+  /** Full parsed editmeta — keyed by Jira field id. Lets the UI gate
+   *  editability for any field generically, not just custom ones. */
+  editmeta: Map<string, EditableField>;
+  /** Raw fields object from the issue GET — needed to seed FieldEditor
+   *  with the current value for standard fields (assignee, priority, etc). */
+  rawFields: Record<string, any>;
 };
 
 async function jf(cfg: JiraConfig, path: string, init: RequestInit = {}): Promise<Response> {
@@ -398,23 +397,18 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
     // screen ordering, which is what users see in the web UI. Filter
     // to custom-field ids that editmeta acknowledged (keeps the noise
     // out: non-editable internals, deprecated remnants, etc.).
-    customFields: (() => {
+    rawFields: f,
+    ...(() => {
       const metaFields = editMetaData?.fields ?? {};
-      // Parse the editmeta once so every custom-field row carries the
-      // same EditableField shape used by transitions — the detail modal
-      // can pass these directly to FieldEditor without re-inspecting.
       const editable = new Map<string, EditableField>();
       for (const ef of parseEditableFields(metaFields)) editable.set(ef.id, ef);
-      // Walk editmeta, not the issue's fields — so fields that are
-      // editable but currently unset still appear (user can click in to
-      // set them). Preserves editmeta key order, which on Atlassian
-      // Cloud matches the project's view screen ordering.
-      return Object.keys(metaFields)
+      const customFields = Object.keys(metaFields)
         .filter((id) => id.startsWith("customfield_"))
         .flatMap((id) => {
           const normalized = normalizeCustomField(id, metaFields[id], f[id], editable.get(id));
           return normalized ? [normalized] : [];
         });
+      return { customFields, editmeta: editable };
     })(),
   };
   if (f.assignee?.displayName) detail.assignee = f.assignee.displayName;
@@ -674,38 +668,6 @@ export async function getAssignableUsers(cfg: JiraConfig, projectKey: string): P
     accountId: String(u.accountId),
     displayName: u.displayName ?? u.emailAddress ?? u.accountId,
   }));
-}
-
-export type Priority = { id: string; name: string };
-
-export async function getPriorities(cfg: JiraConfig): Promise<Priority[]> {
-  const data = await jget(cfg, `/rest/api/3/priority`);
-  return (data ?? []).map((p: any) => ({ id: String(p.id), name: p.name }));
-}
-
-export async function getLabels(cfg: JiraConfig): Promise<string[]> {
-  const data = await jget(cfg, `/rest/api/3/label?maxResults=1000`);
-  return data.values ?? [];
-}
-
-export type ProjectComponent = { id: string; name: string };
-
-export async function getProjectComponents(
-  cfg: JiraConfig,
-  projectKey: string,
-): Promise<ProjectComponent[]> {
-  const data = await jget(cfg, `/rest/api/3/project/${encodeURIComponent(projectKey)}/components`);
-  return (data ?? []).map((c: any) => ({ id: String(c.id), name: c.name }));
-}
-
-export type ProjectVersion = { id: string; name: string; released: boolean };
-
-export async function getProjectVersions(
-  cfg: JiraConfig,
-  projectKey: string,
-): Promise<ProjectVersion[]> {
-  const data = await jget(cfg, `/rest/api/3/project/${encodeURIComponent(projectKey)}/versions`);
-  return (data ?? []).map((v: any) => ({ id: String(v.id), name: v.name, released: !!v.released }));
 }
 
 export async function updateIssueField(

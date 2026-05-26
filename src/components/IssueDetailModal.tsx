@@ -7,21 +7,14 @@ import { useDimensions } from "../hooks";
 import {
   type Comment,
   type CustomField,
+  type EditableField,
   type EditableFieldValue,
   type IssueDetail,
   type JiraUser,
-  type Priority,
-  type ProjectComponent,
-  type ProjectVersion,
   addComment,
   fetchCurrentUser,
   getAssignableUsers,
   getIssueDetail,
-  getLabels,
-  getPriorities,
-  getProjectComponents,
-  getProjectVersions,
-  searchIssues,
   unwatchIssue,
   updateComment,
   updateDescription,
@@ -42,14 +35,11 @@ import {
   typeGlyph,
 } from "../ui";
 import { FieldEditor } from "./FieldEditor";
-import { FilterPicker } from "./FilterPicker";
 import { Hint } from "./Hint";
 import { formatShortDate, renderDetailLines } from "./IssueDetailLines";
 import { InlineFieldInput } from "./IssueDetailSide";
 import { ListPicker } from "./ListPicker";
 import { ToastStack, useToasts } from "./Toasts";
-
-const CF_STORY_POINTS = "customfield_10016";
 
 type Pane = "body" | "fields";
 
@@ -58,8 +48,6 @@ type FieldId =
   | "assignee"
   | "priority"
   | "parent"
-  | "sprint"
-  | "points"
   | "labels"
   | "components"
   | "fixVersions"
@@ -68,25 +56,12 @@ type FieldId =
   | "created"
   | "updated";
 
-const EDITABLE_FIELDS: FieldId[] = [
-  "assignee",
-  "priority",
-  "parent",
-  "points",
-  "labels",
-  "components",
-  "fixVersions",
-  "due",
-];
-
 const ALL_FIELDS: FieldId[] = [
   "status",
   "assignee",
   "reporter",
   "priority",
   "parent",
-  "sprint",
-  "points",
   "labels",
   "components",
   "fixVersions",
@@ -101,8 +76,6 @@ const FIELD_LABELS: Record<FieldId, string> = {
   reporter: "reporter",
   priority: "priority",
   parent: "parent",
-  sprint: "sprint",
-  points: "points",
   labels: "labels",
   components: "components",
   fixVersions: "fix vers",
@@ -111,27 +84,30 @@ const FIELD_LABELS: Record<FieldId, string> = {
   updated: "updated",
 };
 
+/** Map baked display IDs to Jira REST field keys for editmeta lookup. */
+const JIRA_FIELD_KEY: Record<FieldId, string> = {
+  status: "status",
+  assignee: "assignee",
+  reporter: "reporter",
+  priority: "priority",
+  parent: "parent",
+  labels: "labels",
+  components: "components",
+  fixVersions: "fixVersions",
+  due: "duedate",
+  created: "created",
+  updated: "updated",
+};
+
+/** System fields that are never editable via PUT — transitions, timestamps. */
+const SYSTEM_FIELDS: Set<FieldId> = new Set(["status", "created", "updated"]);
+
 type Overlay =
   | { kind: "none" }
   | { kind: "nvim" }
   | { kind: "inline-input"; field: string; value: string }
-  | { kind: "pick-assignee"; users: JiraUser[] }
-  | { kind: "pick-priority"; priorities: Priority[] }
-  | { kind: "pick-labels-action" }
-  | { kind: "pick-labels-add"; all: string[] }
-  | { kind: "pick-labels-remove" }
-  | { kind: "pick-components-action" }
-  | { kind: "pick-components-add"; all: ProjectComponent[] }
-  | { kind: "pick-components-remove" }
-  | { kind: "pick-versions-action" }
-  | { kind: "pick-versions-add"; all: ProjectVersion[] }
-  | { kind: "pick-versions-remove" }
-  | { kind: "pick-comment-action"; comment: Comment }
-  | { kind: "search-target" }
-  // Editing a project custom field via the shared FieldEditor — the same
-  // dispatch the transition screen uses. Carries enough state to submit
-  // back to updateIssueField on pick.
-  | { kind: "custom-edit"; field: CustomField };
+  | { kind: "field-edit"; fieldId: string; meta: EditableField; current?: EditableFieldValue }
+  | { kind: "pick-comment-action"; comment: Comment };
 
 export function IssueDetailModal({
   cfg,
@@ -188,12 +164,6 @@ export function IssueDetailModal({
       return [];
     }
   }, [cfg, projectKey]);
-
-  const [searchResults, setSearchResults] = useState<
-    { key: string; summary: string; issueType: string }[]
-  >([]);
-  const [searchLoading, setSearchLoading] = useState(false);
-  const searchSeq = useRef(0);
 
   const fetchDetail = useCallback(async () => {
     try {
@@ -292,13 +262,21 @@ export function IssueDetailModal({
   // editmeta shrinks between a fetch and the invariant effect firing.
   // Without this, currentRow is undefined and keypresses no-op.
   const currentRow = fieldRows[clamp(fieldIdx, 0, Math.max(0, fieldRows.length - 1))];
-  const currentField = currentRow?.kind === "baked" ? currentRow.id : undefined;
-  // A row is editable either because it's a baked field we have bespoke
-  // UI for, or a custom field whose editmeta surfaced a supported kind.
-  // The shared FieldEditor handles the latter uniformly.
-  const isEditable =
-    (currentRow?.kind === "baked" && EDITABLE_FIELDS.includes(currentRow.id)) ||
-    (currentRow?.kind === "custom" && currentRow.field.meta.kind !== "unsupported");
+
+  /** Resolve the EditableField metadata for the current row, if editmeta
+   *  says it's writable on this issue. Returns undefined for read-only. */
+  const resolveEditable = useCallback(
+    (row: FieldRow | undefined): EditableField | undefined => {
+      if (!row || !detail) return undefined;
+      if (row.kind === "custom") {
+        return row.field.meta.kind !== "unsupported" ? row.field.meta : undefined;
+      }
+      if (SYSTEM_FIELDS.has(row.id)) return undefined;
+      const jiraKey = JIRA_FIELD_KEY[row.id];
+      return detail.editmeta.get(jiraKey);
+    },
+    [detail],
+  );
 
   /**
    * Side pane: one terminal line per row. `bodyHeight - 1` rows leaves a
@@ -414,114 +392,84 @@ export function IssueDetailModal({
     [detail, cfg, showFlash, doSave, ensureUsers],
   );
 
-  const openFieldEditor = useCallback(async () => {
+  /** Resolve the current value from rawFields for seeding FieldEditor. */
+  const resolveCurrentValue = useCallback(
+    (row: FieldRow): EditableFieldValue | undefined => {
+      if (!detail) return undefined;
+      if (row.kind === "custom") return row.field.current;
+      const jiraKey = JIRA_FIELD_KEY[row.id];
+      const meta = detail.editmeta.get(jiraKey);
+      if (!meta) return undefined;
+      const raw = detail.rawFields[jiraKey];
+      if (raw === null || raw === undefined) return undefined;
+      switch (meta.kind) {
+        case "option":
+          return raw?.id ? { id: String(raw.id) } : undefined;
+        case "option-list":
+          return Array.isArray(raw)
+            ? raw.filter((v: any) => v?.id).map((v: any) => ({ id: String(v.id) }))
+            : undefined;
+        case "user":
+          return raw?.accountId ? { accountId: String(raw.accountId) } : undefined;
+        case "user-list":
+          return Array.isArray(raw)
+            ? raw
+                .filter((v: any) => v?.accountId)
+                .map((v: any) => ({ accountId: String(v.accountId) }))
+            : undefined;
+        case "text":
+          return typeof raw === "string" ? raw : undefined;
+        case "string-list":
+          return Array.isArray(raw) ? raw.map(String) : undefined;
+        case "number":
+          return typeof raw === "number" ? raw : undefined;
+        case "date":
+          return typeof raw === "string" ? raw.slice(0, 10) : undefined;
+        default:
+          return undefined;
+      }
+    },
+    [detail],
+  );
+
+  const openFieldEditor = useCallback(() => {
     if (!detail || !currentRow) return;
-    // Unsupported custom fields get an honest "why nothing happened" toast
-    // instead of a silent no-op, so the user knows to use the web UI.
-    if (currentRow.kind === "custom" && currentRow.field.meta.kind === "unsupported") {
-      showFlash(
-        `${currentRow.field.name}: ${currentRow.field.meta.schemaType} isn't editable from the TUI`,
-      );
+    const meta = resolveEditable(currentRow);
+    if (!meta) {
+      if (currentRow.kind === "baked" && SYSTEM_FIELDS.has(currentRow.id)) {
+        if (currentRow.id === "status") showFlash("use t to transition");
+        else showFlash(`${FIELD_LABELS[currentRow.id]} is read-only`);
+      } else if (currentRow.kind === "custom" && currentRow.field.meta.kind === "unsupported") {
+        showFlash(`${currentRow.field.name}: not editable from TUI`);
+      } else {
+        showFlash("not editable on this issue");
+      }
       return;
     }
-    if (!isEditable) return;
-
-    if (currentRow.kind === "custom") {
-      // All project custom-field edits go through the shared FieldEditor —
-      // the overlay branch below calls updateIssueField with the value it
-      // returns. Unsupported kinds were already filtered by isEditable.
-      setOverlay({ kind: "custom-edit", field: currentRow.field });
-      return;
-    }
-
-    if (currentField === "assignee") {
-      try {
-        const users = await getAssignableUsers(cfg, projectKey);
-        setOverlay({ kind: "pick-assignee", users });
-      } catch (e) {
-        showFlash(errorMessage(e), "err");
-      }
-    } else if (currentField === "priority") {
-      try {
-        const priorities = await getPriorities(cfg);
-        setOverlay({ kind: "pick-priority", priorities });
-      } catch (e) {
-        showFlash(errorMessage(e), "err");
-      }
-    } else if (currentField === "parent") {
-      setOverlay({ kind: "search-target" });
-    } else if (currentField === "points") {
-      setOverlay({
-        kind: "inline-input",
-        field: "points",
-        value: detail.storyPoints !== undefined ? String(detail.storyPoints) : "",
-      });
-    } else if (currentField === "due") {
-      setOverlay({
-        kind: "inline-input",
-        field: "due",
-        value: detail.dueDate ?? "",
-      });
-    } else if (currentField === "labels") {
-      setOverlay({ kind: "pick-labels-action" });
-    } else if (currentField === "components") {
-      setOverlay({ kind: "pick-components-action" });
-    } else if (currentField === "fixVersions") {
-      setOverlay({ kind: "pick-versions-action" });
-    }
-  }, [detail, currentRow, currentField, isEditable, cfg, projectKey, showFlash]);
+    const fieldId =
+      currentRow.kind === "custom" ? currentRow.field.id : JIRA_FIELD_KEY[currentRow.id];
+    const current = resolveCurrentValue(currentRow);
+    setOverlay({
+      kind: "field-edit",
+      fieldId,
+      meta,
+      ...(current !== undefined ? { current } : {}),
+    });
+  }, [detail, currentRow, resolveEditable, resolveCurrentValue, showFlash]);
 
   const clearField = useCallback(async () => {
-    if (!detail || !currentRow || !isEditable) return;
-    if (currentRow.kind === "custom") {
-      // null clears virtually every custom-field kind Jira supports. If
-      // the backend rejects it (e.g. required field), the save error
-      // surfaces via the usual toast — no silent swallow.
-      await doSave(
-        () => updateIssueField(cfg, detail.key, { [currentRow.field.id]: null }),
-        `${currentRow.field.name} cleared`,
-      );
+    if (!detail || !currentRow) return;
+    const meta = resolveEditable(currentRow);
+    if (!meta) {
+      showFlash("not editable on this issue");
       return;
     }
-    if (currentField === "assignee") {
-      await doSave(() => updateIssueField(cfg, detail.key, { assignee: null }), "assignee cleared");
-    } else if (currentField === "priority") {
-      showFlash("priority cannot be cleared");
-    } else if (currentField === "parent") {
-      await doSave(() => updateIssueField(cfg, detail.key, { parent: null }), "parent cleared");
-    } else if (currentField === "points") {
-      await doSave(
-        () => updateIssueField(cfg, detail.key, { [CF_STORY_POINTS]: null }),
-        "points cleared",
-      );
-    } else if (currentField === "due") {
-      await doSave(() => updateIssueField(cfg, detail.key, { duedate: null }), "due date cleared");
-    } else if (currentField === "labels") {
-      if (detail.labels.length === 0) {
-        showFlash("no labels to clear");
-        return;
-      }
-      await doSave(() => updateIssueField(cfg, detail.key, { labels: [] }), "labels cleared");
-    } else if (currentField === "components") {
-      if (detail.components.length === 0) {
-        showFlash("no components to clear");
-        return;
-      }
-      await doSave(
-        () => updateIssueField(cfg, detail.key, { components: [] }),
-        "components cleared",
-      );
-    } else if (currentField === "fixVersions") {
-      if (detail.fixVersions.length === 0) {
-        showFlash("no fix versions to clear");
-        return;
-      }
-      await doSave(
-        () => updateIssueField(cfg, detail.key, { fixVersions: [] }),
-        "fix versions cleared",
-      );
-    }
-  }, [detail, currentRow, currentField, isEditable, cfg, doSave, showFlash]);
+    const fieldId =
+      currentRow.kind === "custom" ? currentRow.field.id : JIRA_FIELD_KEY[currentRow.id];
+    const label =
+      currentRow.kind === "custom" ? currentRow.field.name : FIELD_LABELS[currentRow.id];
+    await doSave(() => updateIssueField(cfg, detail.key, { [fieldId]: null }), `${label} cleared`);
+  }, [detail, currentRow, resolveEditable, cfg, doSave, showFlash]);
 
   // Main input handler
   useInput(
@@ -630,397 +578,36 @@ export function IssueDetailModal({
         onSubmit={async (val) => {
           setOverlay({ kind: "none" });
           if (!detail) return;
-          if (overlay.field === "title") {
-            const next = val.trim();
-            if (!next) {
-              showFlash("summary empty, not saved");
-              return;
-            }
-            if (next === detail.summary.trim()) {
-              showFlash("no change");
-              return;
-            }
-            await doSave(() => updateSummary(cfg, detail.key, next), "title updated");
-          } else if (overlay.field === "points") {
-            const n = val.trim() === "" ? null : Number(val);
-            if (n !== null && Number.isNaN(n)) {
-              showFlash("invalid number");
-              return;
-            }
-            await doSave(
-              () => updateIssueField(cfg, detail.key, { [CF_STORY_POINTS]: n }),
-              n === null ? "points cleared" : "points updated",
-            );
-          } else if (overlay.field === "due") {
-            const v = val.trim() || null;
-            if (v && !/^\d{4}-\d{2}-\d{2}$/.test(v)) {
-              showFlash("use YYYY-MM-DD format");
-              return;
-            }
-            await doSave(
-              () => updateIssueField(cfg, detail.key, { duedate: v }),
-              v ? "due date updated" : "due date cleared",
-            );
+          const next = val.trim();
+          if (!next) {
+            showFlash("summary empty, not saved");
+            return;
           }
-        }}
-      />
-    );
-  }
-
-  if (overlay.kind === "pick-assignee") {
-    const items = [
-      { id: "__unassign__", label: "(Unassigned)" },
-      ...overlay.users.map((u) => ({ id: u.accountId, label: u.displayName })),
-    ];
-    const currentId = detail
-      ? overlay.users.find((u) => u.displayName === detail.assignee)?.accountId
-      : undefined;
-    return (
-      <FilterPicker
-        title="assignee"
-        items={items}
-        {...(currentId ? { currentId } : {})}
-        onPick={async (id) => {
-          setOverlay({ kind: "none" });
-          if (!detail) return;
-          const value = id === "__unassign__" ? null : { accountId: id };
-          await doSave(
-            () => updateIssueField(cfg, detail.key, { assignee: value }),
-            id === "__unassign__" ? "assignee cleared" : "assignee updated",
-          );
-        }}
-        onClear={() => {
-          setOverlay({ kind: "none" });
-          if (!detail) return;
-          void doSave(
-            () => updateIssueField(cfg, detail.key, { assignee: null }),
-            "assignee cleared",
-          );
-        }}
-        onCancel={() => setOverlay({ kind: "none" })}
-      />
-    );
-  }
-
-  if (overlay.kind === "pick-priority") {
-    const currentId = detail
-      ? overlay.priorities.find((p) => p.name === detail.priority)?.id
-      : undefined;
-    return (
-      <FilterPicker
-        title="priority"
-        items={overlay.priorities.map((p) => ({ id: p.id, label: p.name }))}
-        {...(currentId ? { currentId } : {})}
-        onPick={async (id) => {
-          setOverlay({ kind: "none" });
-          if (!detail) return;
-          await doSave(
-            () => updateIssueField(cfg, detail.key, { priority: { id } }),
-            "priority updated",
-          );
-        }}
-        onCancel={() => setOverlay({ kind: "none" })}
-      />
-    );
-  }
-
-  if (overlay.kind === "search-target") {
-    return (
-      <FilterPicker
-        title="parent issue"
-        items={searchResults.map((r) => ({
-          id: r.key,
-          label: `${r.key}  ${truncate(r.summary, 80)}`,
-          hint: r.issueType,
-        }))}
-        loading={searchLoading}
-        placeholder="type summary or issue key…"
-        onQueryChange={(q) => {
-          const seq = ++searchSeq.current;
-          setSearchLoading(true);
-          (async () => {
-            try {
-              const r = await searchIssues(cfg, projectKey, q);
-              if (seq === searchSeq.current) setSearchResults(r);
-            } catch {
-              if (seq === searchSeq.current) setSearchResults([]);
-            } finally {
-              if (seq === searchSeq.current) setSearchLoading(false);
-            }
-          })();
-        }}
-        onPick={async (id) => {
-          setOverlay({ kind: "none" });
-          if (!detail) return;
-          await doSave(
-            () => updateIssueField(cfg, detail.key, { parent: { key: id } }),
-            `parent set to ${id}`,
-          );
-        }}
-        onClear={() => {
-          setOverlay({ kind: "none" });
-          if (!detail) return;
-          void doSave(() => updateIssueField(cfg, detail.key, { parent: null }), "parent cleared");
-        }}
-        onCancel={() => setOverlay({ kind: "none" })}
-      />
-    );
-  }
-
-  if (overlay.kind === "pick-labels-action") {
-    return (
-      <ListPicker
-        title="labels"
-        items={[
-          { id: "add", label: "add label" },
-          ...(detail && detail.labels.length > 0 ? [{ id: "remove", label: "remove label" }] : []),
-          ...(detail && detail.labels.length > 0 ? [{ id: "clear", label: "clear all" }] : []),
-        ]}
-        onPick={async (id) => {
-          if (id === "add") {
-            try {
-              const all = await getLabels(cfg);
-              setOverlay({ kind: "pick-labels-add", all });
-            } catch (e) {
-              showFlash(errorMessage(e), "err");
-              setOverlay({ kind: "none" });
-            }
-          } else if (id === "remove") {
-            setOverlay({ kind: "pick-labels-remove" });
-          } else if (id === "clear") {
-            setOverlay({ kind: "none" });
-            if (detail) {
-              await doSave(
-                () => updateIssueField(cfg, detail.key, { labels: [] }),
-                "labels cleared",
-              );
-            }
+          if (next === detail.summary.trim()) {
+            showFlash("no change");
+            return;
           }
+          await doSave(() => updateSummary(cfg, detail.key, next), "title updated");
         }}
-        onCancel={() => setOverlay({ kind: "none" })}
       />
     );
   }
 
-  if (overlay.kind === "pick-labels-add") {
-    const existing = new Set(detail?.labels ?? []);
-    const available = overlay.all.filter((l) => !existing.has(l));
+  if (overlay.kind === "field-edit" && detail) {
     return (
-      <FilterPicker
-        title="add label"
-        items={available.map((l) => ({ id: l, label: l }))}
-        onPick={async (id) => {
+      <FieldEditor
+        cfg={cfg}
+        projectKey={projectKey}
+        field={overlay.meta}
+        {...(overlay.current !== undefined ? { current: overlay.current } : {})}
+        onCancel={() => setOverlay({ kind: "none" })}
+        onSubmit={async (value: EditableFieldValue | null) => {
           setOverlay({ kind: "none" });
-          if (!detail) return;
           await doSave(
-            () => updateIssueField(cfg, detail.key, { labels: [...detail.labels, id] }),
-            `label "${id}" added`,
+            () => updateIssueField(cfg, detail.key, { [overlay.fieldId]: value }),
+            `${overlay.meta.name} ${value === null ? "cleared" : "updated"}`,
           );
         }}
-        onCancel={() => setOverlay({ kind: "none" })}
-      />
-    );
-  }
-
-  if (overlay.kind === "pick-labels-remove") {
-    return (
-      <FilterPicker
-        title="remove label"
-        items={(detail?.labels ?? []).map((l) => ({ id: l, label: l }))}
-        onPick={async (id) => {
-          setOverlay({ kind: "none" });
-          if (!detail) return;
-          await doSave(
-            () =>
-              updateIssueField(cfg, detail.key, {
-                labels: detail.labels.filter((l) => l !== id),
-              }),
-            `label "${id}" removed`,
-          );
-        }}
-        onCancel={() => setOverlay({ kind: "none" })}
-      />
-    );
-  }
-
-  if (overlay.kind === "pick-components-action") {
-    return (
-      <ListPicker
-        title="components"
-        items={[
-          { id: "add", label: "add component" },
-          ...(detail && detail.components.length > 0
-            ? [{ id: "remove", label: "remove component" }]
-            : []),
-          ...(detail && detail.components.length > 0 ? [{ id: "clear", label: "clear all" }] : []),
-        ]}
-        onPick={async (id) => {
-          if (id === "add") {
-            try {
-              const all = await getProjectComponents(cfg, projectKey);
-              setOverlay({ kind: "pick-components-add", all });
-            } catch (e) {
-              showFlash(errorMessage(e), "err");
-              setOverlay({ kind: "none" });
-            }
-          } else if (id === "remove") {
-            setOverlay({ kind: "pick-components-remove" });
-          } else if (id === "clear") {
-            setOverlay({ kind: "none" });
-            if (detail) {
-              await doSave(
-                () => updateIssueField(cfg, detail.key, { components: [] }),
-                "components cleared",
-              );
-            }
-          }
-        }}
-        onCancel={() => setOverlay({ kind: "none" })}
-      />
-    );
-  }
-
-  if (overlay.kind === "pick-components-add") {
-    const existing = new Set(detail?.components ?? []);
-    const available = overlay.all.filter((c) => !existing.has(c.name));
-    return (
-      <FilterPicker
-        title="add component"
-        items={available.map((c) => ({ id: c.id, label: c.name }))}
-        onPick={async (id) => {
-          setOverlay({ kind: "none" });
-          if (!detail) return;
-          const comp = overlay.all.find((c) => c.id === id);
-          if (!comp) return;
-          await doSave(
-            () =>
-              updateIssueField(cfg, detail.key, {
-                components: [
-                  ...detail.components.map((n) => {
-                    const found = overlay.all.find((c) => c.name === n);
-                    return found ? { id: found.id } : { name: n };
-                  }),
-                  { id: comp.id },
-                ],
-              }),
-            `component "${comp.name}" added`,
-          );
-        }}
-        onCancel={() => setOverlay({ kind: "none" })}
-      />
-    );
-  }
-
-  if (overlay.kind === "pick-components-remove") {
-    return (
-      <FilterPicker
-        title="remove component"
-        items={(detail?.components ?? []).map((c) => ({ id: c, label: c }))}
-        onPick={async (id) => {
-          setOverlay({ kind: "none" });
-          if (!detail) return;
-          await doSave(
-            () =>
-              updateIssueField(cfg, detail.key, {
-                components: detail.components.filter((c) => c !== id).map((c) => ({ name: c })),
-              }),
-            `component "${id}" removed`,
-          );
-        }}
-        onCancel={() => setOverlay({ kind: "none" })}
-      />
-    );
-  }
-
-  if (overlay.kind === "pick-versions-action") {
-    return (
-      <ListPicker
-        title="fix versions"
-        items={[
-          { id: "add", label: "add version" },
-          ...(detail && detail.fixVersions.length > 0
-            ? [{ id: "remove", label: "remove version" }]
-            : []),
-          ...(detail && detail.fixVersions.length > 0 ? [{ id: "clear", label: "clear all" }] : []),
-        ]}
-        onPick={async (id) => {
-          if (id === "add") {
-            try {
-              const all = await getProjectVersions(cfg, projectKey);
-              setOverlay({ kind: "pick-versions-add", all });
-            } catch (e) {
-              showFlash(errorMessage(e), "err");
-              setOverlay({ kind: "none" });
-            }
-          } else if (id === "remove") {
-            setOverlay({ kind: "pick-versions-remove" });
-          } else if (id === "clear") {
-            setOverlay({ kind: "none" });
-            if (detail) {
-              await doSave(
-                () => updateIssueField(cfg, detail.key, { fixVersions: [] }),
-                "fix versions cleared",
-              );
-            }
-          }
-        }}
-        onCancel={() => setOverlay({ kind: "none" })}
-      />
-    );
-  }
-
-  if (overlay.kind === "pick-versions-add") {
-    const existing = new Set(detail?.fixVersions ?? []);
-    const available = overlay.all.filter((v) => !existing.has(v.name));
-    return (
-      <FilterPicker
-        title="add version"
-        items={available.map((v) => ({
-          id: v.id,
-          label: v.name,
-          hint: v.released ? "released" : undefined,
-        }))}
-        onPick={async (id) => {
-          setOverlay({ kind: "none" });
-          if (!detail) return;
-          const ver = overlay.all.find((v) => v.id === id);
-          if (!ver) return;
-          await doSave(
-            () =>
-              updateIssueField(cfg, detail.key, {
-                fixVersions: [
-                  ...detail.fixVersions.map((n) => {
-                    const found = overlay.all.find((v) => v.name === n);
-                    return found ? { id: found.id } : { name: n };
-                  }),
-                  { id: ver.id },
-                ],
-              }),
-            `version "${ver.name}" added`,
-          );
-        }}
-        onCancel={() => setOverlay({ kind: "none" })}
-      />
-    );
-  }
-
-  if (overlay.kind === "pick-versions-remove") {
-    return (
-      <FilterPicker
-        title="remove version"
-        items={(detail?.fixVersions ?? []).map((v) => ({ id: v, label: v }))}
-        onPick={async (id) => {
-          setOverlay({ kind: "none" });
-          if (!detail) return;
-          await doSave(
-            () =>
-              updateIssueField(cfg, detail.key, {
-                fixVersions: detail.fixVersions.filter((v) => v !== id).map((v) => ({ name: v })),
-              }),
-            `version "${id}" removed`,
-          );
-        }}
-        onCancel={() => setOverlay({ kind: "none" })}
       />
     );
   }
@@ -1038,31 +625,6 @@ export function IssueDetailModal({
           }
         }}
         onCancel={() => setOverlay({ kind: "none" })}
-      />
-    );
-  }
-
-  if (overlay.kind === "custom-edit" && detail) {
-    const cf = overlay.field;
-    // Re-resolve from the live detail in case editmeta / value changed
-    // between modal-open and submit (fetchDetail side-effects).
-    const latest = detail.customFields.find((c) => c.id === cf.id) ?? cf;
-    return (
-      <FieldEditor
-        cfg={cfg}
-        projectKey={projectKey}
-        field={latest.meta}
-        {...(latest.current !== undefined ? { current: latest.current } : {})}
-        onCancel={() => setOverlay({ kind: "none" })}
-        onSubmit={async (value: EditableFieldValue | null) => {
-          setOverlay({ kind: "none" });
-          // `null` clears — Jira accepts that for most field kinds. If
-          // one rejects, the error toast surfaces naturally.
-          await doSave(
-            () => updateIssueField(cfg, detail.key, { [latest.id]: value }),
-            `${latest.name} ${value === null ? "cleared" : "updated"}`,
-          );
-        }}
       />
     );
   }
@@ -1324,8 +886,6 @@ function fieldDisplayValue(field: FieldId, d: IssueDetail): string {
   if (field === "reporter") return d.reporter ?? "—";
   if (field === "priority") return d.priority ?? "—";
   if (field === "parent") return d.parentKey ?? d.epicKey ?? "—";
-  if (field === "sprint") return d.sprint ?? "—";
-  if (field === "points") return d.storyPoints !== undefined ? String(d.storyPoints) : "—";
   if (field === "labels") return d.labels.length === 0 ? "—" : d.labels.join(", ");
   if (field === "components") return d.components.length === 0 ? "—" : d.components.join(", ");
   if (field === "fixVersions") return d.fixVersions.length === 0 ? "—" : d.fixVersions.join(", ");
