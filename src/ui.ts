@@ -37,7 +37,7 @@ export type Theme = {
  * https://github.com/robb0wen/synthwave-vscode — canonical hex values from
  * the VSCode theme, mapped to semantic slots.
  */
-export const synthwaveTheme: Theme = {
+const synthwaveTheme: Theme = {
   // Text
   fg: "#f9f9fa", // generic off-white
   fgDim: "#b6b1b1", // punctuation / separators
@@ -67,7 +67,7 @@ export const synthwaveTheme: Theme = {
  * text uses the terminal's own default foreground, guaranteeing readability
  * on both dark and light terminal themes.
  */
-export const terminalTheme: Theme = {
+const terminalTheme: Theme = {
   fg: undefined, // terminal default — readable on both light and dark
   fgDim: "gray",
   muted: "gray",

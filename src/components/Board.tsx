@@ -12,6 +12,7 @@ import {
   type IssueLinkType,
   type IssueType,
   type JiraUser,
+  type SwimlaneStrategy,
   type Transition,
   type EditableFieldValue,
   assignIssueToMe,
@@ -68,6 +69,7 @@ type Modal =
   | { kind: "filter-sprint"; sprints: string[] }
   | { kind: "filter-label"; labels: string[] }
   | { kind: "filter-epic"; epics: string[] }
+  | { kind: "filter-swimlane"; items: string[] }
   | { kind: "create"; types: IssueType[]; linkTypes: IssueLinkType[]; parentKey?: string }
   | { kind: "quick-add"; colIdx: number; typeName: string; value: string }
   | { kind: "detail"; issueKey: string }
@@ -82,6 +84,7 @@ type Filters = {
   sprint: string | null;
   label: string | null;
   epic: string | null;
+  swimlane: string | null;
 };
 
 const EMPTY_FILTERS: Filters = {
@@ -90,6 +93,7 @@ const EMPTY_FILTERS: Filters = {
   sprint: null,
   label: null,
   epic: null,
+  swimlane: null,
 };
 
 function activeFilterCount(f: Filters): number {
@@ -98,10 +102,21 @@ function activeFilterCount(f: Filters): number {
 
 type CellRef = { col: number; row: number };
 
-/**
- * Bucket issues into columns by statusId. Issues with a status not mapped
- * by the board config get dropped — Jira sometimes returns stale ones.
- */
+function swimlaneValue(issue: Issue, strategy: SwimlaneStrategy): string {
+  switch (strategy) {
+    case "assignee":
+      return issue.assignee ?? "Unassigned";
+    case "epic":
+      return issue.epicKey ?? "No Epic";
+    case "issueType":
+      return issue.issueType;
+    case "sprint":
+      return issue.sprintName ?? "No Sprint";
+    default:
+      return "";
+  }
+}
+
 function buildColumns(colDefs: BoardColumn[], issues: Issue[]): Column[] {
   const cols: Column[] = colDefs.map((c) => ({ ...c, issues: [] }));
   const statusToCol = new Map<string, number>();
@@ -164,8 +179,10 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     if (filters.sprint) list = list.filter((i) => i.sprintName === filters.sprint);
     if (filters.label) list = list.filter((i) => i.labels.includes(filters.label!));
     if (filters.epic) list = list.filter((i) => i.epicKey === filters.epic);
+    if (filters.swimlane && conf?.swimlane)
+      list = list.filter((i) => swimlaneValue(i, conf.swimlane) === filters.swimlane);
     return list;
-  }, [issues, filters]);
+  }, [issues, filters, conf]);
   const columns = useMemo(
     () => (conf ? buildColumns(conf.columns, filteredIssues) : []),
     [conf, filteredIssues],
@@ -177,12 +194,16 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     const sprints = new Set<string>();
     const labels = new Set<string>();
     const epics = new Set<string>();
+    const swimlanes = new Set<string>();
     for (const i of issues) {
       assignees.add(i.assignee ?? "Unassigned");
       types.add(i.issueType);
       if (i.sprintName) sprints.add(i.sprintName);
       for (const l of i.labels) labels.add(l);
       if (i.epicKey) epics.add(i.epicKey);
+      if (conf?.swimlane && conf.swimlane !== "none" && conf.swimlane !== "jql") {
+        swimlanes.add(swimlaneValue(i, conf.swimlane));
+      }
     }
     const sortSet = (s: Set<string>) => Array.from(s).toSorted((a, b) => a.localeCompare(b));
     return {
@@ -195,8 +216,9 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       sprints: sortSet(sprints),
       labels: sortSet(labels),
       epics: sortSet(epics),
+      swimlanes: sortSet(swimlanes),
     };
-  }, [issues]);
+  }, [issues, conf]);
 
   const applyBoardData = useCallback((c: BoardConfig, is: Issue[]) => {
     setConf(c);
@@ -850,6 +872,18 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         }
         return;
       }
+      if (input === "s") {
+        if (!conf || !conf.swimlane || conf.swimlane === "none" || conf.swimlane === "jql") {
+          flash("no swimlanes configured on this board", "info");
+          return;
+        }
+        if (filterOptions.swimlanes.length === 0) {
+          flash("no swimlanes found", "info");
+          return;
+        }
+        setModal({ kind: "filter-swimlane", items: filterOptions.swimlanes });
+        return;
+      }
     },
     { isActive: modal.kind === "none" },
   );
@@ -1157,10 +1191,9 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     modal.kind === "filter-type" ||
     modal.kind === "filter-sprint" ||
     modal.kind === "filter-label" ||
-    modal.kind === "filter-epic"
+    modal.kind === "filter-epic" ||
+    modal.kind === "filter-swimlane"
   ) {
-    // Map modal kind → the filter key + label + items source in one shot so
-    // the five variants collapse to a single render block.
     const spec: {
       key: keyof Filters;
       label: string;
@@ -1174,7 +1207,9 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
             ? { key: "sprint", label: "sprint", items: modal.sprints }
             : modal.kind === "filter-label"
               ? { key: "label", label: "label", items: modal.labels }
-              : { key: "epic", label: "epic", items: modal.epics };
+              : modal.kind === "filter-swimlane"
+                ? { key: "swimlane", label: "swimlane", items: modal.items }
+                : { key: "epic", label: "epic", items: modal.epics };
     return (
       <FilterPickerModal
         label={spec.label}
@@ -1190,7 +1225,9 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           closeModal();
           flash(`${spec.label} filter cleared`, "ok");
         }}
-        onCancel={() => setModal({ kind: "filter-menu" })}
+        onCancel={() =>
+          setModal(modal.kind === "filter-swimlane" ? { kind: "none" } : { kind: "filter-menu" })
+        }
       />
     );
   }

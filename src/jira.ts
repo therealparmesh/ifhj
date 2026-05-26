@@ -26,10 +26,13 @@ export type BoardColumn = {
   max?: number;
 };
 
+export type SwimlaneStrategy = "none" | "assignee" | "epic" | "issueType" | "sprint" | "jql";
+
 export type BoardConfig = {
   name: string;
   projectKey: string;
   columns: BoardColumn[];
+  swimlane: SwimlaneStrategy;
 };
 
 export type Issue = {
@@ -232,10 +235,19 @@ export async function getBoardConfig(cfg: JiraConfig, boardId: number): Promise<
     if (Number.isFinite(max) && max > 0) out.max = max;
     return out;
   });
+  const swimlaneField: string = data.subqueryConfig?.subqueries?.[0]?.field ?? "";
+  let swimlane: SwimlaneStrategy = "none";
+  if (swimlaneField === "assignee") swimlane = "assignee";
+  else if (swimlaneField === "epic" || swimlaneField.includes("Epic")) swimlane = "epic";
+  else if (swimlaneField === "issuetype") swimlane = "issueType";
+  else if (swimlaneField.includes("Sprint") || swimlaneField.includes("sprint"))
+    swimlane = "sprint";
+  else if (swimlaneField === "jql") swimlane = "jql";
   return {
     name: data.name,
     projectKey: data.location?.key,
     columns,
+    swimlane,
   };
 }
 

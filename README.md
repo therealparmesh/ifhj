@@ -120,6 +120,7 @@ Pick a board. Everything's keyboard from there.
 | `/`                 | search                                            |
 | `n` / `N`           | next / prev search match                          |
 | `f`                 | filter menu (assignee, type, sprint, label, epic) |
+| `s`                 | swimlane filter                                   |
 | `F`                 | clear all filters                                 |
 | `R`                 | recent issues                                     |
 | `J`                 | JQL query view                                    |

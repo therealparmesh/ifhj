@@ -23,6 +23,7 @@ const BOARD_BINDINGS: { keys: string; desc: string }[] = [
   { keys: "/", desc: "search" },
   { keys: "n / N", desc: "next / prev match" },
   { keys: "f / F", desc: "filter menu / clear all filters" },
+  { keys: "s", desc: "swimlane filter" },
   { keys: "R", desc: "recent issues" },
   { keys: "J", desc: "JQL query view" },
   { keys: "r", desc: "refresh" },
