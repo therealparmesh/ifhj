@@ -164,7 +164,6 @@ export type IssueDetail = Issue & {
   reporter?: string;
   components: string[];
   fixVersions: string[];
-  sprint?: string;
   dueDate?: string;
   created: string;
   updated: string;
@@ -335,8 +334,6 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
   const f = data.fields ?? {};
   const descRaw = f.description;
   const description = typeof descRaw === "string" ? descRaw : adfToText(descRaw).trim();
-  const sprints = Array.isArray(f[CF_SPRINT]) ? f[CF_SPRINT] : [];
-  const activeSprint = sprints.find((s: any) => s?.state === "active") ?? sprints[0];
   const comments: Comment[] = (commentsData.comments ?? []).map((c: any) => ({
     id: String(c.id),
     author: c.author?.displayName ?? "unknown",
@@ -416,7 +413,6 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
   const epic = f[CF_EPIC_LINK] || f.parent?.key;
   if (epic) detail.epicKey = epic;
   if (f.reporter?.displayName) detail.reporter = f.reporter.displayName;
-  if (activeSprint?.name) detail.sprint = activeSprint.name;
   if (typeof f[CF_STORY_POINTS] === "number") detail.storyPoints = f[CF_STORY_POINTS];
   if (f.duedate) detail.dueDate = f.duedate;
   if (f.parent?.key) detail.parentKey = f.parent.key;
