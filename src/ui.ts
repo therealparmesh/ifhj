@@ -7,7 +7,7 @@
  * way to be readable on *both* light and dark terminals using a single
  * binary.
  */
-export type Theme = {
+type Theme = {
   // ─── Text tones ─────────────────────────────────────────────────
   fg: string | undefined; // primary text — undefined ⇒ terminal default
   fgDim: string; // secondary text

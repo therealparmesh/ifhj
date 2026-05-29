@@ -84,10 +84,11 @@ export type EditableField =
  * Common head — every editable field carries the Jira-side key (e.g.
  * `customfield_10042` or `resolution`) and the display name shown in
  * Jira's UI (e.g. "Implementer"). `required` is meaningful for transition
- * screens and lets custom-field callers ignore it. `hasDefaultValue` is
- * kept for completeness; we don't seed from it because Jira doesn't tell
- * us which allowedValue is the default, and a wrong guess is worse than
- * asking.
+ * screens and lets custom-field callers ignore it. `hasDefaultValue` lets
+ * `getTransitions` skip prompting for required fields Jira will auto-fill
+ * server-side — we don't seed the *value* ourselves (Jira doesn't tell us
+ * which allowedValue is the default, and a wrong guess is worse than the
+ * server's own default), we just decline to block on them.
  */
 type EditableFieldBase = {
   id: string;
@@ -453,9 +454,14 @@ export async function getTransitions(cfg: JiraConfig, issueKey: string): Promise
     id: String(t.id),
     name: String(t.name),
     toStatusId: String(t.to?.id ?? ""),
-    // Only required fields block a transition — optional screen fields
-    // are noise for the uniform "show the screen modal" path.
-    requiredFields: parseEditableFields(t.fields ?? {}).filter((f) => f.required),
+    // A field only blocks a transition if it's required AND Jira has no
+    // default to fall back on. Required-with-default fields get auto-filled
+    // server-side on the POST, so prompting for them is pure noise — that's
+    // what made the move feel like it "popped a screen for nothing".
+    // Optional screen fields are likewise dropped.
+    requiredFields: parseEditableFields(t.fields ?? {}).filter(
+      (f) => f.required && !f.hasDefaultValue,
+    ),
   }));
 }
 

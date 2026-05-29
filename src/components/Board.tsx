@@ -439,11 +439,13 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           flash(`no transition to ${targetCol.name}`, "err");
           return;
         }
-        if (candidates.length === 1) {
-          await commitTransition(issue.key, candidates[0]!, { targetColIdx });
-        } else {
-          setModal({ kind: "transition-picker", transitions: candidates, issueKey: issue.key });
-        }
+        // Moving a card to a column should feel like a drag-and-drop, not a
+        // quiz: don't stop to ask which transition when several land in the
+        // same column. Auto-pick one — preferring a path with no required-
+        // fields screen so the move stays frictionless — and let
+        // commitTransition surface the screen only if that's the only path.
+        const chosen = candidates.find((t) => t.requiredFields.length === 0) ?? candidates[0]!;
+        await commitTransition(issue.key, chosen, { targetColIdx });
       } catch (e) {
         flash(errorMessage(e), "err");
       } finally {

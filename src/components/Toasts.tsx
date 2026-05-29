@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { theme, truncate } from "../ui";
 
-export type Tone = "ok" | "err" | "info";
+type Tone = "ok" | "err" | "info";
 
 type Toast = { id: number; text: string; tone: Tone };
 

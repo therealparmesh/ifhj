@@ -11,7 +11,7 @@ const BOARD_BINDINGS: { keys: string; desc: string }[] = [
   { keys: "v", desc: "view full issue details" },
   { keys: "t", desc: "transition to any status (fuzzy)" },
   { keys: "m", desc: "move card to any column (picker)" },
-  { keys: "< >", desc: "transition to prev / next column" },
+  { keys: "< >", desc: "move card to prev / next column" },
   { keys: "⌃, ⌃.", desc: "rerank card up / down within column" },
   { keys: "i", desc: "assign to me" },
   { keys: "e", desc: "edit title (inline)" },

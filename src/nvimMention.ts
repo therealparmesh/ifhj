@@ -69,7 +69,7 @@ function! IfhjMentionSetup(path) abort
 endfunction
 `;
 
-export type MentionAssets = {
+type MentionAssets = {
   /** File containing the vimscript above — passed to --cmd source. */
   scriptPath: string;
   /** File containing JSON-encoded users — passed to IfhjMentionSetup. */
