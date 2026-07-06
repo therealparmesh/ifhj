@@ -10,9 +10,7 @@ export type JiraConfig = {
 
 /**
  * User preferences persisted at ~/.config/ifhj/settings.json. Every field
- * has a default, so on-disk settings may omit any subset of keys. Add a
- * new setting by extending this type, adding its default to DEFAULTS, and
- * adding a parser to PARSERS — TS will force the latter two.
+ * has a default, so on-disk settings may omit any subset of keys.
  */
 export type Settings = {
   theme: ThemeName;
@@ -21,43 +19,31 @@ export type Settings = {
 
 const SETTINGS_PATH = join(homedir(), ".config", "ifhj", "settings.json");
 
-const DEFAULTS: Settings = {
-  theme: "synthwave",
-  maxColumns: 4,
-};
+function parseTheme(v: unknown): ThemeName | undefined {
+  return v === "synthwave" || v === "terminal" ? v : undefined;
+}
 
-/**
- * One parser per Settings field. Returns the value when it fits the
- * field's type, or undefined to reject it. Keyed by `keyof Settings` so
- * the type system enforces completeness.
- */
-const PARSERS: { [K in keyof Settings]: (v: unknown) => Settings[K] | undefined } = {
-  theme: (v) => (v === "synthwave" || v === "terminal" ? v : undefined),
-  maxColumns: (v) => {
-    const n = typeof v === "number" ? v : typeof v === "string" ? Number.parseInt(v, 10) : NaN;
-    return Number.isFinite(n) && n >= 1 ? n : undefined;
-  },
-};
+function parseMaxColumns(v: unknown): number | undefined {
+  const n = typeof v === "number" ? v : typeof v === "string" ? Number.parseInt(v, 10) : NaN;
+  return Number.isFinite(n) && n >= 1 ? n : undefined;
+}
 
-/**
- * Optional env-var override per setting. Env var wins over the file; its
- * value runs through the same PARSERS entry, so validation is identical.
- * Partial — not every setting needs or deserves an env override.
- */
-const ENV_OVERRIDES: Partial<Record<keyof Settings, string>> = {
-  theme: "IFHJ_THEME",
-  maxColumns: "IFHJ_MAX_COLUMNS",
-};
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return v !== null && typeof v === "object" && !Array.isArray(v);
+// Read an env override, running it through the same parser as the file. An
+// invalid value throws so the user notices the typo instead of getting a
+// silent fallback. Absent → undefined so the caller can fall through.
+function strictEnv<T>(name: string, parse: (v: unknown) => T | undefined): T | undefined {
+  const v = Bun.env[name];
+  if (v === undefined) return undefined;
+  const parsed = parse(v);
+  if (parsed === undefined) throw new Error(`Invalid ${name} "${v}"`);
+  return parsed;
 }
 
 /**
  * Load settings from ~/.config/ifhj/settings.json, then overlay env
- * overrides. Unknown keys in the file are ignored; invalid values fall
- * back to defaults so the app always boots. Env var values are strict:
- * an invalid override throws so the user notices the typo immediately.
+ * overrides (which win over the file). Invalid file values fall back to
+ * defaults so the app always boots. Env values are strict: an invalid
+ * override throws so the user notices the typo immediately.
  */
 export async function loadSettings(): Promise<Settings> {
   let raw: Record<string, unknown> = {};
@@ -65,32 +51,18 @@ export async function loadSettings(): Promise<Settings> {
     const f = Bun.file(SETTINGS_PATH);
     if (await f.exists()) {
       const parsed: unknown = await f.json();
-      if (isRecord(parsed)) raw = parsed;
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+        raw = parsed as Record<string, unknown>;
+      }
     }
   } catch {
     // malformed JSON — fall through to defaults
   }
-  const settings: Settings = { ...DEFAULTS };
-  // The loop below writes back under each parser's narrowed return type.
-  // TS can't express "PARSERS[k]'s return type matches settings[k]" when k
-  // is unioned at the call site, so we widen to a bag and trust the
-  // mapped-type constraint on PARSERS.
-  const bag = settings as Record<string, unknown>;
-  for (const key of Object.keys(PARSERS) as (keyof Settings)[]) {
-    const parse = PARSERS[key] as (v: unknown) => unknown;
-    const parsed = parse(raw[key]);
-    if (parsed !== undefined) bag[key] = parsed;
-    const envName = ENV_OVERRIDES[key];
-    if (envName === undefined) continue;
-    const envValue = Bun.env[envName];
-    if (envValue === undefined) continue;
-    const envParsed = parse(envValue);
-    if (envParsed === undefined) {
-      throw new Error(`Invalid ${envName} "${envValue}"`);
-    }
-    bag[key] = envParsed;
-  }
-  return settings;
+  return {
+    theme: strictEnv("IFHJ_THEME", parseTheme) ?? parseTheme(raw["theme"]) ?? "synthwave",
+    maxColumns:
+      strictEnv("IFHJ_MAX_COLUMNS", parseMaxColumns) ?? parseMaxColumns(raw["maxColumns"]) ?? 4,
+  };
 }
 
 // Strip matching single or double quotes around a YAML scalar.

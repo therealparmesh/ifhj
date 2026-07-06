@@ -2,6 +2,7 @@ import { Box, Text, useInput } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { JiraConfig } from "../config";
+import { coerceFieldValue } from "../customFields";
 import { editInNeovim } from "../editor";
 import { useDimensions } from "../hooks";
 import {
@@ -273,7 +274,12 @@ export function IssueDetailModal({
       }
       if (SYSTEM_FIELDS.has(row.id)) return undefined;
       const jiraKey = JIRA_FIELD_KEY[row.id];
-      return detail.editmeta.get(jiraKey);
+      // Same unsupported-kind guard as the custom branch: e.g. `parent` on
+      // sub-tasks / team-managed projects is an `issuelink` schema, which
+      // FieldEditor can't render — without this it'd fall through to a raw
+      // text input and POST a garbage value Jira rejects.
+      const meta = detail.editmeta.get(jiraKey);
+      return meta && meta.kind !== "unsupported" ? meta : undefined;
     },
     [detail],
   );
@@ -392,7 +398,9 @@ export function IssueDetailModal({
     [detail, cfg, showFlash, doSave, ensureUsers],
   );
 
-  /** Resolve the current value from rawFields for seeding FieldEditor. */
+  /** Resolve the current value from rawFields for seeding FieldEditor.
+   *  Custom rows carry their own coerced `current`; baked rows coerce the
+   *  raw field through the shared helper so both paths agree on shape. */
   const resolveCurrentValue = useCallback(
     (row: FieldRow): EditableFieldValue | undefined => {
       if (!detail) return undefined;
@@ -400,34 +408,7 @@ export function IssueDetailModal({
       const jiraKey = JIRA_FIELD_KEY[row.id];
       const meta = detail.editmeta.get(jiraKey);
       if (!meta) return undefined;
-      const raw = detail.rawFields[jiraKey];
-      if (raw === null || raw === undefined) return undefined;
-      switch (meta.kind) {
-        case "option":
-          return raw?.id ? { id: String(raw.id) } : undefined;
-        case "option-list":
-          return Array.isArray(raw)
-            ? raw.filter((v: any) => v?.id).map((v: any) => ({ id: String(v.id) }))
-            : undefined;
-        case "user":
-          return raw?.accountId ? { accountId: String(raw.accountId) } : undefined;
-        case "user-list":
-          return Array.isArray(raw)
-            ? raw
-                .filter((v: any) => v?.accountId)
-                .map((v: any) => ({ accountId: String(v.accountId) }))
-            : undefined;
-        case "text":
-          return typeof raw === "string" ? raw : undefined;
-        case "string-list":
-          return Array.isArray(raw) ? raw.map(String) : undefined;
-        case "number":
-          return typeof raw === "number" ? raw : undefined;
-        case "date":
-          return typeof raw === "string" ? raw.slice(0, 10) : undefined;
-        default:
-          return undefined;
-      }
+      return coerceFieldValue(detail.rawFields[jiraKey], meta);
     },
     [detail],
   );
@@ -712,7 +693,7 @@ export function IssueDetailModal({
     if (!row) {
       sideLines.push({
         key: `slot-${slot}`,
-        text: padToWidth("", sidePaneInner),
+        text: "".padEnd(sidePaneInner),
         color: theme.muted,
         bold: false,
         focused: false,
@@ -863,15 +844,6 @@ export function IssueDetailModal({
       <ToastStack toasts={toasts} maxWidth={innerWidth} />
     </Box>
   );
-}
-
-/**
- * Pad a string to a fixed cell count so every side-pane row — field rows
- * AND the top/bottom indicator slots — is the exact same width every
- * render. Keeps Ink's terminal diff clean under fast cursor movement.
- */
-function padToWidth(s: string, width: number): string {
-  return truncate(s, width).padEnd(width);
 }
 
 function customFieldValue(f: CustomField): string {

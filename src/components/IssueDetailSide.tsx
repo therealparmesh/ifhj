@@ -6,27 +6,26 @@ import { Hint } from "./Hint";
 import { TextInput } from "./TextInput";
 
 /**
- * Inline text input for the three baked fields that edit this way:
- * title, points, due. Caller routes the submit by `field`.
+ * Inline text input for fields edited as free text: the issue title, plus
+ * any text / number / date / label field routed here by `FieldEditor`.
+ * `field` is the display label; the caller owns validation on submit and
+ * supplies a kind-appropriate `placeholder` (it knows the field's type; we
+ * can't infer it from the label).
  */
 export function InlineFieldInput({
   field,
   initial,
+  placeholder = "issue title",
   onCancel,
   onSubmit,
 }: {
   field: string;
   initial: string;
+  placeholder?: string;
   onCancel: () => void;
   onSubmit: (value: string) => void;
 }) {
   const [value, setValue] = useState(initial);
-  const placeholder =
-    field === "title"
-      ? "issue title"
-      : field === "points"
-        ? "enter a number (empty to clear)"
-        : "YYYY-MM-DD (empty to clear)";
   return (
     <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.accent}>
       <Text color={theme.accent} bold>

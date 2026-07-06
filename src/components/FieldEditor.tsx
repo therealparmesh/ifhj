@@ -167,11 +167,14 @@ export function FieldEditor({
       <InlineFieldInput
         field={field.name}
         initial={initial}
+        placeholder="number (empty to clear)"
         onSubmit={(raw) => {
           const trimmed = raw.trim();
           if (trimmed === "") return onSubmit(null);
           const n = Number(trimmed);
-          if (Number.isNaN(n)) return; // keep editor open; caller will reshow
+          // Non-numeric: no-op. The input stays mounted with the user's
+          // text so they can correct it; the placeholder names the format.
+          if (Number.isNaN(n)) return;
           onSubmit(n);
         }}
         onCancel={onCancel}
@@ -185,10 +188,16 @@ export function FieldEditor({
       <InlineFieldInput
         field={field.name}
         initial={initial}
+        placeholder="YYYY-MM-DD (empty to clear)"
         onSubmit={(raw) => {
           const trimmed = raw.trim();
           if (trimmed === "") return onSubmit(null);
+          // Reject both malformed and impossible dates (e.g. 2026-13-45)
+          // before they POST — a round-trip parse catches calendar overflow
+          // that the shape regex alone would pass.
           if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return;
+          const d = new Date(`${trimmed}T00:00:00Z`);
+          if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== trimmed) return;
           onSubmit(trimmed);
         }}
         onCancel={onCancel}
@@ -203,6 +212,7 @@ export function FieldEditor({
       <InlineFieldInput
         field={field.name}
         initial={initial}
+        placeholder="comma-separated (empty to clear)"
         onSubmit={(raw) => {
           const tokens = raw
             .split(",")
@@ -222,6 +232,7 @@ export function FieldEditor({
     <InlineFieldInput
       field={field.name}
       initial={initial}
+      placeholder="text (empty to clear)"
       onSubmit={(raw) => {
         const trimmed = raw.trim();
         onSubmit(trimmed === "" ? null : raw);

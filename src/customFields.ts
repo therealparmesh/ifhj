@@ -13,7 +13,7 @@ import type { EditableField, EditableFieldValue } from "./jira";
 
 /** Epic link is rendered via the standard `parent` field; exclude it so
  *  it doesn't double-appear in the custom field list. */
-const BAKED_CUSTOM_FIELDS = new Set(["customfield_10014"]);
+const EPIC_LINK_FIELD = "customfield_10014";
 
 /**
  * A project's custom fields, normalized for display AND edit. `display`
@@ -71,8 +71,14 @@ function extractObjectDisplay(o: any): string {
  * `EditableFieldValue`), so editing an option field seeds `{id}` not
  * `{id, value, name}`. Returns undefined when the field is unset OR the
  * kind is unsupported — the caller treats both as "no pre-selection".
+ *
+ * Shared: both the side-panel custom fields (via `normalizeCustomField`)
+ * and the detail modal's baked fields seed their editors through this.
  */
-function extractEditorValue(raw: unknown, field: EditableField): EditableFieldValue | undefined {
+export function coerceFieldValue(
+  raw: unknown,
+  field: EditableField,
+): EditableFieldValue | undefined {
   if (raw === null || raw === undefined) return undefined;
   switch (field.kind) {
     case "option":
@@ -110,9 +116,9 @@ function extractEditorValue(raw: unknown, field: EditableField): EditableFieldVa
 }
 
 /**
- * Build a CustomField from an editmeta entry. Returns null for the three
- * baked-in custom fields (epic, sprint, points) so they don't render
- * twice in the side panel, and when the meta itself is malformed.
+ * Build a CustomField from an editmeta entry. Returns null for the epic-link
+ * field (rendered via `parent`, so it'd otherwise render twice) and when the
+ * meta itself is malformed.
  */
 export function normalizeCustomField(
   id: string,
@@ -120,11 +126,11 @@ export function normalizeCustomField(
   rawValue: unknown,
   editable: EditableField | undefined,
 ): CustomField | null {
-  if (BAKED_CUSTOM_FIELDS.has(id)) return null;
+  if (id === EPIC_LINK_FIELD) return null;
   if (!editable) return null;
   const name: string = meta?.name ?? id;
   const display = extractDisplay(rawValue, meta?.schema?.type, meta?.schema?.items);
-  const current = extractEditorValue(rawValue, editable);
+  const current = coerceFieldValue(rawValue, editable);
   const out: CustomField = { id, name, display, meta: editable };
   if (current !== undefined) out.current = current;
   return out;

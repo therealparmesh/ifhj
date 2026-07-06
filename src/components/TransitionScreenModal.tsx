@@ -21,7 +21,9 @@ function displayValue(field: EditableField, value: EditableFieldValue | undefine
     if (arr.length === 0) return "—";
     return arr.map((v) => field.allowedValues.find((a) => a.id === v.id)?.name ?? v.id).join(", ");
   }
-  if (field.kind === "user") return (value as { accountId: string }).accountId;
+  // We only hold the accountId here (FieldEditor collects `{accountId}`, not
+  // the display name), and a raw id is noise — just confirm it's set.
+  if (field.kind === "user") return "selected";
   if (field.kind === "user-list") {
     const arr = value as { accountId: string }[];
     return arr.length === 0 ? "—" : `${arr.length} user${arr.length === 1 ? "" : "s"}`;
