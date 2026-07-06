@@ -27,6 +27,7 @@ export function ColumnView({
   scroll,
   cardsVisible,
   matchSet,
+  busyKeys,
   colIdx,
 }: {
   column: Column;
@@ -37,6 +38,8 @@ export function ColumnView({
   scroll: number;
   cardsVisible: number;
   matchSet: Set<string>;
+  /** Keys with a board-repositioning write in flight — rendered as loading. */
+  busyKeys: ReadonlySet<string>;
   colIdx: number;
 }) {
   const visible = column.issues.slice(scroll, scroll + cardsVisible);
@@ -86,6 +89,7 @@ export function ColumnView({
               innerWidth={width - 4}
               selected={isActive && scroll + i === activeRow}
               isMatch={matchSet.has(`${colIdx}:${scroll + i}`)}
+              busy={busyKeys.has(issue.key)}
             />
           ))
         )}
@@ -124,24 +128,31 @@ function Card({
   innerWidth,
   selected,
   isMatch,
+  busy,
 }: {
   issue: Issue;
   innerWidth: number;
   selected: boolean;
   isMatch: boolean;
+  busy: boolean;
 }) {
   const accent = typeColor(issue.issueType);
-  const bar = selected ? theme.accent : accent;
+  // Mid-update: bar goes warning-colored, glyph becomes a spinner, and the
+  // whole card dims to muted so it reads as "in flight, don't touch".
+  const bar = busy ? theme.warning : selected ? theme.accent : accent;
   const badge = initials(issue.assignee);
   const badgeColor = assigneeColor(issue.assignee);
   // Reserve 4 cells on the header row for the initials badge.
   const keyMaxLen = Math.max(4, innerWidth - 4);
-  const meta = [issue.assignee ?? "Unassigned", issue.priority, issue.epicKey]
-    .filter(Boolean)
-    .join(" · ");
+  const meta = busy
+    ? "updating…"
+    : [issue.assignee ?? "Unassigned", issue.priority, issue.epicKey].filter(Boolean).join(" · ");
   // Only search-match rows get a painted background; selection uses
   // `inverse` on text cells only so icons/badges keep their meaning.
   const matchBgProps = bg(!selected && isMatch ? theme.matchBg : undefined);
+  const keyColor = busy ? theme.muted : selected ? theme.fg : theme.fgDim;
+  const summaryColor = busy ? theme.muted : selected ? theme.fg : theme.fgDim;
+  const glyphColor = busy ? theme.warning : selected ? theme.fg : accent;
   const summaryText = truncate(issue.summary, Math.max(4, innerWidth));
   const metaText = truncate(meta, Math.max(4, innerWidth));
   return (
@@ -155,31 +166,40 @@ function Card({
       <Box flexDirection="column" flexGrow={1}>
         <Box justifyContent="space-between">
           <Box>
-            <Text {...fg(selected ? theme.fg : accent)} inverse={selected} {...matchBgProps}>
-              {typeGlyph(issue.issueType)}{" "}
+            <Text {...fg(glyphColor)} inverse={selected && !busy} {...matchBgProps}>
+              {busy ? "◴" : typeGlyph(issue.issueType)}{" "}
             </Text>
             <Text
-              {...fg(selected ? theme.fg : theme.fgDim)}
-              bold={selected}
-              inverse={selected}
+              {...fg(keyColor)}
+              bold={selected && !busy}
+              inverse={selected && !busy}
               {...matchBgProps}
             >
               {truncate(issue.key, keyMaxLen)}
             </Text>
           </Box>
-          <Text {...fg(selected ? theme.fg : badgeColor)} bold inverse={selected} {...matchBgProps}>
+          <Text
+            {...fg(busy ? theme.muted : selected ? theme.fg : badgeColor)}
+            bold
+            inverse={selected && !busy}
+            {...matchBgProps}
+          >
             {badge}
           </Text>
         </Box>
         <Text
-          {...fg(selected ? theme.fg : theme.fgDim)}
-          bold={selected}
-          inverse={selected}
+          {...fg(summaryColor)}
+          bold={selected && !busy}
+          inverse={selected && !busy}
           {...matchBgProps}
         >
           {summaryText}
         </Text>
-        <Text {...fg(selected ? theme.fg : theme.muted)} inverse={selected} {...matchBgProps}>
+        <Text
+          {...fg(busy ? theme.warning : selected ? theme.fg : theme.muted)}
+          inverse={selected && !busy}
+          {...matchBgProps}
+        >
           {metaText}
         </Text>
       </Box>

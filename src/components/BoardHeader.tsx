@@ -15,6 +15,7 @@ export function BoardHeader({
   colIndex,
   colCount,
   filterCount,
+  swimlaneLabel,
   query,
   matches,
   matchIdx,
@@ -28,6 +29,9 @@ export function BoardHeader({
   colIndex: number;
   colCount: number;
   filterCount: number;
+  /** When the swimlane view is active, the grouping's label (e.g. "custom",
+   *  "assignee"). Absent/empty ⇒ flat board, no badge. */
+  swimlaneLabel?: string;
   query: string;
   matches: number;
   matchIdx: number;
@@ -61,6 +65,12 @@ export function BoardHeader({
               {filterCount} filter{filterCount > 1 ? "s" : ""}
             </Text>
             <Text color={theme.muted}> (F clear)</Text>
+          </>
+        ) : null}
+        {swimlaneLabel ? (
+          <>
+            <Text color={theme.muted}>{"  "}</Text>
+            <Text color={theme.accentAlt}>≡ {swimlaneLabel} lanes</Text>
           </>
         ) : null}
       </Box>

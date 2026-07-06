@@ -13,6 +13,10 @@ type FooterProps = {
   matches: number;
   matchIdx: number;
   filterCount: number;
+  /** Board defines swimlanes → show the `s` toggle hint. */
+  hasSwimlanes: boolean;
+  /** Swimlane view currently active → label the toggle "flat" instead. */
+  swimActive: boolean;
   searchBuffer: string;
   onSearchChange: (v: string) => void;
   onSearchSubmit: (v: string) => void;
@@ -27,6 +31,8 @@ export function Footer({
   matches,
   matchIdx,
   filterCount,
+  hasSwimlanes,
+  swimActive,
   searchBuffer,
   onSearchChange,
   onSearchSubmit,
@@ -88,13 +94,14 @@ export function Footer({
           <Hint k="v" label="view" />
           <Hint k="t" label="transition" />
           <Hint k="< >" label="± col" />
-          <Hint k="⌃,." label="rank" />
+          <Hint k="[ ]" label="rank" />
           <Hint k="m" label="move" />
           <Hint k="i" label="assign me" />
           <Hint k="y" label="yank" />
           <Hint k="c" label="create" />
           <Hint k="/" label="search" />
           <Hint k="f" label="filter" />
+          {hasSwimlanes ? <Hint k="s" label={swimActive ? "flat view" : "swimlanes"} /> : null}
           {query ? (
             <Hint
               k="n N"

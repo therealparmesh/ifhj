@@ -6,21 +6,20 @@ import type { JiraConfig } from "../config";
 import { editInNeovim } from "../editor";
 import { useDimensions } from "../hooks";
 import {
-  type BoardColumn,
   type BoardConfig,
+  type BoardSwimlanes,
   type Issue,
   type IssueLinkType,
   type IssueType,
   type JiraUser,
-  type SwimlaneStrategy,
   type Transition,
   type EditableFieldValue,
   assignIssueToMe,
   createIssue,
   getAssignableUsers,
   getBoardConfig,
-  rankIssueAfter,
-  rankIssueBefore,
+  getBoardSwimlanes,
+  rankIssue,
   getBoardIssues,
   getIssueLinkTypes,
   getIssueStatusId,
@@ -30,6 +29,14 @@ import {
   updateDescription,
   updateSummary,
 } from "../jira";
+import {
+  type Lane,
+  type SwimCursor,
+  buildColumns,
+  buildLanes,
+  findCursor,
+  moveCursor,
+} from "../swimlanes";
 import { clamp, copyToClipboard, errorMessage, openInBrowser, theme, truncate } from "../ui";
 import { BoardHeader } from "./BoardHeader";
 import { CreateWizard } from "./CreateWizard";
@@ -39,9 +46,11 @@ import { Footer } from "./Footer";
 import { HelpModal } from "./HelpModal";
 import { IssueDetailModal } from "./IssueDetailModal";
 import { JqlView } from "./JqlView";
-import { type Column, ColumnView, PagingArrow } from "./Kanban";
+import { ColumnView, PagingArrow } from "./Kanban";
 import { ListPicker } from "./ListPicker";
 import { QuickAddModal } from "./QuickAddModal";
+import { SwimlaneGrid } from "./SwimlaneGrid";
+import { SwimlaneHeader } from "./SwimlaneHeader";
 import { TitleEditModal } from "./TitleEditModal";
 import { ToastStack, useToasts } from "./Toasts";
 import { TransitionScreenModal } from "./TransitionScreenModal";
@@ -69,7 +78,6 @@ type Modal =
   | { kind: "filter-sprint"; sprints: string[] }
   | { kind: "filter-label"; labels: string[] }
   | { kind: "filter-epic"; epics: string[] }
-  | { kind: "filter-swimlane"; items: string[] }
   | { kind: "create"; types: IssueType[]; linkTypes: IssueLinkType[]; parentKey?: string }
   | { kind: "quick-add"; colIdx: number; typeName: string; value: string }
   | { kind: "detail"; issueKey: string }
@@ -84,7 +92,6 @@ type Filters = {
   sprint: string | null;
   label: string | null;
   epic: string | null;
-  swimlane: string | null;
 };
 
 const EMPTY_FILTERS: Filters = {
@@ -93,40 +100,31 @@ const EMPTY_FILTERS: Filters = {
   sprint: null,
   label: null,
   epic: null,
-  swimlane: null,
 };
 
 function activeFilterCount(f: Filters): number {
   return Object.values(f).filter(Boolean).length;
 }
 
-type CellRef = { col: number; row: number };
-
-function swimlaneValue(issue: Issue, strategy: SwimlaneStrategy): string {
+/** Human label for the active swimlane grouping, shown in the header. */
+function swimlaneStrategyLabel(strategy: BoardSwimlanes["strategy"] | undefined): string {
   switch (strategy) {
+    case "custom":
+      return "custom";
     case "assignee":
-      return issue.assignee ?? "Unassigned";
+      return "assignee";
     case "epic":
-      return issue.epicKey ?? "No Epic";
+      return "epic";
     case "issueType":
-      return issue.issueType;
-    case "sprint":
-      return issue.sprintName ?? "No Sprint";
+      return "issue type";
+    case "parentChild":
+      return "parent";
     default:
       return "";
   }
 }
 
-function buildColumns(colDefs: BoardColumn[], issues: Issue[]): Column[] {
-  const cols: Column[] = colDefs.map((c) => ({ ...c, issues: [] }));
-  const statusToCol = new Map<string, number>();
-  cols.forEach((c, i) => c.statusIds.forEach((s) => statusToCol.set(s, i)));
-  for (const issue of issues) {
-    const idx = statusToCol.get(issue.statusId);
-    if (idx !== undefined) cols[idx]!.issues.push(issue);
-  }
-  return cols;
-}
+type CellRef = { col: number; row: number };
 
 export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   const { cols: termCols, rows: termRows } = useDimensions();
@@ -134,6 +132,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   // Server state
   const [conf, setConf] = useState<BoardConfig | null>(null);
   const [issues, setIssues] = useState<Issue[]>([]);
+  const [swimlanes, setSwimlanes] = useState<BoardSwimlanes | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   // Cursor / scroll state. Per-column scroll offsets live in a ref, not
@@ -142,6 +141,13 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   const [activeCol, setActiveCol] = useState(0);
   const [activeRows, setActiveRows] = useState<number[]>([]);
   const scrollsRef = useRef<number[]>([]);
+
+  // Swimlane view. Off by default (flat board); toggled with `s` only when
+  // the board actually has swimlanes. Has its own {lane,col,row} cursor and
+  // sticky scroll anchor, distinct from the flat board's per-column state.
+  const [swimView, setSwimView] = useState(false);
+  const [swimCursor, setSwimCursor] = useState<SwimCursor>({ lane: 0, col: 0, row: 0 });
+  const swimScrollRef = useRef(0);
 
   // UI state
   const { toasts, flash } = useToasts();
@@ -162,6 +168,21 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   const pendingFocusKey = useRef<string | null>(null);
   const [recents, setRecents] = useState<{ key: string; summary: string }[]>([]);
 
+  // Keys of issues with a board-repositioning mutation in flight (a transition
+  // or rerank POST + the reload that follows). Such cards render with a
+  // spinner and reject further actions until the write settles, so the user
+  // can't stack conflicting moves or act on a card that's mid-flight.
+  const [busyKeys, setBusyKeys] = useState<ReadonlySet<string>>(new Set());
+  const markBusy = useCallback((key: string, on: boolean) => {
+    setBusyKeys((prev) => {
+      if (on === prev.has(key)) return prev;
+      const next = new Set(prev);
+      if (on) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+  }, []);
+
   const setActiveRowAt = useCallback((col: number, row: number) => {
     setActiveRows((prev) => {
       const arr = prev.slice();
@@ -179,14 +200,26 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     if (filters.sprint) list = list.filter((i) => i.sprintName === filters.sprint);
     if (filters.label) list = list.filter((i) => i.labels.includes(filters.label!));
     if (filters.epic) list = list.filter((i) => i.epicKey === filters.epic);
-    if (filters.swimlane && conf?.swimlane)
-      list = list.filter((i) => swimlaneValue(i, conf.swimlane) === filters.swimlane);
     return list;
-  }, [issues, filters, conf]);
+  }, [issues, filters]);
   const columns = useMemo(
     () => (conf ? buildColumns(conf.columns, filteredIssues) : []),
     [conf, filteredIssues],
   );
+
+  // Grouped lanes for the swimlane view — same filtered issues, bucketed by
+  // the board's strategy. Only meaningful when `swimlanes` is present.
+  const lanes: Lane[] = useMemo(
+    () => (conf && swimlanes ? buildLanes(conf.columns, filteredIssues, swimlanes) : []),
+    [conf, swimlanes, filteredIssues],
+  );
+  const hasSwimlanes = !!swimlanes && swimlanes.strategy !== "none";
+
+  // The cursor's column, wherever the cursor currently lives — the flat
+  // board's `activeCol`, or the swimlane cursor's column in swim view. Every
+  // column-based action (transition ±, move, paging) reads this so it works
+  // in both views.
+  const effectiveCol = swimView ? swimCursor.col : activeCol;
 
   const filterOptions = useMemo(() => {
     const assignees = new Set<string>();
@@ -194,16 +227,12 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     const sprints = new Set<string>();
     const labels = new Set<string>();
     const epics = new Set<string>();
-    const swimlanes = new Set<string>();
     for (const i of issues) {
       assignees.add(i.assignee ?? "Unassigned");
       types.add(i.issueType);
       if (i.sprintName) sprints.add(i.sprintName);
       for (const l of i.labels) labels.add(l);
       if (i.epicKey) epics.add(i.epicKey);
-      if (conf?.swimlane && conf.swimlane !== "none" && conf.swimlane !== "jql") {
-        swimlanes.add(swimlaneValue(i, conf.swimlane));
-      }
     }
     const sortSet = (s: Set<string>) => Array.from(s).toSorted((a, b) => a.localeCompare(b));
     return {
@@ -216,9 +245,8 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       sprints: sortSet(sprints),
       labels: sortSet(labels),
       epics: sortSet(epics),
-      swimlanes: sortSet(swimlanes),
     };
-  }, [issues, conf]);
+  }, [issues]);
 
   const applyBoardData = useCallback((c: BoardConfig, is: Issue[]) => {
     setConf(c);
@@ -241,9 +269,24 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         getBoardConfig(cfg, board.id),
         getBoardIssues(cfg, board.id),
       ]);
+      // Filter-based boards (created from a saved filter, or spanning several
+      // projects) have no `location`, so the config endpoint gives no project
+      // key. Fall back to the prefix of the first issue key (PROJ-123 → PROJ)
+      // so project-scoped actions — create, quick-add, @-mention users — still
+      // work on single-project filter boards instead of hitting `.../undefined`.
+      if (!c.projectKey) {
+        const derived = is[0]?.key.split("-")[0];
+        if (derived) c.projectKey = derived;
+      }
       applyBoardData(c, is);
       hasLoadedOnce.current = true;
       void writeBoardCache(board.id, c, is);
+      // Swimlane layout comes from a separate (internal) endpoint and needs
+      // the issue id→key map to resolve custom-lane membership. Non-fatal:
+      // it self-degrades to strategy "none", so the flat board is unaffected
+      // if it fails.
+      const idToKey = new Map(is.map((i) => [i.id, i.key]));
+      setSwimlanes(await getBoardSwimlanes(cfg, board.id, idToKey));
     } catch (e) {
       const msg = errorMessage(e);
       if (hasLoadedOnce.current) flash(msg, "err");
@@ -278,19 +321,52 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   }, [columns, liveQuery]);
 
   const matchSet = useMemo(() => new Set(matches.map((m) => `${m.col}:${m.row}`)), [matches]);
+  // The swimlane grid highlights matches by issue key (its cells aren't the
+  // flat board's col:row). Same query, keyed differently.
+  const swimMatchSet = useMemo(() => {
+    if (!liveQuery.trim()) return new Set<string>();
+    const q = liveQuery.toLowerCase();
+    return new Set(
+      filteredIssues
+        .filter(
+          (i) =>
+            i.summary.toLowerCase().includes(q) ||
+            i.key.toLowerCase().includes(q) ||
+            (i.assignee ?? "").toLowerCase().includes(q),
+        )
+        .map((i) => i.key),
+    );
+  }, [filteredIssues, liveQuery]);
 
   // Without this clamp the footer reads "4/2" after matches shrink.
   useEffect(() => {
     if (matchIdx >= matches.length) setMatchIdx(0);
   }, [matches, matchIdx]);
 
+  // Move whichever cursor is live to a matched flat cell. In swim view we
+  // resolve the matched issue's key to its lane position (matches are indexed
+  // against the flat `columns`, but the swim cursor lives in `lanes`); if that
+  // issue sits in an off-board / dropped lane, we leave the cursor put.
+  const focusMatch = useCallback(
+    (m: CellRef) => {
+      if (swimView) {
+        const key = columns[m.col]?.issues[m.row]?.key;
+        const sc = key ? findCursor(lanes, key) : null;
+        if (sc) setSwimCursor(sc);
+        return;
+      }
+      setActiveCol(m.col);
+      setActiveRowAt(m.col, m.row);
+    },
+    [swimView, columns, lanes, setActiveRowAt],
+  );
+
   const jumpToFirstMatch = useCallback(() => {
     const first = matches[0];
     if (!first) return false;
-    setActiveCol(first.col);
-    setActiveRowAt(first.col, first.row);
+    focusMatch(first);
     return true;
-  }, [matches, setActiveRowAt]);
+  }, [matches, focusMatch]);
 
   const commitQuery = useCallback(
     (q: string) => {
@@ -310,11 +386,9 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       }
       const next = (((matchIdx + delta) % matches.length) + matches.length) % matches.length;
       setMatchIdx(next);
-      const target = matches[next]!;
-      setActiveCol(target.col);
-      setActiveRowAt(target.col, target.row);
+      focusMatch(matches[next]!);
     },
-    [matches, matchIdx, flash, query, setActiveRowAt],
+    [matches, matchIdx, flash, query, focusMatch],
   );
 
   // Layout math — columns beyond `maxColumns` require ←/→ paging.
@@ -327,15 +401,17 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   const visibleColCount = Math.min(maxColumns, columns.length);
   const colWindowStart = Math.max(
     0,
-    Math.min(columns.length - visibleColCount, activeCol - Math.floor(visibleColCount / 2)),
+    Math.min(columns.length - visibleColCount, effectiveCol - Math.floor(visibleColCount / 2)),
   );
   const colWindowEnd = colWindowStart + visibleColCount;
   const hasColsLeft = colWindowStart > 0;
   const hasColsRight = colWindowEnd < columns.length;
 
   /**
-   * Clamp each column's active row into bounds when columns shrink (e.g.
-   * toggling the assignee filter) so the cursor doesn't sit past the last card.
+   * Clamp each column's active row into bounds when a column's issue list
+   * shrinks (e.g. toggling the assignee filter) so the cursor doesn't sit
+   * past the last card. Column *count* never changes — buildColumns always
+   * maps every colDef — only the per-column issue lists grow and shrink.
    */
   useEffect(() => {
     if (columns.length === 0) return;
@@ -353,6 +429,24 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       return changed ? arr : prev;
     });
   }, [columns]);
+
+  /**
+   * Keep the swimlane cursor in bounds when lanes change under it (filter
+   * toggle, reload, or a card leaving a now-empty lane that gets dropped).
+   * Clamps lane → col → row in order; snapping to the nearest valid cell.
+   */
+  useEffect(() => {
+    if (!swimView || lanes.length === 0) return;
+    setSwimCursor((c) => {
+      const lane = Math.min(c.lane, lanes.length - 1);
+      const cols = lanes[lane]!.columns;
+      const col = Math.min(c.col, Math.max(0, cols.length - 1));
+      const rowMax = Math.max(0, (cols[col]?.issues.length ?? 0) - 1);
+      const row = Math.min(c.row, rowMax);
+      if (lane === c.lane && col === c.col && row === c.row) return c;
+      return { lane, col, row };
+    });
+  }, [lanes, swimView]);
 
   /**
    * Per-column scroll is derived at render from activeRow + a ref anchor.
@@ -373,10 +467,14 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   };
 
   const currentIssue: Issue | null = useMemo(() => {
+    if (swimView) {
+      const lane = lanes[swimCursor.lane];
+      return lane?.columns[swimCursor.col]?.issues[swimCursor.row] ?? null;
+    }
     const col = columns[activeCol];
     if (!col) return null;
     return col.issues[activeRows[activeCol] ?? 0] ?? null;
-  }, [columns, activeCol, activeRows]);
+  }, [swimView, lanes, swimCursor, columns, activeCol, activeRows]);
 
   const moving = useRef(false);
 
@@ -403,18 +501,26 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         });
         return;
       }
+      markBusy(issueKey, true);
       try {
         await transitionIssue(cfg, issueKey, transition.id, opts.fields);
         flash(`${issueKey} → ${transition.name}`, "ok");
-        if (opts.targetColIdx !== undefined) setActiveCol(opts.targetColIdx);
+        // Snap the destination column on both cursors — the pending-focus
+        // effect resolves the exact row/lane once the reload lands.
+        if (opts.targetColIdx !== undefined) {
+          setActiveCol(opts.targetColIdx);
+          setSwimCursor((c) => ({ ...c, col: opts.targetColIdx! }));
+        }
         pendingFocusKey.current = issueKey;
         await load();
       } catch (e) {
         pendingFocusKey.current = null;
         flash(errorMessage(e), "err");
+      } finally {
+        markBusy(issueKey, false);
       }
     },
-    [cfg, flash, load],
+    [cfg, flash, load, markBusy],
   );
 
   const moveToColumn = useCallback(
@@ -456,14 +562,23 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   );
 
   /**
-   * After a reload, snap activeRows to wherever the tracked card ended up.
-   * Only clear the marker once we actually find the card — pre-reload
-   * column changes (e.g. toggling the assignee filter mid-flight)
-   * shouldn't consume it.
+   * After a reload, snap the cursor to wherever the tracked card ended up —
+   * activeRows for the flat board, and the {lane,col,row} cursor for the
+   * swimlane view (a transition can move a card between lanes too). Only
+   * clear the marker once we actually find the card — pre-reload column
+   * changes (e.g. toggling a filter mid-flight) shouldn't consume it.
    */
   useEffect(() => {
     const key = pendingFocusKey.current;
     if (!key) return;
+    if (swimView) {
+      const sc = findCursor(lanes, key);
+      if (sc) {
+        setSwimCursor(sc);
+        pendingFocusKey.current = null;
+      }
+      return;
+    }
     for (let ci = 0; ci < columns.length; ci++) {
       const col = columns[ci]!;
       const ri = col.issues.findIndex((i) => i.key === key);
@@ -474,19 +589,19 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         return;
       }
     }
-  }, [columns, setActiveRowAt]);
+  }, [columns, lanes, swimView, setActiveRowAt]);
 
   const doTransition = useCallback(
     async (direction: 1 | -1) => {
       if (!conf) return;
-      const targetColIdx = activeCol + direction;
+      const targetColIdx = effectiveCol + direction;
       if (targetColIdx < 0 || targetColIdx >= conf.columns.length) {
         flash("no column in that direction", "info");
         return;
       }
       await moveToColumn(targetColIdx);
     },
-    [conf, activeCol, flash, moveToColumn],
+    [conf, effectiveCol, flash, moveToColumn],
   );
 
   const doEditSummary = useCallback(() => {
@@ -568,8 +683,12 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
 
   const doRerank = useCallback(
     async (direction: -1 | 1) => {
-      const col = columns[activeCol];
-      const row = activeRows[activeCol] ?? 0;
+      // Rerank relative to the visual neighbor in the same column. In swim
+      // view that's within the current lane's column; on the flat board it's
+      // the active column. Reordering is global rank, so the neighbor's key
+      // is all Jira needs.
+      const col = swimView ? lanes[swimCursor.lane]?.columns[swimCursor.col] : columns[activeCol];
+      const row = swimView ? swimCursor.row : (activeRows[activeCol] ?? 0);
       if (!col) return;
       const issue = col.issues[row];
       if (!issue) return;
@@ -579,19 +698,39 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         return;
       }
       const neighbor = col.issues[targetRow]!;
+      if (busyKeys.has(issue.key)) {
+        flash("issue is updating…", "info");
+        return;
+      }
+      markBusy(issue.key, true);
       try {
-        if (direction === -1) {
-          await rankIssueBefore(cfg, issue.key, neighbor.key);
-        } else {
-          await rankIssueAfter(cfg, issue.key, neighbor.key);
-        }
+        await rankIssue(
+          cfg,
+          issue.key,
+          direction === -1 ? { before: neighbor.key } : { after: neighbor.key },
+        );
         pendingFocusKey.current = issue.key;
+        flash(`${issue.key} reranked ${direction === -1 ? "up" : "down"}`, "ok");
         await load();
       } catch (e) {
         flash(errorMessage(e), "err");
+      } finally {
+        markBusy(issue.key, false);
       }
     },
-    [columns, activeCol, activeRows, cfg, flash, load],
+    [
+      swimView,
+      lanes,
+      swimCursor,
+      columns,
+      activeCol,
+      activeRows,
+      cfg,
+      flash,
+      load,
+      busyKeys,
+      markBusy,
+    ],
   );
 
   const openDetailForKey = useCallback(
@@ -692,11 +831,11 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         flash("no creatable issue types", "err");
         return;
       }
-      setModal({ kind: "quick-add", colIdx: activeCol, typeName: defaultType.name, value: "" });
+      setModal({ kind: "quick-add", colIdx: effectiveCol, typeName: defaultType.name, value: "" });
     } catch (e) {
       flash(errorMessage(e), "err");
     }
-  }, [conf, ensureMeta, activeCol, flash]);
+  }, [conf, ensureMeta, effectiveCol, flash]);
 
   const submitQuickAdd = useCallback(
     async (colIdx: number, typeName: string, title: string) => {
@@ -729,6 +868,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           }
         }
         setActiveCol(colIdx);
+        setSwimCursor((c) => ({ ...c, col: colIdx }));
         pendingFocusKey.current = created.key;
         flash(
           landed
@@ -768,6 +908,16 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     [columns.length],
   );
 
+  // Swimlane cursor movement — delegates the spill-across-lanes logic to the
+  // pure `moveCursor` in swimlanes.ts. dRow steps within/between lanes; dCol
+  // moves across columns, clamping the row into the new column.
+  const swimMove = useCallback(
+    (dRow: number, dCol: number) => {
+      setSwimCursor((c) => moveCursor(lanes, c, dRow, dCol));
+    },
+    [lanes],
+  );
+
   useInput(
     (input, key) => {
       // Global
@@ -775,22 +925,60 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       if (input === "q") return onExit();
       if (input === "?") return setModal({ kind: "help" });
 
-      // Navigation
-      if (key.leftArrow || input === "h") return nudgeCol(-1);
-      if (key.rightArrow || input === "l") return nudgeCol(1);
-      if (key.upArrow || input === "k") return nudgeRow(-1);
-      if (key.downArrow || input === "j") return nudgeRow(1);
-      if (input === "g") {
-        setActiveRowAt(activeCol, 0);
-        return;
+      // Navigation — swim view uses the lane cursor, flat board the columns.
+      if (swimView) {
+        if (key.leftArrow || input === "h") return swimMove(0, -1);
+        if (key.rightArrow || input === "l") return swimMove(0, 1);
+        if (key.upArrow || input === "k") return swimMove(-1, 0);
+        if (key.downArrow || input === "j") return swimMove(1, 0);
+        if (key.pageUp) return swimMove(-cardsVisible, 0);
+        if (key.pageDown) return swimMove(cardsVisible, 0);
+        // g/G fall through to the shared handlers below (no-op-safe in swim).
+      } else {
+        if (key.leftArrow || input === "h") return nudgeCol(-1);
+        if (key.rightArrow || input === "l") return nudgeCol(1);
+        if (key.upArrow || input === "k") return nudgeRow(-1);
+        if (key.downArrow || input === "j") return nudgeRow(1);
+        if (input === "g") {
+          setActiveRowAt(activeCol, 0);
+          return;
+        }
+        if (input === "G") {
+          const col = columns[activeCol];
+          if (col) setActiveRowAt(activeCol, Math.max(0, col.issues.length - 1));
+          return;
+        }
+        if (key.pageUp) return nudgeRow(-cardsVisible);
+        if (key.pageDown) return nudgeRow(cardsVisible);
       }
-      if (input === "G") {
-        const col = columns[activeCol];
-        if (col) setActiveRowAt(activeCol, Math.max(0, col.issues.length - 1));
-        return;
+
+      // g / G — jump to the first / last lane (swim) or column top/bottom
+      // (flat, handled above). In swim view they snap to the extreme lane,
+      // keeping the current column.
+      if (swimView && input === "g") return setSwimCursor((c) => ({ ...c, lane: 0, row: 0 }));
+      if (swimView && input === "G")
+        return setSwimCursor((c) => ({ ...c, lane: Math.max(0, lanes.length - 1), row: 0 }));
+
+      // Block mutating actions on a card that's mid-update (transition or
+      // rerank in flight). Read-only actions (view, yank, open, refresh) and
+      // navigation stay live so the user can look around while it settles.
+      if (currentIssue && busyKeys.has(currentIssue.key)) {
+        const mutating =
+          key.return ||
+          input === "e" ||
+          input === "E" ||
+          input === "m" ||
+          input === "[" ||
+          input === "]" ||
+          input === "<" ||
+          input === ">" ||
+          input === "t" ||
+          input === "i";
+        if (mutating) {
+          flash(`${currentIssue.key} is updating…`, "info");
+          return;
+        }
       }
-      if (key.pageUp) return nudgeRow(-cardsVisible);
-      if (key.pageDown) return nudgeRow(cardsVisible);
 
       // Actions on current card
       if (key.return) {
@@ -806,10 +994,16 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         setModal({ kind: "move-picker" });
         return;
       }
-      if (key.ctrl && input === ",") return void doRerank(-1);
-      if (key.ctrl && input === ".") return void doRerank(1);
-      if (input === "<" || input === ",") return void doTransition(-1);
-      if (input === ">" || input === ".") return void doTransition(1);
+      // Rerank uses [ / ] — plain brackets transmit reliably on every
+      // terminal. Ctrl+, / Ctrl+. used to do this, but most emulators can't
+      // send those and downgrade them to plain , / . — which were aliased to
+      // the transition below, so a "reorder" keystroke silently fired a
+      // destructive cross-column move. Transitions keep < / > (printable
+      // ASCII, always delivered); the , / . aliases are gone.
+      if (input === "[") return void doRerank(-1);
+      if (input === "]") return void doRerank(1);
+      if (input === "<") return void doTransition(-1);
+      if (input === ">") return void doTransition(1);
       if (input === "t") return void doFuzzyTransition();
       if (input === "i") return void doAssignToMe();
       if (input === "y") {
@@ -874,16 +1068,28 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         }
         return;
       }
+      // Swimlanes: toggle the grouped lane view. Only available when the
+      // board actually defines swimlanes (custom JQL lanes or a field
+      // strategy) — otherwise there's nothing to group by.
       if (input === "s") {
-        if (!conf || !conf.swimlane || conf.swimlane === "none" || conf.swimlane === "jql") {
+        if (!hasSwimlanes) {
           flash("no swimlanes configured on this board", "info");
           return;
         }
-        if (filterOptions.swimlanes.length === 0) {
-          flash("no swimlanes found", "info");
-          return;
-        }
-        setModal({ kind: "filter-swimlane", items: filterOptions.swimlanes });
+        setSwimView((v) => {
+          const next = !v;
+          if (next) {
+            // Entering swim view: seed the cursor on the current issue if it
+            // exists in a lane, else the first cell.
+            const seed = currentIssue ? findCursor(lanes, currentIssue.key) : null;
+            setSwimCursor(seed ?? { lane: 0, col: effectiveCol, row: 0 });
+            swimScrollRef.current = 0;
+          } else if (currentIssue) {
+            // Leaving swim view: carry the column back to the flat board.
+            setActiveCol(swimCursor.col);
+          }
+          return next;
+        });
         return;
       }
     },
@@ -1075,16 +1281,8 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         onCreateSubtask={(parentKey) => {
           closeModal();
           void (async () => {
-            if (!conf) return;
             try {
-              if (!metaCache.current) {
-                const [types, linkTypes] = await Promise.all([
-                  getIssueTypes(cfg, conf.projectKey),
-                  getIssueLinkTypes(cfg),
-                ]);
-                metaCache.current = { types: types.filter((t) => !t.subtask), linkTypes };
-              }
-              const { types, linkTypes } = metaCache.current;
+              const { types, linkTypes } = await ensureMeta();
               setModal({ kind: "create", types, linkTypes, parentKey });
             } catch (e) {
               flash(errorMessage(e), "err");
@@ -1193,8 +1391,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     modal.kind === "filter-type" ||
     modal.kind === "filter-sprint" ||
     modal.kind === "filter-label" ||
-    modal.kind === "filter-epic" ||
-    modal.kind === "filter-swimlane"
+    modal.kind === "filter-epic"
   ) {
     const spec: {
       key: keyof Filters;
@@ -1209,9 +1406,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
             ? { key: "sprint", label: "sprint", items: modal.sprints }
             : modal.kind === "filter-label"
               ? { key: "label", label: "label", items: modal.labels }
-              : modal.kind === "filter-swimlane"
-                ? { key: "swimlane", label: "swimlane", items: modal.items }
-                : { key: "epic", label: "epic", items: modal.epics };
+              : { key: "epic", label: "epic", items: modal.epics };
     return (
       <FilterPickerModal
         label={spec.label}
@@ -1227,9 +1422,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           closeModal();
           flash(`${spec.label} filter cleared`, "ok");
         }}
-        onCancel={() =>
-          setModal(modal.kind === "filter-swimlane" ? { kind: "none" } : { kind: "filter-menu" })
-        }
+        onCancel={() => setModal({ kind: "filter-menu" })}
       />
     );
   }
@@ -1306,37 +1499,71 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         visibleIssueCount={filteredIssues.length}
         totalIssueCount={issues.length}
         visiblePointSum={filteredIssues.reduce((a, i) => a + (i.storyPoints ?? 0), 0)}
-        colIndex={activeCol}
+        colIndex={effectiveCol}
         colCount={columns.length}
         filterCount={activeFilterCount(filters)}
+        {...(swimView ? { swimlaneLabel: swimlaneStrategyLabel(swimlanes?.strategy) } : {})}
         query={modal.kind === "search" ? "" : query}
         matches={matches.length}
         matchIdx={matchIdx}
       />
 
-      <Box flexDirection="row" height={columnHeight}>
-        <PagingArrow direction="left" active={hasColsLeft} />
-        <Box flexDirection="row" width={gridWidth}>
-          {visibleCols.map((col, vi) => {
-            const ci = colWindowStart + vi;
-            return (
-              <ColumnView
-                key={col.name + ci}
-                column={col}
-                width={colWidth}
-                marginRight={vi === visibleCols.length - 1 ? 0 : gap}
-                isActive={ci === activeCol}
-                activeRow={activeRows[ci] ?? 0}
-                scroll={scrollFor(ci, col.issues.length)}
-                cardsVisible={cardsVisible}
-                matchSet={matchSet}
-                colIdx={ci}
+      {swimView ? (
+        <Box flexDirection="column" height={columnHeight}>
+          <Box flexDirection="row">
+            <PagingArrow direction="left" active={hasColsLeft} />
+            <Box flexDirection="column" width={gridWidth}>
+              <SwimlaneHeader
+                columns={columns}
+                colWindowStart={colWindowStart}
+                visibleColCount={visibleColCount}
+                activeCol={swimCursor.col}
+                width={gridWidth}
               />
-            );
-          })}
+              <Box>
+                <Text color={theme.divider}>{"─".repeat(Math.max(0, gridWidth))}</Text>
+              </Box>
+              <SwimlaneGrid
+                lanes={lanes}
+                cursor={swimCursor}
+                colWindowStart={colWindowStart}
+                visibleColCount={visibleColCount}
+                width={gridWidth}
+                height={Math.max(3, columnHeight - 2)}
+                matchSet={swimMatchSet}
+                busyKeys={busyKeys}
+                scrollRef={swimScrollRef}
+              />
+            </Box>
+            <PagingArrow direction="right" active={hasColsRight} />
+          </Box>
         </Box>
-        <PagingArrow direction="right" active={hasColsRight} />
-      </Box>
+      ) : (
+        <Box flexDirection="row" height={columnHeight}>
+          <PagingArrow direction="left" active={hasColsLeft} />
+          <Box flexDirection="row" width={gridWidth}>
+            {visibleCols.map((col, vi) => {
+              const ci = colWindowStart + vi;
+              return (
+                <ColumnView
+                  key={col.name + ci}
+                  column={col}
+                  width={colWidth}
+                  marginRight={vi === visibleCols.length - 1 ? 0 : gap}
+                  isActive={ci === activeCol}
+                  activeRow={activeRows[ci] ?? 0}
+                  scroll={scrollFor(ci, col.issues.length)}
+                  cardsVisible={cardsVisible}
+                  matchSet={matchSet}
+                  busyKeys={busyKeys}
+                  colIdx={ci}
+                />
+              );
+            })}
+          </Box>
+          <PagingArrow direction="right" active={hasColsRight} />
+        </Box>
+      )}
 
       <Footer
         currentIssue={currentIssue}
@@ -1346,6 +1573,8 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         matches={matches.length}
         matchIdx={matchIdx}
         filterCount={activeFilterCount(filters)}
+        hasSwimlanes={hasSwimlanes}
+        swimActive={swimView}
         searchBuffer={searchBuffer}
         onSearchChange={setSearchBuffer}
         onSearchSubmit={(q) => {

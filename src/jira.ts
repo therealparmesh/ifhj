@@ -26,17 +26,49 @@ export type BoardColumn = {
   max?: number;
 };
 
-export type SwimlaneStrategy = "none" | "assignee" | "epic" | "issueType" | "sprint" | "jql";
+/**
+ * How a board buckets issues into horizontal swimlanes. `custom` lanes are
+ * JQL-defined and evaluated server-side (see `getBoardSwimlanes`); the field
+ * strategies are grouped client-side from issue fields we already fetch.
+ */
+export type SwimlaneStrategy =
+  | "none"
+  | "custom"
+  | "assignee"
+  | "epic"
+  | "issueType"
+  | "parentChild";
 
 export type BoardConfig = {
   name: string;
   projectKey: string;
   columns: BoardColumn[];
-  swimlane: SwimlaneStrategy;
+};
+
+/** One swimlane's identity (custom lanes only — field lanes are derived). */
+export type SwimlaneDef = { id: string; name: string };
+
+/**
+ * Swimlane layout for a board, sourced from the internal GreenHopper board
+ * model (the public Agile config endpoint doesn't expose swimlanes at all).
+ * For `custom` strategy the server evaluates each lane's JQL and hands back
+ * membership by issue id — we map those to issue keys in `laneByKey` and keep
+ * the server's lane order. Field strategies leave `lanes`/`laneByKey` empty
+ * and are grouped by `buildLanes` from issue fields instead.
+ */
+export type BoardSwimlanes = {
+  strategy: SwimlaneStrategy;
+  lanes: SwimlaneDef[];
+  laneByKey: Record<string, string>;
+  /** The catch-all lane's id, if any — where unmatched issues land. */
+  defaultLaneId?: string;
 };
 
 export type Issue = {
   key: string;
+  /** Numeric Jira id — needed to join against the GreenHopper swimlane
+   *  model, which reports custom-lane membership by id, not key. */
+  id: number;
   summary: string;
   description: string;
   statusId: string;
@@ -236,20 +268,85 @@ export async function getBoardConfig(cfg: JiraConfig, boardId: number): Promise<
     if (Number.isFinite(max) && max > 0) out.max = max;
     return out;
   });
-  const swimlaneField: string = data.subqueryConfig?.subqueries?.[0]?.field ?? "";
-  let swimlane: SwimlaneStrategy = "none";
-  if (swimlaneField === "assignee") swimlane = "assignee";
-  else if (swimlaneField === "epic" || swimlaneField.includes("Epic")) swimlane = "epic";
-  else if (swimlaneField === "issuetype") swimlane = "issueType";
-  else if (swimlaneField.includes("Sprint") || swimlaneField.includes("sprint"))
-    swimlane = "sprint";
-  else if (swimlaneField === "jql") swimlane = "jql";
   return {
     name: data.name,
+    // The configuration endpoint's `location` uses `key` (verified against
+    // live boards) — distinct from the board-list endpoint's `projectKey`.
     projectKey: data.location?.key,
     columns,
-    swimlane,
   };
+}
+
+/**
+ * Map GreenHopper's internal strategy string to our closed union. The public
+ * Agile API doesn't expose swimlanes, so this reads the same internal board
+ * model the web UI uses.
+ */
+function toSwimlaneStrategy(raw: unknown): SwimlaneStrategy {
+  switch (raw) {
+    case "custom":
+      return "custom";
+    case "assignee":
+      return "assignee";
+    case "epic":
+      return "epic";
+    case "issuetype":
+    case "issueType":
+      return "issueType";
+    case "parentChild":
+    case "issueChild":
+      return "parentChild";
+    default:
+      return "none";
+  }
+}
+
+/**
+ * Fetch a board's swimlane layout from the internal GreenHopper board model.
+ * For `custom` strategy the server has already evaluated each lane's JQL, so
+ * we get authoritative membership by numeric issue id and translate it to
+ * issue keys via `idToKey`. Field strategies (assignee/epic/issueType/
+ * parentChild) return no precomputed membership — the caller groups those
+ * from issue fields. On any failure we degrade to `{strategy: "none"}` so the
+ * board still renders flat.
+ */
+export async function getBoardSwimlanes(
+  cfg: JiraConfig,
+  boardId: number,
+  idToKey: Map<number, string>,
+): Promise<BoardSwimlanes> {
+  const none: BoardSwimlanes = { strategy: "none", lanes: [], laneByKey: {} };
+  let data: any;
+  try {
+    data = await jget(cfg, `/rest/greenhopper/1.0/xboard/work/allData.json?rapidViewId=${boardId}`);
+  } catch {
+    return none;
+  }
+  const sd = data?.swimlanesData ?? {};
+  const strategy = toSwimlaneStrategy(sd.swimlaneStrategy);
+  if (strategy === "none") return none;
+
+  if (strategy === "custom") {
+    const rawLanes: any[] = sd.customSwimlanesData?.swimlanes ?? [];
+    const lanes: SwimlaneDef[] = [];
+    const laneByKey: Record<string, string> = {};
+    let defaultLaneId: string | undefined;
+    for (const lane of rawLanes) {
+      const id = String(lane.id);
+      lanes.push({ id, name: String(lane.name ?? id) });
+      if (lane.defaultSwimlane) defaultLaneId = id;
+      for (const issueId of lane.issueIds ?? []) {
+        const key = idToKey.get(Number(issueId));
+        // First lane wins — the server orders lanes by priority, and an
+        // issue can technically match multiple JQL lanes.
+        if (key && laneByKey[key] === undefined) laneByKey[key] = id;
+      }
+    }
+    return { strategy, lanes, laneByKey, ...(defaultLaneId ? { defaultLaneId } : {}) };
+  }
+
+  // Field strategies: membership is derived client-side by buildLanes.
+  return { strategy, lanes: [], laneByKey: {} };
 }
 
 export async function getBoardIssues(cfg: JiraConfig, boardId: number): Promise<Issue[]> {
@@ -281,6 +378,7 @@ export async function getBoardIssues(cfg: JiraConfig, boardId: number): Promise<
       const activeSprint = sprints.find((s: any) => s?.state === "active") ?? sprints[0];
       const issue: Issue = {
         key: it.key,
+        id: Number(it.id),
         summary: f.summary ?? "",
         description,
         statusId: String(f.status?.id ?? ""),
@@ -340,22 +438,28 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
   // internal / deprecated customfield_* that show up in the main GET.
   // Empty on failure, which just means no custom fields render.
   const [data, commentsData, editMetaData] = await Promise.all([
-    jget(cfg, `/rest/api/3/issue/${issueKey}?fields=${fields}&expand=renderedFields`),
-    jget(cfg, `/rest/api/3/issue/${issueKey}/comment?orderBy=created&maxResults=100`),
+    jget(cfg, `/rest/api/3/issue/${issueKey}?fields=${fields}`),
+    // Newest-first + no pagination: on an issue with >100 comments we want
+    // the most recent 100 to survive the cap, not the oldest. We reverse
+    // below so the display stays chronological (oldest → newest).
+    jget(cfg, `/rest/api/3/issue/${issueKey}/comment?orderBy=-created&maxResults=100`),
     jget(cfg, `/rest/api/3/issue/${issueKey}/editmeta`).catch(() => ({ fields: {} })),
   ]);
   const f = data.fields ?? {};
   const descRaw = f.description;
   const description = typeof descRaw === "string" ? descRaw : adfToText(descRaw).trim();
-  const comments: Comment[] = (commentsData.comments ?? []).map((c: any) => ({
-    id: String(c.id),
-    author: c.author?.displayName ?? "unknown",
-    authorAccountId: c.author?.accountId ?? "",
-    body: typeof c.body === "string" ? c.body : adfToText(c.body).trim(),
-    created: c.created,
-  }));
+  const comments: Comment[] = (commentsData.comments ?? [])
+    .map((c: any) => ({
+      id: String(c.id),
+      author: c.author?.displayName ?? "unknown",
+      authorAccountId: c.author?.accountId ?? "",
+      body: typeof c.body === "string" ? c.body : adfToText(c.body).trim(),
+      created: c.created,
+    }))
+    .toReversed();
   const detail: IssueDetail = {
     key: data.key,
+    id: Number(data.id),
     summary: f.summary ?? "",
     description,
     statusId: String(f.status?.id ?? ""),
@@ -402,11 +506,11 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
       : [],
     comments,
     watching: f.watches?.isWatching ?? undefined,
-    // Walk the issue's own `fields` response in its natural key order —
-    // on Atlassian Cloud this matches the project's configured view
-    // screen ordering, which is what users see in the web UI. Filter
-    // to custom-field ids that editmeta acknowledged (keeps the noise
-    // out: non-editable internals, deprecated remnants, etc.).
+    // Custom fields are sourced from editmeta (not the raw `fields`
+    // object): editmeta lists exactly the customfield_* ids that are
+    // part of this project + issue type, which filters out the noise the
+    // main GET carries (non-editable internals, deprecated remnants). They
+    // render in editmeta's key order.
     rawFields: f,
     ...(() => {
       const metaFields = editMetaData?.fields ?? {};
@@ -612,10 +716,7 @@ export type IssueSearchResult = {
 
 /**
  * Search issues across the project — matches on summary or key, up to limit.
- *
- * Uses POST /rest/api/3/search/jql (Atlassian's current endpoint). The older
- * GET /rest/api/3/search returns empty arrays on newer tenants where it's
- * been throttled or partially retired.
+ * Builds the JQL, then defers to `searchByJql` for the actual POST + parse.
  */
 export async function searchIssues(
   cfg: JiraConfig,
@@ -633,17 +734,7 @@ export async function searchIssues(
       : ` AND summary ~ "${q}*"`
     : "";
   const jql = `project = "${projectKey}"${match} ORDER BY updated DESC`;
-  const res = await jf(cfg, `/rest/api/3/search/jql`, {
-    method: "POST",
-    body: JSON.stringify({ jql, fields: ["summary", "issuetype"], maxResults: limit }),
-  });
-  if (!res.ok) throw new Error(`search ${res.status}: ${await res.text()}`);
-  const data = (await res.json()) as any;
-  return (data.issues ?? []).map((i: any) => ({
-    key: i.key,
-    summary: i.fields?.summary ?? "",
-    issueType: i.fields?.issuetype?.name ?? "",
-  }));
+  return searchByJql(cfg, jql, limit);
 }
 
 /**
@@ -760,26 +851,18 @@ export async function searchByJql(
   }));
 }
 
-export async function rankIssueBefore(
+export async function rankIssue(
   cfg: JiraConfig,
   issueKey: string,
-  beforeKey: string,
+  target: { before: string } | { after: string },
 ): Promise<void> {
+  const body =
+    "before" in target
+      ? { issues: [issueKey], rankBeforeIssue: target.before }
+      : { issues: [issueKey], rankAfterIssue: target.after };
   const res = await jf(cfg, `/rest/agile/1.0/issue/rank`, {
     method: "PUT",
-    body: JSON.stringify({ issues: [issueKey], rankBeforeIssue: beforeKey }),
-  });
-  if (!res.ok) throw new Error(`rank ${res.status}: ${await res.text()}`);
-}
-
-export async function rankIssueAfter(
-  cfg: JiraConfig,
-  issueKey: string,
-  afterKey: string,
-): Promise<void> {
-  const res = await jf(cfg, `/rest/agile/1.0/issue/rank`, {
-    method: "PUT",
-    body: JSON.stringify({ issues: [issueKey], rankAfterIssue: afterKey }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`rank ${res.status}: ${await res.text()}`);
 }
