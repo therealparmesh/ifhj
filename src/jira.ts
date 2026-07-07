@@ -413,6 +413,11 @@ export async function getBoardIssues(cfg: JiraConfig, boardId: number): Promise<
     "parent",
   ].join(",");
   const all: Issue[] = [];
+  // Dedupe by key across pages: a card created or reordered mid-fetch shifts
+  // the page window and can re-emit a boundary issue, which would collide as a
+  // duplicate React key in the grid. Same guard listBoards uses. First
+  // occurrence wins (keeps rank order).
+  const seen = new Set<string>();
   let startAt = 0;
   while (true) {
     const data = await jget(
@@ -420,6 +425,8 @@ export async function getBoardIssues(cfg: JiraConfig, boardId: number): Promise<
       `/rest/agile/1.0/board/${boardId}/issue?startAt=${startAt}&maxResults=100&fields=${fields}&jql=${encodeURIComponent("ORDER BY Rank ASC")}`,
     );
     for (const it of data.issues ?? []) {
+      if (seen.has(it.key)) continue;
+      seen.add(it.key);
       const f = it.fields ?? {};
       const descRaw = f.description;
       const description = typeof descRaw === "string" ? descRaw : adfToText(descRaw).trim();
