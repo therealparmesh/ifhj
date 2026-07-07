@@ -756,6 +756,27 @@ export async function searchIssues(
 }
 
 /**
+ * Global issue search — every project the user can see, matched on summary or
+ * key. Same shape as `searchIssues` but with no project filter, for the
+ * quick-open finder. `query` must be non-empty (a project-less "everything"
+ * query would be unbounded); callers gate on that.
+ */
+export async function searchAllIssues(
+  cfg: JiraConfig,
+  query: string,
+  limit = 25,
+): Promise<IssueSearchResult[]> {
+  // Strip quotes / backslashes so stray input can't break out of the JQL string.
+  const q = query.trim().replaceAll(/["\\]/g, "");
+  if (!q) return [];
+  const looksLikeKey = /^[A-Za-z][A-Za-z0-9]*-\d+$/.test(q);
+  const match = looksLikeKey
+    ? `(summary ~ "${q}*" OR issuekey = "${q.toUpperCase()}")`
+    : `summary ~ "${q}*"`;
+  return searchByJql(cfg, `${match} ORDER BY updated DESC`, limit);
+}
+
+/**
  * Link two issues. `direction` picks which side of the link-type the new
  * issue sits on — for "blocks" (outward) / "is blocked by" (inward),
  * outwardIssue blocks inwardIssue.

@@ -88,28 +88,36 @@ export function Footer({
           </Box>
         </Box>
       ) : (
+        // Hints are ordered navigation → current-card actions → board-wide →
+        // global/meta, and each conditional group only shows when its keys are
+        // actually live, so the bar never advertises a no-op.
         <Box flexWrap="wrap">
           <Hint k="↑↓←→/hjkl" label="nav" />
-          <Hint k="⏎" label="actions" />
-          <Hint k="v" label="view" />
-          <Hint k="t" label="transition" />
-          <Hint k="< >" label="± col" />
-          <Hint k="[ ]" label="rank" />
-          <Hint k="m" label="move" />
-          <Hint k="i" label="assign me" />
-          <Hint k="y" label="yank" />
+          {currentIssue ? (
+            <>
+              <Hint k="⏎" label="actions" />
+              <Hint k="v" label="view" />
+              <Hint k="t" label="transition" />
+              <Hint k="< >" label="± col" />
+              <Hint k="[ ]" label="rank" />
+              <Hint k="m" label="move" />
+              <Hint k="i" label="assign me" />
+              <Hint k="y" label="yank" />
+            </>
+          ) : null}
           <Hint k="c" label="create" />
+          <Hint k="a" label="quick add" />
           <Hint k="/" label="search" />
-          <Hint k="f" label="filter" />
-          {hasSwimlanes ? <Hint k="s" label={swimActive ? "flat view" : "swimlanes"} /> : null}
           {query ? (
             <Hint
               k="n N"
               label={matches === 0 ? "no matches" : `match ${matchIdx + 1}/${matches}`}
             />
           ) : null}
+          <Hint k="f" label="filter" />
           {filterCount > 0 ? <Hint k="F" label="clear filters" /> : null}
-          <Hint k="R" label="recents" />
+          {hasSwimlanes ? <Hint k="s" label={swimActive ? "flat view" : "swimlanes"} /> : null}
+          <Hint k="R" label="open" />
           <Hint k="r" label="refresh" />
           <Hint k="?" label="help" />
           <Hint k="q" label="quit" />

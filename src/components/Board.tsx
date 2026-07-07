@@ -38,15 +38,7 @@ import {
   moveCursor,
   snapToCard,
 } from "../swimlanes";
-import {
-  clamp,
-  copyToClipboard,
-  errorMessage,
-  openInBrowser,
-  stickyScroll,
-  theme,
-  truncate,
-} from "../ui";
+import { clamp, copyToClipboard, errorMessage, openInBrowser, stickyScroll, theme } from "../ui";
 import { BoardHeader } from "./BoardHeader";
 import { CreateWizard } from "./CreateWizard";
 import { FilterPicker } from "./FilterPicker";
@@ -60,6 +52,7 @@ import { ListPicker } from "./ListPicker";
 import { NvimBanner } from "./NvimBanner";
 import { ProgressBar } from "./ProgressBar";
 import { QuickAddModal } from "./QuickAddModal";
+import { type RecentIssue, QuickOpen } from "./QuickOpen";
 import { SwimlaneGrid } from "./SwimlaneGrid";
 import { SwimlaneHeader } from "./SwimlaneHeader";
 import { TitleEditModal } from "./TitleEditModal";
@@ -94,8 +87,8 @@ type Modal =
   | { kind: "detail"; issueKey: string }
   | { kind: "title-edit"; issueKey: string; current: string }
   | { kind: "nvim" }
-  | { kind: "jql" }
-  | { kind: "recents" };
+  | { kind: "quick-open" }
+  | { kind: "jql" };
 
 type Filters = {
   assignee: string | null;
@@ -181,7 +174,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   const hasLoadedOnce = useRef(false);
   // After a transition, follow the moved card to its new column on reload.
   const pendingFocusKey = useRef<string | null>(null);
-  const [recents, setRecents] = useState<{ key: string; summary: string }[]>([]);
+  const [recents, setRecents] = useState<RecentIssue[]>([]);
 
   // Keys of issues with a board-repositioning mutation in flight (a transition
   // or rerank POST + the reload that follows). Such cards render with a
@@ -1073,12 +1066,9 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       if (input === "n") return jumpToMatch(1);
       if (input === "N") return jumpToMatch(-1);
 
-      // Recents
-      if (input === "R") {
-        if (recents.length === 0) return flash("no recent issues", "info");
-        setModal({ kind: "recents" });
-        return;
-      }
+      // Quick-open finder: opens on recently-visited issues; typing searches
+      // every project globally.
+      if (input === "R") return setModal({ kind: "quick-open" });
 
       // JQL
       if (input === "J") {
@@ -1448,14 +1438,11 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       />
     );
   }
-  if (modal.kind === "recents") {
+  if (modal.kind === "quick-open") {
     return (
-      <FilterPicker
-        title="recent issues"
-        items={recents.map((r) => ({
-          id: r.key,
-          label: `${r.key}  ${truncate(r.summary, 60)}`,
-        }))}
+      <QuickOpen
+        cfg={cfg}
+        recents={recents}
         onPick={(key) => {
           closeModal();
           openDetailForKey(key);

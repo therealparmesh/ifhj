@@ -24,7 +24,7 @@ const BOARD_BINDINGS: { keys: string; desc: string }[] = [
   { keys: "n / N", desc: "next / prev match" },
   { keys: "f / F", desc: "filter menu / clear all filters" },
   { keys: "s", desc: "toggle swimlane view (grouped lanes)" },
-  { keys: "R", desc: "recent issues" },
+  { keys: "R", desc: "quick open — recents, or type to search all issues" },
   { keys: "J", desc: "JQL query view" },
   { keys: "r", desc: "refresh" },
   { keys: "q", desc: "back to board picker" },
