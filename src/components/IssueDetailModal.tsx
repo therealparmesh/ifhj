@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { JiraConfig } from "../config";
 import { coerceFieldValue } from "../customFields";
 import { editInNeovim } from "../editor";
-import { useDimensions } from "../hooks";
+import { useDimensions, useLoading } from "../hooks";
 import {
   type Comment,
   type CustomField,
@@ -40,6 +40,7 @@ import { Hint } from "./Hint";
 import { formatShortDate, renderDetailLines } from "./IssueDetailLines";
 import { InlineFieldInput } from "./IssueDetailSide";
 import { ListPicker } from "./ListPicker";
+import { ProgressBar } from "./ProgressBar";
 import { ToastStack, useToasts } from "./Toasts";
 
 type Pane = "body" | "fields";
@@ -134,6 +135,9 @@ export function IssueDetailModal({
   const [detail, setDetail] = useState<IssueDetail | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const { toasts, flash: showFlash } = useToasts();
+  // Progress line for background detail (re)loads — the `r` refresh and the
+  // re-fetch after a field save, which otherwise gave no signal.
+  const { busy, track } = useLoading();
 
   const [pane, setPane] = useState<Pane>("body");
   const [bodyScroll, setBodyScroll] = useState(0);
@@ -168,13 +172,13 @@ export function IssueDetailModal({
 
   const fetchDetail = useCallback(async () => {
     try {
-      const d = await getIssueDetail(cfg, issueKey);
+      const d = await track(getIssueDetail(cfg, issueKey));
       setDetail(d);
       setLoadError(null);
     } catch (e) {
       setLoadError(errorMessage(e));
     }
-  }, [cfg, issueKey]);
+  }, [cfg, issueKey, track]);
 
   useEffect(() => {
     void fetchDetail();
@@ -753,8 +757,14 @@ export function IssueDetailModal({
           {truncate(detail.summary, innerWidth - 4)}
         </Text>
       </Box>
+      {/* The header divider doubles as the background-load progress line —
+          same row, so it animates during a refresh without shifting layout. */}
       <Box paddingX={1}>
-        <Text color={theme.divider}>{"─".repeat(Math.max(0, innerWidth))}</Text>
+        {busy ? (
+          <ProgressBar width={Math.max(1, innerWidth)} active />
+        ) : (
+          <Text color={theme.divider}>{"─".repeat(Math.max(0, innerWidth))}</Text>
+        )}
       </Box>
 
       {/* Body: main + side */}

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { readBoardCache, writeBoardCache } from "../cache";
 import type { JiraConfig } from "../config";
 import { editInNeovim } from "../editor";
-import { useDimensions } from "../hooks";
+import { useDimensions, useLoading } from "../hooks";
 import {
   type BoardConfig,
   type BoardSwimlanes,
@@ -48,6 +48,7 @@ import { IssueDetailModal } from "./IssueDetailModal";
 import { JqlView } from "./JqlView";
 import { ColumnView, PagingArrow } from "./Kanban";
 import { ListPicker } from "./ListPicker";
+import { ProgressBar } from "./ProgressBar";
 import { QuickAddModal } from "./QuickAddModal";
 import { SwimlaneGrid } from "./SwimlaneGrid";
 import { SwimlaneHeader } from "./SwimlaneHeader";
@@ -151,6 +152,10 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
 
   // UI state
   const { toasts, flash } = useToasts();
+  // Background-work indicator. `track` wraps any async load so the thin
+  // progress line under the header animates while it's in flight — reloads,
+  // the swimlane fetch, and one-off actions that don't own a modal spinner.
+  const { busy, track } = useLoading();
   const [query, setQuery] = useState("");
   const [matchIdx, setMatchIdx] = useState(0);
   const [modal, setModal] = useState<Modal>({ kind: "none" });
@@ -265,10 +270,9 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       }
     }
     try {
-      const [c, is] = await Promise.all([
-        getBoardConfig(cfg, board.id),
-        getBoardIssues(cfg, board.id),
-      ]);
+      const [c, is] = await track(
+        Promise.all([getBoardConfig(cfg, board.id), getBoardIssues(cfg, board.id)]),
+      );
       // Filter-based boards (created from a saved filter, or spanning several
       // projects) have no `location`, so the config endpoint gives no project
       // key. Fall back to the prefix of the first issue key (PROJ-123 → PROJ)
@@ -284,15 +288,16 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       // Swimlane layout comes from a separate (internal) endpoint and needs
       // the issue id→key map to resolve custom-lane membership. Non-fatal:
       // it self-degrades to strategy "none", so the flat board is unaffected
-      // if it fails.
+      // if it fails. Tracked separately so the progress line stays lit through
+      // this slower second fetch.
       const idToKey = new Map(is.map((i) => [i.id, i.key]));
-      setSwimlanes(await getBoardSwimlanes(cfg, board.id, idToKey));
+      setSwimlanes(await track(getBoardSwimlanes(cfg, board.id, idToKey)));
     } catch (e) {
       const msg = errorMessage(e);
       if (hasLoadedOnce.current) flash(msg, "err");
       else setLoadError(msg);
     }
-  }, [cfg, board.id, flash, applyBoardData]);
+  }, [cfg, board.id, flash, applyBoardData, track]);
 
   useEffect(() => {
     void load();
@@ -391,9 +396,11 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     [matches, matchIdx, flash, query, focusMatch],
   );
 
-  // Layout math — columns beyond `maxColumns` require ←/→ paging.
+  // Layout math — columns beyond `maxColumns` require ←/→ paging. The `-3`
+  // covers the header row, the progress-line row, and one for the height base;
+  // the footer takes its own rows.
   const footerRows = modal.kind === "search" ? 5 : 3;
-  const columnHeight = Math.max(6, termRows - 2 - footerRows);
+  const columnHeight = Math.max(6, termRows - 3 - footerRows);
   const columnInnerHeight = columnHeight - 2; // minus border top/bottom
   const perCardLines = 5; // card = 3 content + 1 spacer + 1 (border-ish) handled via marginBottom
   const cardsVisible = Math.max(1, Math.floor(columnInnerHeight / perCardLines));
@@ -655,13 +662,13 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       return;
     }
     try {
-      await assignIssueToMe(cfg, issue.key);
+      await track(assignIssueToMe(cfg, issue.key));
       flash(`${issue.key} assigned to you`, "ok");
       await load();
     } catch (e) {
       flash(errorMessage(e), "err");
     }
-  }, [currentIssue, cfg, flash, load]);
+  }, [currentIssue, cfg, flash, load, track]);
 
   const doFuzzyTransition = useCallback(async () => {
     const issue = currentIssue;
@@ -670,7 +677,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       return;
     }
     try {
-      const trs = await getTransitions(cfg, issue.key);
+      const trs = await track(getTransitions(cfg, issue.key));
       if (trs.length === 0) {
         flash("no transitions available", "info");
         return;
@@ -679,7 +686,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     } catch (e) {
       flash(errorMessage(e), "err");
     }
-  }, [currentIssue, cfg, flash]);
+  }, [currentIssue, cfg, flash, track]);
 
   const doRerank = useCallback(
     async (direction: -1 | 1) => {
@@ -793,14 +800,13 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   }> => {
     if (!conf) throw new Error("board config not loaded");
     if (!metaCache.current) {
-      const [types, linkTypes] = await Promise.all([
-        getIssueTypes(cfg, conf.projectKey),
-        getIssueLinkTypes(cfg),
-      ]);
+      const [types, linkTypes] = await track(
+        Promise.all([getIssueTypes(cfg, conf.projectKey), getIssueLinkTypes(cfg)]),
+      );
       metaCache.current = { types: types.filter((t) => !t.subtask), linkTypes };
     }
     return metaCache.current;
-  }, [cfg, conf]);
+  }, [cfg, conf, track]);
 
   const startCreate = useCallback(async () => {
     if (!conf) return;
@@ -1507,6 +1513,10 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         matches={matches.length}
         matchIdx={matchIdx}
       />
+
+      <Box paddingX={1}>
+        <ProgressBar width={Math.max(1, termCols - 2)} active={busy} />
+      </Box>
 
       {swimView ? (
         <Box flexDirection="column" height={columnHeight}>
