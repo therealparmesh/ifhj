@@ -4,12 +4,53 @@ import { type CustomField, normalizeCustomField } from "./customFields";
 export type { CustomField } from "./customFields";
 
 /**
- * Jira Cloud's default custom-field IDs. Tenants can remap these, but the
- * defaults cover the vast majority.
+ * Jira Cloud's default custom-field IDs — the fallback when field discovery
+ * fails or a tenant exposes no matching field. Tenants can remap these, so we
+ * prefer to *discover* the real ids (see `resolveFieldIds`); these defaults
+ * cover the vast majority and keep the app working if `/field` is unreachable.
  */
-const CF_EPIC_LINK = "customfield_10014";
-const CF_SPRINT = "customfield_10020";
-const CF_STORY_POINTS = "customfield_10016";
+const DEFAULT_FIELD_IDS: FieldIds = {
+  epicLink: "customfield_10014",
+  sprint: "customfield_10020",
+  storyPoints: "customfield_10016",
+};
+
+/** The three agile fields whose ids vary by tenant, resolved per server. */
+type FieldIds = { epicLink: string; sprint: string; storyPoints: string };
+
+/**
+ * Resolved field ids are stable for the life of a server, so cache them per
+ * `cfg.server` — one `/field` fetch covers every board and issue this run.
+ */
+const fieldIdCache = new Map<string, FieldIds>();
+
+/**
+ * Discover the epic-link, sprint, and story-points field ids for this tenant.
+ * The numeric `customfield_NNNNN` differs per instance, but Jira's `schema.custom`
+ * plugin identifier is invariant — so we match on that. Story points has no
+ * single stable key on classic projects (it's a generic float), so we match
+ * the team-managed `jsw-story-points` and otherwise keep the default. Any
+ * failure falls back wholesale to `DEFAULT_FIELD_IDS`; nothing here is fatal.
+ */
+async function resolveFieldIds(cfg: JiraConfig): Promise<FieldIds> {
+  const cached = fieldIdCache.get(cfg.server);
+  if (cached) return cached;
+  let ids: FieldIds = { ...DEFAULT_FIELD_IDS };
+  try {
+    const fields: any[] = await jget(cfg, `/rest/api/3/field`);
+    const byCustom = (key: string) =>
+      fields.find((f) => (f.schema?.custom ?? "").endsWith(key))?.id;
+    ids = {
+      epicLink: byCustom("gh-epic-link") ?? DEFAULT_FIELD_IDS.epicLink,
+      sprint: byCustom("gh-sprint") ?? DEFAULT_FIELD_IDS.sprint,
+      storyPoints: byCustom("jsw-story-points") ?? DEFAULT_FIELD_IDS.storyPoints,
+    };
+  } catch {
+    // `/field` unreachable or malformed — the defaults still work on most tenants.
+  }
+  fieldIdCache.set(cfg.server, ids);
+  return ids;
+}
 
 export type Board = {
   id: number;
@@ -350,6 +391,7 @@ export async function getBoardSwimlanes(
 }
 
 export async function getBoardIssues(cfg: JiraConfig, boardId: number): Promise<Issue[]> {
+  const cf = await resolveFieldIds(cfg);
   const fields = [
     "summary",
     "status",
@@ -358,9 +400,9 @@ export async function getBoardIssues(cfg: JiraConfig, boardId: number): Promise<
     "priority",
     "description",
     "labels",
-    CF_EPIC_LINK,
-    CF_SPRINT,
-    CF_STORY_POINTS,
+    cf.epicLink,
+    cf.sprint,
+    cf.storyPoints,
     "parent",
   ].join(",");
   const all: Issue[] = [];
@@ -374,7 +416,7 @@ export async function getBoardIssues(cfg: JiraConfig, boardId: number): Promise<
       const f = it.fields ?? {};
       const descRaw = f.description;
       const description = typeof descRaw === "string" ? descRaw : adfToText(descRaw).trim();
-      const sprints = Array.isArray(f[CF_SPRINT]) ? f[CF_SPRINT] : [];
+      const sprints = Array.isArray(f[cf.sprint]) ? f[cf.sprint] : [];
       const activeSprint = sprints.find((s: any) => s?.state === "active") ?? sprints[0];
       const issue: Issue = {
         key: it.key,
@@ -389,8 +431,8 @@ export async function getBoardIssues(cfg: JiraConfig, boardId: number): Promise<
       if (f.assignee?.displayName) issue.assignee = f.assignee.displayName;
       if (f.priority?.name) issue.priority = f.priority.name;
       if (activeSprint?.name) issue.sprintName = activeSprint.name;
-      if (typeof f[CF_STORY_POINTS] === "number") issue.storyPoints = f[CF_STORY_POINTS];
-      const epic = f[CF_EPIC_LINK] || f.parent?.key;
+      if (typeof f[cf.storyPoints] === "number") issue.storyPoints = f[cf.storyPoints];
+      const epic = f[cf.epicLink] || f.parent?.key;
       if (epic) issue.epicKey = epic;
       all.push(issue);
     }
@@ -403,36 +445,11 @@ export async function getBoardIssues(cfg: JiraConfig, boardId: number): Promise<
 }
 
 export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise<IssueDetail> {
-  const fields = [
-    "summary",
-    "status",
-    "issuetype",
-    "assignee",
-    "reporter",
-    "priority",
-    "description",
-    "labels",
-    "components",
-    "fixVersions",
-    "duedate",
-    "created",
-    "updated",
-    CF_EPIC_LINK,
-    CF_SPRINT,
-    CF_STORY_POINTS,
-    "parent",
-    "subtasks",
-    "issuelinks",
-    "watches",
-    // `*all` pulls every field — including custom ones — which we later
-    // narrow to customfield_* via editmeta. Exclude the big/noisy system
-    // fields we already fetch via their dedicated endpoints so the
-    // payload stays lean.
-    "*all",
-    "-attachment",
-    "-comment",
-    "-worklog",
-  ].join(",");
+  const cf = await resolveFieldIds(cfg);
+  // `*all` already pulls every field (including the agile custom fields we
+  // read below via `cf`), so we don't enumerate them here — we just trim the
+  // big/noisy system fields fetched through their own endpoints.
+  const fields = ["*all", "-attachment", "-comment", "-worklog"].join(",");
   // Editmeta tells us which custom fields Jira considers part of this
   // project + issue type — we use it as a filter so we don't surface
   // internal / deprecated customfield_* that show up in the main GET.
@@ -527,10 +544,10 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
   };
   if (f.assignee?.displayName) detail.assignee = f.assignee.displayName;
   if (f.priority?.name) detail.priority = f.priority.name;
-  const epic = f[CF_EPIC_LINK] || f.parent?.key;
+  const epic = f[cf.epicLink] || f.parent?.key;
   if (epic) detail.epicKey = epic;
   if (f.reporter?.displayName) detail.reporter = f.reporter.displayName;
-  if (typeof f[CF_STORY_POINTS] === "number") detail.storyPoints = f[CF_STORY_POINTS];
+  if (typeof f[cf.storyPoints] === "number") detail.storyPoints = f[cf.storyPoints];
   if (f.duedate) detail.dueDate = f.duedate;
   if (f.parent?.key) detail.parentKey = f.parent.key;
   return detail;
