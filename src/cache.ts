@@ -9,11 +9,9 @@ type BoardCache = {
   boardId: number;
   config: BoardConfig;
   issues: Issue[];
-  ts: number;
 };
 
 const CACHE_DIR = join(homedir(), ".cache", "ifhj");
-const MAX_AGE_MS = 10 * 60 * 1000;
 
 /**
  * Board ids are small integers that collide across tenants, so the cache key
@@ -39,8 +37,12 @@ export async function readBoardCache(
     const f = Bun.file(cachePath(cfg.server, boardId));
     if (!(await f.exists())) return null;
     const data: BoardCache = await f.json();
+    // No age check — the cache is for instant first paint, not correctness.
+    // The caller always refreshes from the network in the background and swaps
+    // fresh data in, so a stale cache only shows for the moment that fetch
+    // takes. Discarding an old cache just to show a blank spinner defeats the
+    // whole point. Server/board identity is still verified.
     if (data.server !== cfg.server || data.boardId !== boardId) return null;
-    if (Date.now() - data.ts > MAX_AGE_MS) return null;
     return { config: data.config, issues: data.issues };
   } catch {
     return null;
@@ -56,7 +58,7 @@ export async function writeBoardCache(
   try {
     const { mkdirSync } = await import("node:fs");
     mkdirSync(CACHE_DIR, { recursive: true });
-    const data: BoardCache = { server: cfg.server, boardId, config, issues, ts: Date.now() };
+    const data: BoardCache = { server: cfg.server, boardId, config, issues };
     await Bun.write(cachePath(cfg.server, boardId), JSON.stringify(data));
   } catch {}
 }

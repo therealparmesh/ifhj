@@ -177,7 +177,7 @@ Each column header shows the card count, the sum of story points when non-zero, 
 
 ### Caching
 
-Board state is cached at `~/.cache/ifhj/` for instant startup. Stale after 10 minutes. Fresh data loads in the background and replaces the cache.
+Board state is cached at `~/.cache/ifhj/` and painted instantly on open, whatever its age. Fresh data always loads in the background and replaces it within a second or two, so you never wait on a blank spinner for a board you've opened before.
 
 ## Development
 
