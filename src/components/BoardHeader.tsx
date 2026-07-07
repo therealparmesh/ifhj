@@ -1,6 +1,6 @@
 import { Box, Text } from "ink";
 
-import { theme } from "../ui";
+import { formatPoints, theme } from "../ui";
 
 /**
  * Top-of-screen status line: board name, project, issue count, active
@@ -36,9 +36,7 @@ export function BoardHeader({
   matches: number;
   matchIdx: number;
 }) {
-  const pointText = Number.isInteger(visiblePointSum)
-    ? String(visiblePointSum)
-    : visiblePointSum.toFixed(1);
+  const pointText = formatPoints(visiblePointSum);
   return (
     <Box paddingX={1} justifyContent="space-between">
       <Box>

@@ -16,6 +16,7 @@ import {
 import { errorMessage, fg, theme, truncate } from "../ui";
 import { FilterPicker } from "./FilterPicker";
 import { Hint } from "./Hint";
+import { NvimBanner } from "./NvimBanner";
 
 /**
  * Parent linking (epic child, sub-task) uses the `parent` field at create
@@ -126,6 +127,18 @@ export function CreateWizard({
   const [searchLoading, setSearchLoading] = useState(false);
   const searchSeq = useRef(0);
 
+  // Set once the wizard is abandoned (esc during submit). We can't un-POST an
+  // in-flight createIssue, but we can stop its resolution from calling back
+  // into the parent — otherwise "esc to abandon" would still flash success and
+  // pop the detail view for the issue the user thought they cancelled.
+  const cancelled = useRef(false);
+  useEffect(() => {
+    cancelled.current = false;
+    return () => {
+      cancelled.current = true;
+    };
+  }, []);
+
   const fields = visibleFields(form);
   const canSubmit =
     form.title.trim() !== "" && form.type !== null && (form.link === null || form.target !== null);
@@ -191,6 +204,7 @@ export function CreateWizard({
           if (target && link && !isParent) {
             await createIssueLink(cfg, link.name, created.key, target.key, link.direction);
           }
+          if (cancelled.current) return; // abandoned mid-submit — don't call back
           const linkSummary = target && link ? `${link.label} ${target.key}` : undefined;
           onDone({
             key: created.key,
@@ -198,6 +212,7 @@ export function CreateWizard({
             ...(linkSummary ? { linkSummary } : {}),
           });
         } catch (e) {
+          if (cancelled.current) return;
           onError(errorMessage(e));
         }
       })();
@@ -232,18 +247,7 @@ export function CreateWizard({
   );
 
   // Neovim banner — editor takes over the TTY while running.
-  if (mode.kind === "nvim-title" || mode.kind === "nvim-desc") {
-    return (
-      <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.accent}>
-        <Text color={theme.accent} bold>
-          editing in Neovim
-        </Text>
-        <Box marginTop={1}>
-          <Text color={theme.muted}>save & quit to return</Text>
-        </Box>
-      </Box>
-    );
-  }
+  if (mode.kind === "nvim-title" || mode.kind === "nvim-desc") return <NvimBanner />;
 
   if (mode.kind === "submitting") return <SubmittingBanner onEscape={onCancel} />;
 
@@ -368,7 +372,7 @@ function CreateForm({
           <Text color={theme.muted}> · </Text>
           <Text color={theme.accentAlt}>{projectKey}</Text>
         </Box>
-        <Text color={theme.muted}>esc close</Text>
+        <Text color={theme.muted}>esc cancel</Text>
       </Box>
       <Box paddingX={1}>
         <Text color={theme.muted}>fields marked </Text>
@@ -521,8 +525,10 @@ function findCurrentLinkId(choices: LinkChoiceOption[], current: LinkChoice | nu
 }
 
 /**
- * Spinner while the form POSTs. Esc detaches — we can't cancel the fetch
- * in flight, so the promise may still settle but onDone/onError goes nowhere.
+ * Spinner while the form POSTs. Esc detaches the wizard — we can't cancel the
+ * in-flight request, so the issue may still be created, but the `cancelled`
+ * ref stops its resolution from calling back (no surprise success / detail
+ * pop for an abandoned create).
  */
 function SubmittingBanner({ onEscape }: { onEscape: () => void }) {
   useInput((_input, key) => {

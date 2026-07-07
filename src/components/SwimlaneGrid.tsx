@@ -2,8 +2,18 @@ import { Box, Text } from "ink";
 
 import type { Issue } from "../jira";
 import type { Lane, SwimCursor } from "../swimlanes";
-import { cursorVisualIndex, scrollFor, visualRows } from "../swimlanes";
-import { assigneeColor, bg, fg, initials, theme, truncate, typeColor, typeGlyph } from "../ui";
+import { cursorVisualIndex, visualRows } from "../swimlanes";
+import {
+  assigneeColor,
+  bg,
+  fg,
+  initials,
+  stickyScroll,
+  theme,
+  truncate,
+  typeColor,
+  typeGlyph,
+} from "../ui";
 
 /**
  * Compact swimlane grid. Unlike the flat board's 3-line rich cards, cards
@@ -40,7 +50,7 @@ export function SwimlaneGrid({
   // what's on-screen — so scroll math matches exactly what's painted.
   const rows = visualRows(lanes, colWindowStart, colEnd);
   const cursorIdx = cursorVisualIndex(lanes, cursor, colWindowStart, colEnd);
-  const scroll = scrollFor(rows.length, height, cursorIdx, scrollRef.current);
+  const scroll = stickyScroll(rows.length, height, cursorIdx, scrollRef.current);
   scrollRef.current = scroll;
   const visible = rows.slice(scroll, scroll + height);
   // Per-column cell width inside the grid. Two leading cells (gutter + bar)

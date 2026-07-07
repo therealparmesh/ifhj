@@ -1,7 +1,7 @@
 import { Box, Text, useInput } from "ink";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { clamp, fg, theme } from "../ui";
+import { clamp, fg, stickyScroll, theme } from "../ui";
 import { Hint } from "./Hint";
 import { TextInput } from "./TextInput";
 
@@ -108,12 +108,7 @@ export function FilterPicker({
   // just the underlying state; it can briefly exceed `filtered.length`
   // after a filter narrows the list, and `cursor` absorbs that via clamp.
   const cursor = clamp(idx, 0, Math.max(0, filtered.length - 1));
-  let scroll = scrollRef.current;
-  const ceiling = Math.max(0, filtered.length - MAX_PICKER_ROWS);
-  if (scroll > ceiling) scroll = ceiling;
-  if (cursor < scroll) scroll = cursor;
-  else if (cursor >= scroll + MAX_PICKER_ROWS) scroll = cursor - MAX_PICKER_ROWS + 1;
-  if (scroll < 0) scroll = 0;
+  const scroll = stickyScroll(filtered.length, MAX_PICKER_ROWS, cursor, scrollRef.current);
   scrollRef.current = scroll;
 
   const accent = borderColor ?? theme.accent;

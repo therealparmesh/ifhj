@@ -146,6 +146,14 @@ export function truncate(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, Math.max(0, n - 1)) + "…";
 }
 
+/**
+ * Format a story-point sum: keep 0.5 intact but drop the trailing `.0` on
+ * integers so "5p" beats "5.0p".
+ */
+export function formatPoints(n: number): string {
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
+
 export function initials(name: string | undefined | null): string {
   if (!name) return "—";
   const parts = name
@@ -166,6 +174,23 @@ export function assigneeColor(name: string | undefined | null): string {
 
 export function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
+}
+
+/**
+ * Sticky scroll offset for a windowed list: given the previous anchor, shift
+ * only when the cursor would leave the `windowH`-row viewport, and clamp so the
+ * last screenful isn't scrolled past the end. Pure — every scrolling list
+ * (board columns, side pane, pickers, swimlane grid) derives its offset with
+ * this, so cursor and scroll can never disagree on a frame.
+ */
+export function stickyScroll(total: number, windowH: number, cursor: number, prev: number): number {
+  let scroll = prev;
+  const ceiling = Math.max(0, total - windowH);
+  if (scroll > ceiling) scroll = ceiling;
+  if (cursor < scroll) scroll = cursor;
+  else if (cursor >= scroll + windowH) scroll = cursor - windowH + 1;
+  if (scroll < 0) scroll = 0;
+  return scroll;
 }
 
 // Spread helper that lets callers omit the `color` prop entirely when a

@@ -30,6 +30,7 @@ import {
   errorMessage,
   fg,
   openInBrowser,
+  stickyScroll,
   theme,
   truncate,
   typeColor,
@@ -40,6 +41,7 @@ import { Hint } from "./Hint";
 import { formatShortDate, renderDetailLines } from "./IssueDetailLines";
 import { InlineFieldInput } from "./IssueDetailSide";
 import { ListPicker } from "./ListPicker";
+import { NvimBanner } from "./NvimBanner";
 import { ProgressBar } from "./ProgressBar";
 import { ToastStack, useToasts } from "./Toasts";
 
@@ -453,7 +455,16 @@ export function IssueDetailModal({
       currentRow.kind === "custom" ? currentRow.field.id : JIRA_FIELD_KEY[currentRow.id];
     const label =
       currentRow.kind === "custom" ? currentRow.field.name : FIELD_LABELS[currentRow.id];
-    await doSave(() => updateIssueField(cfg, detail.key, { [fieldId]: null }), `${label} cleared`);
+    // Array-typed fields clear with `[]`; Jira rejects `null` for them with
+    // "Operation value must be an Array". Scalars clear with `null`. (This
+    // mirrors FieldEditor's own clear path, which submits `[]` for lists.)
+    const isList =
+      meta.kind === "option-list" || meta.kind === "user-list" || meta.kind === "string-list";
+    const cleared = isList ? [] : null;
+    await doSave(
+      () => updateIssueField(cfg, detail.key, { [fieldId]: cleared }),
+      `${label} cleared`,
+    );
   }, [detail, currentRow, resolveEditable, cfg, doSave, showFlash]);
 
   // Main input handler
@@ -541,18 +552,7 @@ export function IssueDetailModal({
   );
 
   // Overlays
-  if (overlay.kind === "nvim") {
-    return (
-      <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.accent}>
-        <Text color={theme.accent} bold>
-          editing in Neovim
-        </Text>
-        <Box marginTop={1}>
-          <Text color={theme.muted}>save & quit to return</Text>
-        </Box>
-      </Box>
-    );
-  }
+  if (overlay.kind === "nvim") return <NvimBanner />;
 
   if (overlay.kind === "inline-input") {
     return (
@@ -588,9 +588,12 @@ export function IssueDetailModal({
         onCancel={() => setOverlay({ kind: "none" })}
         onSubmit={async (value: EditableFieldValue | null) => {
           setOverlay({ kind: "none" });
+          // A list field clears with `[]`, a scalar with `null` — both read as
+          // "cleared" to the user; anything else is an update.
+          const cleared = value === null || (Array.isArray(value) && value.length === 0);
           await doSave(
             () => updateIssueField(cfg, detail.key, { [overlay.fieldId]: value }),
-            `${overlay.meta.name} ${value === null ? "cleared" : "updated"}`,
+            `${overlay.meta.name} ${cleared ? "cleared" : "updated"}`,
           );
         }}
       />
@@ -665,12 +668,12 @@ export function IssueDetailModal({
    * always agree because we compute scroll *from* cursor at render.
    */
   const fieldCursor = clamp(fieldIdx, 0, Math.max(0, fieldRows.length - 1));
-  let fieldScroll = fieldScrollRef.current;
-  const scrollCeiling = Math.max(0, fieldRows.length - fieldWindow);
-  if (fieldScroll > scrollCeiling) fieldScroll = scrollCeiling;
-  if (fieldCursor < fieldScroll) fieldScroll = fieldCursor;
-  else if (fieldCursor >= fieldScroll + fieldWindow) fieldScroll = fieldCursor - fieldWindow + 1;
-  if (fieldScroll < 0) fieldScroll = 0;
+  const fieldScroll = stickyScroll(
+    fieldRows.length,
+    fieldWindow,
+    fieldCursor,
+    fieldScrollRef.current,
+  );
   fieldScrollRef.current = fieldScroll;
   const visibleFields = fieldRows.slice(fieldScroll, fieldScroll + fieldWindow);
   // Inner width of the side pane: sideWidth box - borderLeft (1) - paddingX * 2.
@@ -711,9 +714,9 @@ export function IssueDetailModal({
         ? { label: FIELD_LABELS[row.id], value: fieldDisplayValue(row.id, detail) }
         : { label: row.field.name.toLowerCase(), value: customFieldValue(row.field) };
     // Pointer is always exactly 2 ASCII cells. `>` when the pane is
-    // focused, `·` when it's parked (pane=body but cursor is remembered),
-    // spaces otherwise. Symmetric width means string-width can't disagree
-    // with the terminal on column count.
+    // focused, `.` when it's parked (pane=body but cursor is remembered),
+    // spaces otherwise. All-ASCII + symmetric width means string-width can't
+    // disagree with the terminal on column count.
     const pointer = focused ? "> " : parked ? ". " : "  ";
     const labelCell = truncate(label, customLabelWidth).padEnd(customLabelWidth);
     const valueBudget = Math.max(1, sidePaneInner - pointer.length - labelCell.length);

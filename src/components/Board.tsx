@@ -36,8 +36,17 @@ import {
   buildLanes,
   findCursor,
   moveCursor,
+  snapToCard,
 } from "../swimlanes";
-import { clamp, copyToClipboard, errorMessage, openInBrowser, theme, truncate } from "../ui";
+import {
+  clamp,
+  copyToClipboard,
+  errorMessage,
+  openInBrowser,
+  stickyScroll,
+  theme,
+  truncate,
+} from "../ui";
 import { BoardHeader } from "./BoardHeader";
 import { CreateWizard } from "./CreateWizard";
 import { FilterPicker } from "./FilterPicker";
@@ -48,6 +57,7 @@ import { IssueDetailModal } from "./IssueDetailModal";
 import { JqlView } from "./JqlView";
 import { ColumnView, PagingArrow } from "./Kanban";
 import { ListPicker } from "./ListPicker";
+import { NvimBanner } from "./NvimBanner";
 import { ProgressBar } from "./ProgressBar";
 import { QuickAddModal } from "./QuickAddModal";
 import { SwimlaneGrid } from "./SwimlaneGrid";
@@ -263,35 +273,43 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   const load = useCallback(async () => {
     setLoadError(null);
     if (!hasLoadedOnce.current) {
-      const cached = await readBoardCache(board.id);
+      const cached = await readBoardCache(cfg, board.id);
       if (cached) {
         applyBoardData(cached.config, cached.issues);
         hasLoadedOnce.current = true;
       }
     }
+    // One `track` wrapper around the whole sequence so the progress line stays
+    // lit continuously — the config+issues fetch and the slower swimlane fetch
+    // run back to back, and a per-call wrapper would blink the bar off between.
     try {
-      const [c, is] = await track(
-        Promise.all([getBoardConfig(cfg, board.id), getBoardIssues(cfg, board.id)]),
+      await track(
+        (async () => {
+          const [c, is] = await Promise.all([
+            getBoardConfig(cfg, board.id),
+            getBoardIssues(cfg, board.id),
+          ]);
+          // Filter-based boards (created from a saved filter, or spanning
+          // several projects) have no `location`, so the config endpoint gives
+          // no project key. Fall back to the prefix of the first issue key
+          // (PROJ-123 → PROJ) so project-scoped actions — create, quick-add,
+          // @-mention users — still work on single-project filter boards
+          // instead of hitting `.../undefined`.
+          if (!c.projectKey) {
+            const derived = is[0]?.key.split("-")[0];
+            if (derived) c.projectKey = derived;
+          }
+          applyBoardData(c, is);
+          hasLoadedOnce.current = true;
+          void writeBoardCache(cfg, board.id, c, is);
+          // Swimlane layout comes from a separate (internal) endpoint and needs
+          // the issue id→key map to resolve custom-lane membership. Non-fatal:
+          // it self-degrades to strategy "none", so the flat board is
+          // unaffected if it fails.
+          const idToKey = new Map(is.map((i) => [i.id, i.key]));
+          setSwimlanes(await getBoardSwimlanes(cfg, board.id, idToKey));
+        })(),
       );
-      // Filter-based boards (created from a saved filter, or spanning several
-      // projects) have no `location`, so the config endpoint gives no project
-      // key. Fall back to the prefix of the first issue key (PROJ-123 → PROJ)
-      // so project-scoped actions — create, quick-add, @-mention users — still
-      // work on single-project filter boards instead of hitting `.../undefined`.
-      if (!c.projectKey) {
-        const derived = is[0]?.key.split("-")[0];
-        if (derived) c.projectKey = derived;
-      }
-      applyBoardData(c, is);
-      hasLoadedOnce.current = true;
-      void writeBoardCache(board.id, c, is);
-      // Swimlane layout comes from a separate (internal) endpoint and needs
-      // the issue id→key map to resolve custom-lane membership. Non-fatal:
-      // it self-degrades to strategy "none", so the flat board is unaffected
-      // if it fails. Tracked separately so the progress line stays lit through
-      // this slower second fetch.
-      const idToKey = new Map(is.map((i) => [i.id, i.key]));
-      setSwimlanes(await track(getBoardSwimlanes(cfg, board.id, idToKey)));
     } catch (e) {
       const msg = errorMessage(e);
       if (hasLoadedOnce.current) flash(msg, "err");
@@ -404,6 +422,11 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   const columnInnerHeight = columnHeight - 2; // minus border top/bottom
   const perCardLines = 5; // card = 3 content + 1 spacer + 1 (border-ish) handled via marginBottom
   const cardsVisible = Math.max(1, Math.floor(columnInnerHeight / perCardLines));
+  // The swimlane grid draws single-line rows in this many terminal lines (the
+  // SwimlaneHeader + divider take 2 of the columnHeight rows). PageUp/Down in
+  // swim view pages by this, not `cardsVisible` (which is a flat rich-card
+  // count and would under-page badly).
+  const swimVisibleRows = Math.max(3, columnHeight - 2);
 
   const visibleColCount = Math.min(maxColumns, columns.length);
   const colWindowStart = Math.max(
@@ -461,14 +484,8 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
    * Only shifts when the cursor would leave the viewport.
    */
   const scrollFor = (colIdx: number, issueCount: number): number => {
-    const row = activeRows[colIdx] ?? 0;
-    const cursor = clamp(row, 0, Math.max(0, issueCount - 1));
-    let scroll = scrollsRef.current[colIdx] ?? 0;
-    const ceiling = Math.max(0, issueCount - cardsVisible);
-    if (scroll > ceiling) scroll = ceiling;
-    if (cursor < scroll) scroll = cursor;
-    else if (cursor >= scroll + cardsVisible) scroll = cursor - cardsVisible + 1;
-    if (scroll < 0) scroll = 0;
+    const cursor = clamp(activeRows[colIdx] ?? 0, 0, Math.max(0, issueCount - 1));
+    const scroll = stickyScroll(issueCount, cardsVisible, cursor, scrollsRef.current[colIdx] ?? 0);
     scrollsRef.current[colIdx] = scroll;
     return scroll;
   };
@@ -540,10 +557,13 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
        * otherwise stacks transitions and races the focus snap.
        */
       if (moving.current) {
-        flash("transition in progress…", "info");
+        flash(`${issue.key} is updating…`, "info");
         return;
       }
       moving.current = true;
+      // Mark busy up front so the card shows its spinner during the (possibly
+      // slow) transition lookup, not just once commitTransition runs.
+      markBusy(issue.key, true);
       const targetCol = conf.columns[targetColIdx]!;
       try {
         const trs = await getTransitions(cfg, issue.key);
@@ -563,9 +583,10 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         flash(errorMessage(e), "err");
       } finally {
         moving.current = false;
+        markBusy(issue.key, false);
       }
     },
-    [currentIssue, conf, cfg, flash, commitTransition],
+    [currentIssue, conf, cfg, flash, commitTransition, markBusy],
   );
 
   /**
@@ -706,7 +727,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       }
       const neighbor = col.issues[targetRow]!;
       if (busyKeys.has(issue.key)) {
-        flash("issue is updating…", "info");
+        flash(`${issue.key} is updating…`, "info");
         return;
       }
       markBusy(issue.key, true);
@@ -799,6 +820,10 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     linkTypes: IssueLinkType[];
   }> => {
     if (!conf) throw new Error("board config not loaded");
+    // Filter/multi-project boards with no issues yet expose no project key, so
+    // there's nothing to scope a create against — fail with a clear message
+    // rather than POSTing to `.../undefined`.
+    if (!conf.projectKey) throw new Error("no project on this board — can't create issues here");
     if (!metaCache.current) {
       const [types, linkTypes] = await track(
         Promise.all([getIssueTypes(cfg, conf.projectKey), getIssueLinkTypes(cfg)]),
@@ -937,8 +962,8 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         if (key.rightArrow || input === "l") return swimMove(0, 1);
         if (key.upArrow || input === "k") return swimMove(-1, 0);
         if (key.downArrow || input === "j") return swimMove(1, 0);
-        if (key.pageUp) return swimMove(-cardsVisible, 0);
-        if (key.pageDown) return swimMove(cardsVisible, 0);
+        if (key.pageUp) return swimMove(-swimVisibleRows, 0);
+        if (key.pageDown) return swimMove(swimVisibleRows, 0);
         // g/G fall through to the shared handlers below (no-op-safe in swim).
       } else {
         if (key.leftArrow || input === "h") return nudgeCol(-1);
@@ -959,11 +984,12 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       }
 
       // g / G — jump to the first / last lane (swim) or column top/bottom
-      // (flat, handled above). In swim view they snap to the extreme lane,
-      // keeping the current column.
-      if (swimView && input === "g") return setSwimCursor((c) => ({ ...c, lane: 0, row: 0 }));
+      // (flat, handled above). snapToCard lands on a populated cell (preferring
+      // the current column) so the cursor never strands on an empty cell in a
+      // lane that doesn't have a card in that column.
+      if (swimView && input === "g") return setSwimCursor((c) => snapToCard(lanes, 0, c.col));
       if (swimView && input === "G")
-        return setSwimCursor((c) => ({ ...c, lane: Math.max(0, lanes.length - 1), row: 0 }));
+        return setSwimCursor((c) => snapToCard(lanes, lanes.length - 1, c.col));
 
       // Block mutating actions on a card that's mid-update (transition or
       // rerank in flight). Read-only actions (view, yank, open, refresh) and
@@ -1086,9 +1112,10 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           const next = !v;
           if (next) {
             // Entering swim view: seed the cursor on the current issue if it
-            // exists in a lane, else the first cell.
+            // exists in a lane, else the first populated cell (snapToCard keeps
+            // us off an empty cell when lane 0 has no card in this column).
             const seed = currentIssue ? findCursor(lanes, currentIssue.key) : null;
-            setSwimCursor(seed ?? { lane: 0, col: effectiveCol, row: 0 });
+            setSwimCursor(seed ?? snapToCard(lanes, 0, effectiveCol));
             swimScrollRef.current = 0;
           } else if (currentIssue) {
             // Leaving swim view: carry the column back to the flat board.
@@ -1144,18 +1171,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   }
 
   // Modal overlays. Each branch is a discrete, full-screen-ish component.
-  if (modal.kind === "nvim") {
-    return (
-      <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.accent}>
-        <Text color={theme.accent} bold>
-          editing in Neovim
-        </Text>
-        <Box marginTop={1}>
-          <Text color={theme.muted}>save & quit to return</Text>
-        </Box>
-      </Box>
-    );
-  }
+  if (modal.kind === "nvim") return <NvimBanner />;
   if (modal.kind === "help") return <HelpModal onClose={closeModal} />;
   if (modal.kind === "card-action" && currentIssue) {
     return (
@@ -1197,7 +1213,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       );
       return (
         <FilterPicker
-          title={`Move ${targetIssue.key} to…`}
+          title={`move ${targetIssue.key} to…`}
           items={conf.columns.map((c, i) => ({ id: String(i), label: c.name }))}
           {...(currentColIdx >= 0 ? { currentId: String(currentColIdx) } : {})}
           onCancel={closeModal}
@@ -1220,7 +1236,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     // own once issues update, and esc still cancels via FilterPicker.
     return (
       <FilterPicker
-        title={`Move ${modal.issueKey ?? "issue"} to…`}
+        title={`move ${modal.issueKey ?? "issue"} to…`}
         items={[]}
         loading
         onCancel={closeModal}
@@ -1539,7 +1555,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
                 colWindowStart={colWindowStart}
                 visibleColCount={visibleColCount}
                 width={gridWidth}
-                height={Math.max(3, columnHeight - 2)}
+                height={swimVisibleRows}
                 matchSet={swimMatchSet}
                 busyKeys={busyKeys}
                 scrollRef={swimScrollRef}

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { JiraConfig } from "../config";
 import { useDimensions } from "../hooks";
 import { type Board, listBoards } from "../jira";
-import { clamp, errorMessage, fg, theme, truncate } from "../ui";
+import { clamp, errorMessage, fg, stickyScroll, theme, truncate } from "../ui";
 import { TextInput } from "./TextInput";
 
 type Props = {
@@ -120,12 +120,7 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
   }
 
   // Pure derived scroll: anchor in ref, shift only when cursor hits an edge.
-  let scroll = scrollRef.current;
-  const ceiling = Math.max(0, filtered.length - viewportHeight);
-  if (scroll > ceiling) scroll = ceiling;
-  if (cursor < scroll) scroll = cursor;
-  else if (cursor >= scroll + viewportHeight) scroll = cursor - viewportHeight + 1;
-  if (scroll < 0) scroll = 0;
+  const scroll = stickyScroll(filtered.length, viewportHeight, cursor, scrollRef.current);
   scrollRef.current = scroll;
 
   const visible = filtered.slice(scroll, scroll + viewportHeight);

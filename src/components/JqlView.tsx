@@ -4,7 +4,7 @@ import { useRef, useState } from "react";
 import type { JiraConfig } from "../config";
 import { useDimensions } from "../hooks";
 import { type IssueSearchResult, searchByJql } from "../jira";
-import { clamp, errorMessage, fg, theme, truncate } from "../ui";
+import { clamp, errorMessage, fg, stickyScroll, theme, truncate } from "../ui";
 import { Hint } from "./Hint";
 import { TextInput } from "./TextInput";
 
@@ -119,12 +119,7 @@ function JqlResults({
       if (r) onPick(r.key);
     }
   });
-  let scroll = scrollRef.current;
-  const ceiling = Math.max(0, results.length - maxVisible);
-  if (scroll > ceiling) scroll = ceiling;
-  if (cursor < scroll) scroll = cursor;
-  else if (cursor >= scroll + maxVisible) scroll = cursor - maxVisible + 1;
-  if (scroll < 0) scroll = 0;
+  const scroll = stickyScroll(results.length, maxVisible, cursor, scrollRef.current);
   scrollRef.current = scroll;
 
   const visible = results.slice(scroll, scroll + maxVisible);

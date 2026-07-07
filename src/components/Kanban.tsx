@@ -1,17 +1,19 @@
 import { Box, Text } from "ink";
 
 import type { BoardColumn, Issue } from "../jira";
-import { assigneeColor, bg, fg, initials, theme, truncate, typeColor, typeGlyph } from "../ui";
+import {
+  assigneeColor,
+  bg,
+  fg,
+  formatPoints,
+  initials,
+  theme,
+  truncate,
+  typeColor,
+  typeGlyph,
+} from "../ui";
 
 export type Column = BoardColumn & { issues: Issue[] };
-
-/**
- * Float-friendly formatter for the points badge — keeps 0.5 intact but
- * drops the trailing `.0` on integers so "5p" beats "5.0p".
- */
-function fmtPoints(sum: number): string {
-  return Number.isInteger(sum) ? String(sum) : sum.toFixed(1);
-}
 
 /**
  * Single kanban column: header (name + count + optional WIP + optional
@@ -65,7 +67,7 @@ export function ColumnView({
           {truncate(column.name.toUpperCase(), Math.max(4, width - 14))}
         </Text>
         <Box>
-          {pointSum > 0 ? <Text color={theme.muted}>{fmtPoints(pointSum)}p · </Text> : null}
+          {pointSum > 0 ? <Text color={theme.muted}>{formatPoints(pointSum)}p · </Text> : null}
           <Text color={countColor} bold={overWip}>
             {countText}
           </Text>

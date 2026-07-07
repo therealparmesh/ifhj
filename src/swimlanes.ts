@@ -1,4 +1,5 @@
 import type { BoardColumn, BoardSwimlanes, Issue, SwimlaneStrategy } from "./jira";
+import { stickyScroll } from "./ui";
 
 /**
  * Swimlane layout — pure functions, no React. Board.tsx renders the flat
@@ -128,7 +129,7 @@ export function buildLanes(colDefs: BoardColumn[], issues: Issue[], sw: BoardSwi
  * sit in an off-window column contributes zero rows, so it isn't drawn as an
  * empty band. Defaults span every column (whole-lane height).
  */
-export function laneHeight(lane: Lane, colStart = 0, colEnd = lane.columns.length): number {
+function laneHeight(lane: Lane, colStart = 0, colEnd = lane.columns.length): number {
   let h = 0;
   const end = Math.min(colEnd, lane.columns.length);
   for (let c = Math.max(0, colStart); c < end; c++) {
@@ -187,21 +188,6 @@ export function cursorVisualIndex(
     idx += (lanes[li]!.name ? 1 : 0) + h;
   }
   return idx;
-}
-
-/**
- * Sticky vertical scroll: shift only when the cursor would leave the window.
- * Pure — given the previous anchor it returns the new one, clamped so the
- * last screenful isn't scrolled past the end.
- */
-export function scrollFor(total: number, windowH: number, cursorIdx: number, prev: number): number {
-  let scroll = prev;
-  const ceiling = Math.max(0, total - windowH);
-  if (scroll > ceiling) scroll = ceiling;
-  if (cursorIdx < scroll) scroll = cursorIdx;
-  else if (cursorIdx >= scroll + windowH) scroll = cursorIdx - windowH + 1;
-  if (scroll < 0) scroll = 0;
-  return scroll;
 }
 
 /**
@@ -272,6 +258,27 @@ function clampIdx(i: number, len: number): number {
 function clampRow(lanes: Lane[], lane: number, col: number, row: number): number {
   const len = lanes[lane]?.columns[col]?.issues.length ?? 0;
   return Math.max(0, Math.min(Math.max(0, len - 1), row));
+}
+
+/**
+ * A cursor pointing at a real card in `lane`, preferring `preferredCol` and
+ * otherwise the nearest populated column (searching right, then left). Used
+ * when jumping to a lane (g/G) or seeding the cursor on swim-view entry — the
+ * navigation invariant is that the cursor always sits on a card, never a blank
+ * cell, so downstream actions never see a null selection. Falls back to
+ * `{lane, col: preferredCol, row: 0}` for a lane with no visible cards (which
+ * buildLanes drops anyway, so this is only reached transiently).
+ */
+export function snapToCard(lanes: Lane[], lane: number, preferredCol: number): SwimCursor {
+  const li = clampIdx(lane, lanes.length);
+  const cols = lanes[li]?.columns ?? [];
+  const has = (c: number) => (cols[c]?.issues.length ?? 0) > 0;
+  if (has(preferredCol)) return { lane: li, col: preferredCol, row: 0 };
+  for (let d = 1; d < cols.length; d++) {
+    if (has(preferredCol + d)) return { lane: li, col: preferredCol + d, row: 0 };
+    if (has(preferredCol - d)) return { lane: li, col: preferredCol - d, row: 0 };
+  }
+  return { lane: li, col: preferredCol, row: 0 };
 }
 
 /** Find a cursor pointing at `key`, or null. Used to follow a card post-reload. */
@@ -438,10 +445,16 @@ function demo() {
     "moveCursor stays put when no populated column that way",
   );
 
-  // scrollFor keeps the cursor visible and clamps the tail.
-  assert(scrollFor(10, 4, 7, 0) === 4, "scrollFor pages down to reveal cursor");
-  assert(scrollFor(10, 4, 1, 4) === 1, "scrollFor pages up to reveal cursor");
-  assert(scrollFor(3, 4, 0, 0) === 0, "scrollFor: no scroll when everything fits");
+  // snapToCard lands on a populated cell — preferring the given column, else
+  // the nearest one with a card. gappy lane 0 has cards in cols 0 and 2 only.
+  assert(snapToCard(gappy, 0, 0).col === 0, "snapToCard keeps a populated preferred col");
+  assert(snapToCard(gappy, 0, 1).col === 2, "snapToCard seeks the nearest populated col");
+  assert(snapToCard(gappy, 0, 2).col === 2, "snapToCard keeps col 2");
+
+  // stickyScroll keeps the cursor visible and clamps the tail.
+  assert(stickyScroll(10, 4, 7, 0) === 4, "stickyScroll pages down to reveal cursor");
+  assert(stickyScroll(10, 4, 1, 4) === 1, "stickyScroll pages up to reveal cursor");
+  assert(stickyScroll(3, 4, 0, 0) === 0, "stickyScroll: no scroll when everything fits");
 
   // findCursor round-trips a key.
   const fc = findCursor(custom, "A-4");

@@ -37,9 +37,10 @@ async function resolveFieldIds(cfg: JiraConfig): Promise<FieldIds> {
   if (cached) return cached;
   let ids: FieldIds = { ...DEFAULT_FIELD_IDS };
   try {
-    const fields: any[] = await jget(cfg, `/rest/api/3/field`);
+    const data = await jget(cfg, `/rest/api/3/field`);
+    const fields: any[] = Array.isArray(data) ? data : [];
     const byCustom = (key: string) =>
-      fields.find((f) => (f.schema?.custom ?? "").endsWith(key))?.id;
+      fields.find((f) => (f?.schema?.custom ?? "").endsWith(key))?.id;
     ids = {
       epicLink: byCustom("gh-epic-link") ?? DEFAULT_FIELD_IDS.epicLink,
       sprint: byCustom("gh-sprint") ?? DEFAULT_FIELD_IDS.sprint,
@@ -496,29 +497,23 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
       : [],
     links: Array.isArray(f.issuelinks)
       ? f.issuelinks.flatMap((l: any) => {
-          if (l.outwardIssue) {
-            return [
-              {
-                direction: l.type?.outward ?? "relates to",
-                key: l.outwardIssue.key,
-                summary: l.outwardIssue.fields?.summary ?? "",
-                statusName: l.outwardIssue.fields?.status?.name ?? "",
-                issueType: l.outwardIssue.fields?.issuetype?.name ?? "",
-              },
-            ];
-          }
-          if (l.inwardIssue) {
-            return [
-              {
-                direction: l.type?.inward ?? "relates to",
-                key: l.inwardIssue.key,
-                summary: l.inwardIssue.fields?.summary ?? "",
-                statusName: l.inwardIssue.fields?.status?.name ?? "",
-                issueType: l.inwardIssue.fields?.issuetype?.name ?? "",
-              },
-            ];
-          }
-          return [];
+          // A link points either outward or inward; pick the present side and
+          // its matching direction label, then map both the same way.
+          const side = l.outwardIssue
+            ? { issue: l.outwardIssue, direction: l.type?.outward ?? "relates to" }
+            : l.inwardIssue
+              ? { issue: l.inwardIssue, direction: l.type?.inward ?? "relates to" }
+              : null;
+          if (!side) return [];
+          return [
+            {
+              direction: side.direction,
+              key: side.issue.key,
+              summary: side.issue.fields?.summary ?? "",
+              statusName: side.issue.fields?.status?.name ?? "",
+              issueType: side.issue.fields?.issuetype?.name ?? "",
+            },
+          ];
         })
       : [],
     comments,
@@ -536,7 +531,13 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
       const customFields = Object.keys(metaFields)
         .filter((id) => id.startsWith("customfield_"))
         .flatMap((id) => {
-          const normalized = normalizeCustomField(id, metaFields[id], f[id], editable.get(id));
+          const normalized = normalizeCustomField(
+            id,
+            metaFields[id],
+            f[id],
+            editable.get(id),
+            cf.epicLink,
+          );
           return normalized ? [normalized] : [];
         });
       return { customFields, editmeta: editable };
@@ -782,14 +783,30 @@ export async function createIssueLink(
 export type JiraUser = { accountId: string; displayName: string };
 
 export async function getAssignableUsers(cfg: JiraConfig, projectKey: string): Promise<JiraUser[]> {
-  const data = await jget(
-    cfg,
-    `/rest/api/3/user/assignable/search?project=${encodeURIComponent(projectKey)}&maxResults=100`,
-  );
-  return (data ?? []).map((u: any) => ({
-    accountId: String(u.accountId),
-    displayName: u.displayName ?? u.emailAddress ?? u.accountId,
-  }));
+  const proj = encodeURIComponent(projectKey);
+  const pageSize = 100;
+  const all: JiraUser[] = [];
+  let startAt = 0;
+  // Paginate — a single 100-cap page silently drops assignable users on large
+  // projects, hiding valid picks from the assignee editor and @-mention list.
+  while (true) {
+    const data = await jget(
+      cfg,
+      `/rest/api/3/user/assignable/search?project=${proj}&startAt=${startAt}&maxResults=${pageSize}`,
+    );
+    const page: any[] = Array.isArray(data) ? data : [];
+    for (const u of page) {
+      all.push({
+        accountId: String(u.accountId),
+        displayName: u.displayName ?? u.emailAddress ?? u.accountId,
+      });
+    }
+    if (page.length < pageSize) break;
+    startAt += pageSize;
+    // Matches the other paginated fetches' safety cap.
+    if (startAt > 5000) break;
+  }
+  return all;
 }
 
 export async function updateIssueField(

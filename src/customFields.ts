@@ -11,10 +11,6 @@
 
 import type { EditableField, EditableFieldValue } from "./jira";
 
-/** Epic link is rendered via the standard `parent` field; exclude it so
- *  it doesn't double-appear in the custom field list. */
-const EPIC_LINK_FIELD = "customfield_10014";
-
 /**
  * A project's custom fields, normalized for display AND edit. `display`
  * is the human-readable string (or number, or list) the side panel shows.
@@ -117,16 +113,19 @@ export function coerceFieldValue(
 
 /**
  * Build a CustomField from an editmeta entry. Returns null for the epic-link
- * field (rendered via `parent`, so it'd otherwise render twice) and when the
- * meta itself is malformed.
+ * field (`epicLinkId`, rendered via `parent`, so it'd otherwise render twice)
+ * and when the meta itself is malformed. `epicLinkId` is the tenant-resolved
+ * id — passing it (rather than a hardcoded default) keeps the dedupe correct
+ * on instances that remapped the epic-link field.
  */
 export function normalizeCustomField(
   id: string,
   meta: any,
   rawValue: unknown,
   editable: EditableField | undefined,
+  epicLinkId: string,
 ): CustomField | null {
-  if (id === EPIC_LINK_FIELD) return null;
+  if (id === epicLinkId) return null;
   if (!editable) return null;
   const name: string = meta?.name ?? id;
   const display = extractDisplay(rawValue, meta?.schema?.type, meta?.schema?.items);
