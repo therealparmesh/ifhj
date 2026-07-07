@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 
 import type { JiraConfig } from "../config";
 import { useDimensions } from "../hooks";
-import { type IssueSearchResult, searchAllIssues } from "../jira";
+import { type IssueSearchResult, searchIssues } from "../jira";
 import { clamp, fg, stickyScroll, theme, truncate } from "../ui";
 import { Hint } from "./Hint";
 import { TextInput } from "./TextInput";
@@ -11,12 +11,12 @@ import { TextInput } from "./TextInput";
 export type RecentIssue = { key: string; summary: string };
 
 /**
- * Double-space quick-open finder. Empty query → the recently-visited issues.
- * Once you type, the list splits: matching recents up top, a separator, then a
- * live global search (every project) below — with anything already shown in
- * the recents section filtered out of the global half so nothing repeats.
- * Arrow keys move through both sections as one flat list; enter opens the
- * focused issue.
+ * Quick-open finder (opened with `R`). Empty query → the recently-visited
+ * issues. Once you type, the list splits: matching recents up top, a
+ * separator, then a live global search (every project) below — with anything
+ * already shown in the recents section filtered out of the global half so
+ * nothing repeats. Arrow keys move through both sections as one flat list;
+ * enter opens the focused issue.
  */
 
 // One selectable row plus non-selectable header/separator rows, flattened into
@@ -64,7 +64,7 @@ export function QuickOpen({
     setLoading(true);
     const t = setTimeout(async () => {
       try {
-        const r = await searchAllIssues(cfg, q.trim());
+        const r = await searchIssues(cfg, q.trim());
         if (seq === searchSeq.current) setResults(r);
       } catch {
         if (seq === searchSeq.current) setResults([]);
@@ -75,15 +75,14 @@ export function QuickOpen({
     return () => clearTimeout(t);
   }, [q, query, cfg]);
 
-  // Build the flat row list: recents section (filtered by query), then the
-  // global-search section with recents-already-shown removed.
+  // Build the flat row list: recents section (filtered by query when typing),
+  // then — once typing — the global-search section with recents already shown
+  // removed so nothing repeats.
   const matchedRecents = query
     ? recents.filter(
         (r) => r.key.toLowerCase().includes(query) || r.summary.toLowerCase().includes(query),
       )
     : recents;
-  const recentKeys = new Set(matchedRecents.map((r) => r.key));
-  const globalResults = query ? results.filter((r) => !recentKeys.has(r.key)) : [];
 
   const rows: Row[] = [];
   if (matchedRecents.length > 0) {
@@ -91,6 +90,8 @@ export function QuickOpen({
     for (const r of matchedRecents) rows.push({ kind: "issue", key: r.key, summary: r.summary });
   }
   if (query) {
+    const recentKeys = new Set(matchedRecents.map((r) => r.key));
+    const globalResults = results.filter((r) => !recentKeys.has(r.key));
     // The separator carries the section's state (searching / empty / count) so
     // a zero-result search reads clearly instead of showing a bare header.
     const label = loading

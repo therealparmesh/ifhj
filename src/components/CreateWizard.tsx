@@ -308,7 +308,7 @@ export function CreateWizard({
           setSearchLoading(true);
           (async () => {
             try {
-              const r = await searchIssues(cfg, projectKey, q);
+              const r = await searchIssues(cfg, q, { projectKey });
               if (seq === searchSeq.current) setSearchResults(r);
             } catch {
               if (seq === searchSeq.current) setSearchResults([]);

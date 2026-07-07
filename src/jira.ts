@@ -733,47 +733,32 @@ export type IssueSearchResult = {
 };
 
 /**
- * Search issues across the project — matches on summary or key, up to limit.
- * Builds the JQL, then defers to `searchByJql` for the actual POST + parse.
+ * Search issues by summary or key, up to `limit`. Scoped to `projectKey` when
+ * given (create-wizard target picker), otherwise global across every project
+ * the user can see (quick-open finder). A global search with an empty query
+ * would be unbounded, so that combination returns nothing.
  */
 export async function searchIssues(
   cfg: JiraConfig,
-  projectKey: string,
   query: string,
-  limit = 25,
+  opts: { projectKey?: string; limit?: number } = {},
 ): Promise<IssueSearchResult[]> {
   // Strip quotes / backslashes so stray input can't break out of the JQL string.
   const q = query.trim().replaceAll(/["\\]/g, "");
+  if (!q && !opts.projectKey) return [];
   // `issuekey = X` only works when X looks like a real key (PROJ-123).
   const looksLikeKey = /^[A-Za-z][A-Za-z0-9]*-\d+$/.test(q);
   const match = q
     ? looksLikeKey
-      ? ` AND (summary ~ "${q}*" OR issuekey = "${q.toUpperCase()}")`
-      : ` AND summary ~ "${q}*"`
+      ? `summary ~ "${q}*" OR issuekey = "${q.toUpperCase()}"`
+      : `summary ~ "${q}*"`
     : "";
-  const jql = `project = "${projectKey}"${match} ORDER BY updated DESC`;
-  return searchByJql(cfg, jql, limit);
-}
-
-/**
- * Global issue search — every project the user can see, matched on summary or
- * key. Same shape as `searchIssues` but with no project filter, for the
- * quick-open finder. `query` must be non-empty (a project-less "everything"
- * query would be unbounded); callers gate on that.
- */
-export async function searchAllIssues(
-  cfg: JiraConfig,
-  query: string,
-  limit = 25,
-): Promise<IssueSearchResult[]> {
-  // Strip quotes / backslashes so stray input can't break out of the JQL string.
-  const q = query.trim().replaceAll(/["\\]/g, "");
-  if (!q) return [];
-  const looksLikeKey = /^[A-Za-z][A-Za-z0-9]*-\d+$/.test(q);
-  const match = looksLikeKey
-    ? `(summary ~ "${q}*" OR issuekey = "${q.toUpperCase()}")`
-    : `summary ~ "${q}*"`;
-  return searchByJql(cfg, `${match} ORDER BY updated DESC`, limit);
+  const clauses = [
+    opts.projectKey ? `project = "${opts.projectKey}"` : "",
+    match ? (opts.projectKey ? `(${match})` : match) : "",
+  ].filter(Boolean);
+  const jql = `${clauses.join(" AND ")} ORDER BY updated DESC`;
+  return searchByJql(cfg, jql, opts.limit ?? 25);
 }
 
 /**
