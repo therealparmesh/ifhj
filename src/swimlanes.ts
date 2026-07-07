@@ -19,9 +19,23 @@ const NO_EPIC = "No Epic";
 const NO_TYPE = "No Type";
 const NO_PARENT = "No Parent";
 
+/** Epoch millis of an ISO timestamp for recency sort; missing/unparseable
+ *  sorts oldest. Parsed (not string-compared) because Jira timestamps carry
+ *  varying UTC offsets, so lexicographic order would be wrong across them. */
+function updatedMs(issue: Issue): number {
+  const t = Date.parse(issue.updated);
+  return Number.isNaN(t) ? 0 : t;
+}
+
 /**
  * Partition issues into board columns by status. Issues whose status maps to
  * no column are dropped (they're not shown on the board — same as Jira).
+ *
+ * Issues arrive in Jira rank order, which is what active columns keep. But a
+ * finished-work column (every issue done-category — no name matching, so it
+ * works whatever the column is called: "Done", "Merged", "Completed", …)
+ * ranks arbitrarily; there we sort newest-updated first so the freshest
+ * completed work is on top instead of buried under stale rank.
  */
 export function buildColumns(colDefs: BoardColumn[], issues: Issue[]): LaneColumn[] {
   const cols: LaneColumn[] = colDefs.map((c) => ({ ...c, issues: [] }));
@@ -30,6 +44,11 @@ export function buildColumns(colDefs: BoardColumn[], issues: Issue[]): LaneColum
   for (const issue of issues) {
     const idx = statusToCol.get(issue.statusId);
     if (idx !== undefined) cols[idx]!.issues.push(issue);
+  }
+  for (const col of cols) {
+    if (col.issues.length > 1 && col.issues.every((i) => i.statusCategory === "done")) {
+      col.issues = col.issues.toSorted((a, b) => updatedMs(b) - updatedMs(a));
+    }
   }
   return cols;
 }
@@ -308,6 +327,8 @@ function mkIssue(key: string, id: number, statusId: string, extra: Partial<Issue
     description: "",
     statusId,
     statusName: "",
+    statusCategory: "new",
+    updated: "",
     issueType: "Task",
     labels: [],
     ...extra,
@@ -461,6 +482,42 @@ function demo() {
   assert(
     fc !== null && custom[fc.lane]!.columns[fc.col]!.issues[fc.row]!.key === "A-4",
     "findCursor",
+  );
+
+  // buildColumns: a done-category column sorts newest-updated first (not rank),
+  // while an active column keeps input (rank) order. Timestamps use mixed UTC
+  // offsets to prove we parse rather than string-compare.
+  const sortCols: BoardColumn[] = [
+    { name: "In Progress", statusIds: ["1"] },
+    { name: "Merged", statusIds: ["2"] }, // named anything — classified by category
+  ];
+  const sortIssues = [
+    mk("P-1", 1, "1", { statusCategory: "indeterminate", updated: "2024-01-01T00:00:00.000-0500" }),
+    mk("P-2", 2, "1", { statusCategory: "indeterminate", updated: "2024-06-01T00:00:00.000-0500" }),
+    mk("D-old", 3, "2", { statusCategory: "done", updated: "2024-02-01T00:00:00.000-0500" }),
+    mk("D-new", 4, "2", { statusCategory: "done", updated: "2024-05-01T00:00:00.000-0400" }),
+    mk("D-mid", 5, "2", { statusCategory: "done", updated: "2024-03-01T00:00:00.000-0500" }),
+  ];
+  const built = buildColumns(sortCols, sortIssues);
+  assert(
+    built[0]!.issues.map((i) => i.key).join(",") === "P-1,P-2",
+    "buildColumns: active column keeps rank order",
+  );
+  assert(
+    built[1]!.issues.map((i) => i.key).join(",") === "D-new,D-mid,D-old",
+    "buildColumns: done column sorts newest-updated first",
+  );
+  // A column with a non-done issue mixed in is NOT recency-sorted (stays rank).
+  const mixed = buildColumns(
+    [{ name: "X", statusIds: ["2"] }],
+    [
+      mk("M-1", 6, "2", { statusCategory: "done", updated: "2024-01-01T00:00:00.000Z" }),
+      mk("M-2", 7, "2", { statusCategory: "indeterminate", updated: "2024-09-01T00:00:00.000Z" }),
+    ],
+  );
+  assert(
+    mixed[0]!.issues.map((i) => i.key).join(",") === "M-1,M-2",
+    "buildColumns: mixed-category column stays rank order",
   );
 
   console.log("swimlanes self-check passed");

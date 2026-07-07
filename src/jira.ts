@@ -115,6 +115,12 @@ export type Issue = {
   description: string;
   statusId: string;
   statusName: string;
+  /** Jira's tenant-invariant status category: "new" (To Do),
+   *  "indeterminate" (In Progress), or "done". Used to sort finished-work
+   *  columns by recency rather than rank — see `buildColumns`. */
+  statusCategory: string;
+  /** ISO timestamp of the last update, for recency sort in done columns. */
+  updated: string;
   issueType: string;
   assignee?: string;
   priority?: string;
@@ -244,7 +250,6 @@ export type IssueDetail = Issue & {
   fixVersions: string[];
   dueDate?: string;
   created: string;
-  updated: string;
   parentKey?: string;
   subtasks: { key: string; summary: string; statusName: string }[];
   links: IssueLink[];
@@ -396,6 +401,7 @@ export async function getBoardIssues(cfg: JiraConfig, boardId: number): Promise<
   const fields = [
     "summary",
     "status",
+    "updated",
     "issuetype",
     "assignee",
     "priority",
@@ -426,6 +432,8 @@ export async function getBoardIssues(cfg: JiraConfig, boardId: number): Promise<
         description,
         statusId: String(f.status?.id ?? ""),
         statusName: f.status?.name ?? "",
+        statusCategory: String(f.status?.statusCategory?.key ?? ""),
+        updated: f.updated ?? "",
         issueType: f.issuetype?.name ?? "",
         labels: Array.isArray(f.labels) ? f.labels : [],
       };
@@ -482,6 +490,7 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
     description,
     statusId: String(f.status?.id ?? ""),
     statusName: f.status?.name ?? "",
+    statusCategory: String(f.status?.statusCategory?.key ?? ""),
     issueType: f.issuetype?.name ?? "",
     labels: Array.isArray(f.labels) ? f.labels : [],
     components: Array.isArray(f.components) ? f.components.map((c: any) => c.name) : [],
