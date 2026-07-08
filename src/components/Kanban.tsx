@@ -139,8 +139,10 @@ function Card({
   busy: boolean;
 }) {
   const accent = typeColor(issue.issueType);
-  // Mid-update: bar goes warning-colored, glyph becomes a spinner, and the
-  // whole card dims to muted so it reads as "in flight, don't touch".
+  // Selection always wins the highlight (inverse + fg text), even while busy —
+  // navigating a column shouldn't drop the highlight off an updating card.
+  // Busy is signalled independently: the ◴ glyph, the "updating…" meta line,
+  // and the warning bar. When a card is busy but NOT selected it dims to muted.
   const bar = busy ? theme.warning : selected ? theme.accent : accent;
   const badge = initials(issue.assignee);
   const badgeColor = assigneeColor(issue.assignee);
@@ -152,9 +154,8 @@ function Card({
   // Only search-match rows get a painted background; selection uses
   // `inverse` on text cells only so icons/badges keep their meaning.
   const matchBgProps = bg(!selected && isMatch ? theme.matchBg : undefined);
-  const keyColor = busy ? theme.muted : selected ? theme.fg : theme.fgDim;
-  const summaryColor = busy ? theme.muted : selected ? theme.fg : theme.fgDim;
-  const glyphColor = busy ? theme.warning : selected ? theme.fg : accent;
+  const textColor = selected ? theme.fg : busy ? theme.muted : theme.fgDim;
+  const glyphColor = selected ? theme.fg : busy ? theme.warning : accent;
   const summaryText = truncate(issue.summary, Math.max(4, innerWidth));
   const metaText = truncate(meta, Math.max(4, innerWidth));
   return (
@@ -168,39 +169,34 @@ function Card({
       <Box flexDirection="column" flexGrow={1}>
         <Box justifyContent="space-between">
           <Box>
-            <Text {...fg(glyphColor)} inverse={selected && !busy} {...matchBgProps}>
+            <Text {...fg(glyphColor)} inverse={selected} {...matchBgProps}>
               {busy ? "◴" : typeGlyph(issue.issueType)}{" "}
             </Text>
-            <Text
-              {...fg(keyColor)}
-              bold={selected && !busy}
-              inverse={selected && !busy}
-              {...matchBgProps}
-            >
+            <Text {...fg(textColor)} bold={selected} inverse={selected} {...matchBgProps}>
               {truncate(issue.key, keyMaxLen)}
             </Text>
           </Box>
           <Text
-            {...fg(busy ? theme.muted : selected ? theme.fg : badgeColor)}
+            {...fg(selected ? theme.fg : busy ? theme.muted : badgeColor)}
             bold
-            inverse={selected && !busy}
+            inverse={selected}
             {...matchBgProps}
           >
             {badge}
           </Text>
         </Box>
         <Text
-          {...fg(summaryColor)}
-          bold={selected && !busy}
-          inverse={selected && !busy}
+          {...fg(textColor)}
+          bold={selected}
+          inverse={selected}
           wrap="truncate"
           {...matchBgProps}
         >
           {summaryText}
         </Text>
         <Text
-          {...fg(busy ? theme.warning : selected ? theme.fg : theme.muted)}
-          inverse={selected && !busy}
+          {...fg(selected ? theme.fg : busy ? theme.warning : theme.muted)}
+          inverse={selected}
           wrap="truncate"
           {...matchBgProps}
         >

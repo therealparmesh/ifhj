@@ -137,27 +137,28 @@ function CompactCard({
   // Layout: "▌" bar (1) + space (1) + glyph (1) + space (1) + key + space +
   // summary … + badge (right). Reserve 3 for the trailing badge + space.
   const bodyBudget = Math.max(4, width - 4 - 3);
-  // Mid-update: bar/glyph go warning-colored (spinner glyph), text dims to
-  // muted, and the label reads "updating…" so the row is visibly in flight.
+  // Selection always wins the highlight (inverse + fg text), even while busy,
+  // so navigating never drops the highlight off an updating row. Busy shows via
+  // the ◴ glyph, the "updating…" label, and the warning bar; a busy row that
+  // isn't selected dims to muted.
   const text = busy ? `${issue.key} updating…` : `${issue.key} ${issue.summary}`;
   const barColor = busy ? theme.warning : selected ? theme.accent : accent;
-  const glyphColor = busy ? theme.warning : selected ? theme.fg : accent;
-  const bodyColor = busy ? theme.muted : selected ? theme.fg : theme.fgDim;
-  const inv = selected && !busy;
+  const glyphColor = selected ? theme.fg : busy ? theme.warning : accent;
+  const bodyColor = selected ? theme.fg : busy ? theme.muted : theme.fgDim;
   return (
     <>
       <Text color={barColor}>▌</Text>
-      <Text {...fg(glyphColor)} inverse={inv} {...matchBgProps}>
+      <Text {...fg(glyphColor)} inverse={selected} {...matchBgProps}>
         {" "}
         {busy ? "◴" : typeGlyph(issue.issueType)}{" "}
       </Text>
-      <Text {...fg(bodyColor)} bold={inv} inverse={inv} wrap="truncate" {...matchBgProps}>
+      <Text {...fg(bodyColor)} bold={selected} inverse={selected} wrap="truncate" {...matchBgProps}>
         {truncate(text, bodyBudget)}
       </Text>
       <Text
-        {...fg(busy ? theme.muted : selected ? theme.fg : assigneeColor(issue.assignee))}
+        {...fg(selected ? theme.fg : busy ? theme.muted : assigneeColor(issue.assignee))}
         bold
-        inverse={inv}
+        inverse={selected}
         {...matchBgProps}
       >
         {" "}
