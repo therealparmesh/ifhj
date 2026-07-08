@@ -32,9 +32,9 @@ mv ifhj /usr/local/bin/
 
 ## Prerequisites
 
-### Neovim
+### Neovim (or Vim)
 
-ifhj shells out to `nvim` for descriptions, comments, and the create form. Needs to be on `$PATH`.
+ifhj shells out to an editor for descriptions, comments, and the create form. It prefers `nvim` and falls back to `vim` — one of them needs to be on `$PATH`.
 
 ```sh
 mise use -g neovim
@@ -107,7 +107,7 @@ Pick a board. Everything's keyboard from there.
 | `Enter`         | card action menu                                   |
 | `v`             | view issue details                                 |
 | `e`             | edit title (inline)                                |
-| `E`             | edit description (Neovim)                          |
+| `E`             | edit description (editor)                          |
 | `t`             | transition to any status                           |
 | `m`             | move to any column                                 |
 | `< >`           | transition to prev / next column                   |
@@ -139,10 +139,10 @@ Pick a board. Everything's keyboard from there.
 | `Enter`         | edit field or open comment      |
 | `x`             | clear field                     |
 | `[ ]`           | prev / next comment             |
-| `c`             | add comment (Neovim)            |
+| `c`             | add comment (editor)            |
 | `C`             | create subtask                  |
 | `e`             | edit title (inline)             |
-| `E`             | edit description (Neovim)       |
+| `E`             | edit description (editor)       |
 | `t`             | transition to status            |
 | `m`             | move to column                  |
 | `w`             | toggle watch / unwatch          |
@@ -177,15 +177,15 @@ Project-specific custom fields (team-managed or classic) show up read-only in th
 
 ### Markdown
 
-Descriptions and comments round-trip as Markdown. Write Markdown in Neovim, it gets converted to Jira's ADF format on save. ADF from Jira gets converted back to Markdown for display.
+Descriptions and comments round-trip as Markdown. Write Markdown in the editor, it gets converted to Jira's ADF format on save. ADF from Jira gets converted back to Markdown for display.
 
 ### @mentions
 
-In a description or comment, type `@`. Neovim opens a completion menu of the project's assignable users — pick one and it inserts `[@Name](jira-mention:<id>)`. On save, that becomes a real Jira mention.
+In a description or comment, type `@`. The editor opens a completion menu of the project's assignable users — pick one and it inserts `[@Name](jira-mention:<id>)`. On save, that becomes a real Jira mention.
 
 Plain `@foo` that you type yourself stays as literal text. The mention is whatever came out of the menu — no guessing.
 
-The completion source is injected via `--cmd` / `-c` and is buffer-local, so it doesn't touch your regular Neovim config.
+The completion source is injected via `--cmd` / `-c` and is buffer-local, so it doesn't touch your regular Neovim/Vim config. (It's classic vimscript, so it works in both.)
 
 ### Stats
 

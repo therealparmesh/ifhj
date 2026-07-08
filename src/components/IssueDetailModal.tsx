@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { JiraConfig } from "../config";
 import { coerceFieldValue } from "../customFields";
-import { editInNeovim } from "../editor";
+import { editInNeovim, editorLabel } from "../editor";
 import { useDimensions, useLoading } from "../hooks";
 import {
   type Comment,
@@ -14,7 +14,6 @@ import {
   type JiraUser,
   addComment,
   fetchCurrentUser,
-  getAssignableUsers,
   getIssueDetail,
   unwatchIssue,
   updateComment,
@@ -118,6 +117,7 @@ export function IssueDetailModal({
   cfg,
   projectKey,
   issueKey,
+  ensureUsers,
   onClose,
   onMove,
   onTransition,
@@ -127,6 +127,9 @@ export function IssueDetailModal({
   cfg: JiraConfig;
   projectKey: string;
   issueKey: string;
+  /** Warmed assignable-users provider (shared with the board so `@`-mention
+   *  completion is fetched once per board, not per surface). */
+  ensureUsers: () => Promise<JiraUser[]>;
   onClose: () => void;
   onMove: () => void;
   onTransition: () => void;
@@ -153,25 +156,6 @@ export function IssueDetailModal({
   const [saving, setSaving] = useState(false);
 
   const [myAccountId, setMyAccountId] = useState<string | null>(null);
-
-  /**
-   * Assignable-users cache, feeding Neovim's `@`-completion menu on every
-   * description/comment edit. Lazy-fetched once per modal open — project
-   * membership doesn't churn fast enough to be worth refreshing. The
-   * `assignee`-field editor fetches its own list; keeping them separate
-   * avoids reshuffling that path.
-   */
-  const usersRef = useRef<JiraUser[] | null>(null);
-  const ensureUsers = useCallback(async (): Promise<JiraUser[]> => {
-    try {
-      if (!usersRef.current) {
-        usersRef.current = await getAssignableUsers(cfg, projectKey);
-      }
-      return usersRef.current;
-    } catch {
-      return [];
-    }
-  }, [cfg, projectKey]);
 
   // First load is fatal (full-screen error); once the issue is loaded, a failed
   // refresh or post-save re-fetch just flashes a toast and keeps the view up —
@@ -620,7 +604,7 @@ export function IssueDetailModal({
     return (
       <ListPicker
         title={`${comment.author} · ${formatShortDate(comment.created)}`}
-        items={[{ id: "edit", label: "edit comment (Neovim)" }]}
+        items={[{ id: "edit", label: `edit comment (${editorLabel()})` }]}
         onPick={(id) => {
           if (id === "edit") {
             setOverlay({ kind: "none" });

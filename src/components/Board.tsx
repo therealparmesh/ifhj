@@ -9,7 +9,7 @@ import {
   writeRecents,
 } from "../cache";
 import type { JiraConfig } from "../config";
-import { editInNeovim } from "../editor";
+import { editInNeovim, editorLabel } from "../editor";
 import { useDimensions, useLoading } from "../hooks";
 import {
   type BoardConfig,
@@ -184,8 +184,9 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
 
   // Link & issue types don't change for the life of the board — fetch once, reuse.
   const metaCache = useRef<{ types: IssueType[]; linkTypes: IssueLinkType[] } | null>(null);
-  // Assignable-users cache for @-completion in Neovim, shared across every
-  // edit path that shells out on this board.
+  // Assignable-users cache for @-completion in the editor, shared across every
+  // edit path that shells out on this board — including the detail modal, which
+  // takes `ensureUsers` as a prop rather than fetching its own copy.
   const usersRef = useRef<JiraUser[] | null>(null);
   // First load is fatal; reload failures just flash a toast.
   const hasLoadedOnce = useRef(false);
@@ -800,7 +801,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   /**
    * Lazy-hydrate the project's assignable users. Handed to `editInNeovim`
    * so the editor's `@` completion menu can offer real teammates. Fetch
-   * failure isn't fatal — we just spawn plain nvim without the menu.
+   * failure isn't fatal — we just open the editor without the menu.
    */
   const ensureUsers = useCallback(async (): Promise<JiraUser[]> => {
     if (!conf) return [];
@@ -813,6 +814,14 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       return [];
     }
   }, [cfg, conf]);
+
+  // Pre-warm the assignable-users list as soon as the board's project is
+  // known, so the first `@`-mention edit opens the editor instantly instead of
+  // blocking on this fetch behind the "editing…" banner. Cached in usersRef,
+  // so the edit paths (board + detail modal) reuse it. Fire-and-forget.
+  useEffect(() => {
+    if (conf) void ensureUsers();
+  }, [conf, ensureUsers]);
 
   const doEditDescription = useCallback(async () => {
     const issue = currentIssue;
@@ -1339,7 +1348,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         items={[
           { id: "detail", label: "view details" },
           { id: "title", label: "edit title" },
-          { id: "desc", label: "edit description (Neovim)" },
+          { id: "desc", label: `edit description (${editorLabel()})` },
           { id: "transition", label: "transition to status…" },
           { id: "move", label: "move to column…" },
           { id: "assign-me", label: "assign to me" },
@@ -1450,6 +1459,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         cfg={cfg}
         projectKey={conf.projectKey}
         issueKey={modal.issueKey}
+        ensureUsers={ensureUsers}
         onClose={closeModal}
         onMove={() => setModal({ kind: "move-picker", issueKey: modal.issueKey })}
         onTransition={async () => {

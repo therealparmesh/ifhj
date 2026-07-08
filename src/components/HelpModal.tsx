@@ -1,6 +1,11 @@
 import { Box, Text, useInput } from "ink";
 
+import { editorLabel } from "../editor";
 import { theme } from "../ui";
+
+// Resolved editor name ("Neovim" / "Vim") interpolated into the edit hints so
+// help matches whatever's actually on $PATH.
+const ED = editorLabel();
 
 const BOARD_BINDINGS: { keys: string; desc: string }[] = [
   { keys: "← → h l", desc: "move between columns" },
@@ -15,7 +20,7 @@ const BOARD_BINDINGS: { keys: string; desc: string }[] = [
   { keys: "[ ]", desc: "rerank card up / down within column" },
   { keys: "i", desc: "assign to me" },
   { keys: "e", desc: "edit title (inline)" },
-  { keys: "E", desc: "edit description (Neovim)" },
+  { keys: "E", desc: `edit description (${ED})` },
   { keys: "c", desc: "create issue" },
   { keys: "a", desc: "quick add to current column" },
   { keys: "y / Y", desc: "yank issue key / URL to clipboard" },
@@ -38,10 +43,10 @@ const DETAIL_BINDINGS: { keys: string; desc: string }[] = [
   { keys: "⏎", desc: "edit focused field or open comment" },
   { keys: "x", desc: "clear focused field" },
   { keys: "[ ]", desc: "prev / next comment" },
-  { keys: "c", desc: "add comment (Neovim)" },
+  { keys: "c", desc: `add comment (${ED})` },
   { keys: "C", desc: "create subtask" },
   { keys: "e", desc: "edit title (inline)" },
-  { keys: "E", desc: "edit description (Neovim)" },
+  { keys: "E", desc: `edit description (${ED})` },
   { keys: "t", desc: "transition to status" },
   { keys: "m", desc: "move to column" },
   { keys: "w", desc: "toggle watch / unwatch" },
