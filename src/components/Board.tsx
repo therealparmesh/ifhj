@@ -199,9 +199,12 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   // operation on it — anything you touch is "recent". Reads the summary from
   // whatever's currently loaded, falling back to the key.
   const touchRecent = useCallback(
-    (key: string) => {
+    (key: string, summaryOverride?: string) => {
       setRecents((prev) => {
+        // Prefer an explicit summary (freshly-created cards aren't in `issues`
+        // yet), then the loaded card, then a prior recents entry, then the key.
         const summary =
+          summaryOverride ??
           issues.find((i) => i.key === key)?.summary ??
           prev.find((r) => r.key === key)?.summary ??
           key;
@@ -922,8 +925,8 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   );
 
   const openDetailForKey = useCallback(
-    (key: string) => {
-      touchRecent(key);
+    (key: string, summary?: string) => {
+      touchRecent(key, summary);
       setModal({ kind: "detail", issueKey: key });
     },
     [touchRecent],
@@ -1065,7 +1068,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
             : `created ${created.key} (couldn't move to ${targetCol.name})`,
           landed ? "ok" : "info",
         );
-        touchRecent(created.key);
+        touchRecent(created.key, trimmed);
         await load();
       } catch (e) {
         flash(errorMessage(e), "err");
@@ -1652,7 +1655,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           // Reload in the background so the new card shows up on the board
           // beneath the detail view — the user closes detail and lands on it.
           void load();
-          void openDetailForKey(key);
+          void openDetailForKey(key, title);
         }}
         onError={(msg) => {
           flash(msg, "err");
