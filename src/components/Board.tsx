@@ -625,12 +625,18 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       // it there, so the move feels instant. `from` is the card's current
       // status — kept so reconcile can tell the write landed even if a workflow
       // post-function redirects the card to a status other than the predicted
-      // target. Only overlay a real reposition: if the target equals the
-      // current status (a self-loop transition) or we can't resolve the current
-      // status, an overlay would never reconcile away, so skip it and just POST
-      // + reload. `busyKeys` still marks the card pending in that case.
+      // target. Overlay only when the move is a real, on-board reposition:
+      //   - `targetColIdx` is set → the target status maps to a visible column
+      //     (so the overlaid card actually lands somewhere, not vanishes);
+      //   - the target differs from the current status (not a self-loop);
+      //   - the current status is resolvable.
+      // Otherwise skip the overlay and just POST + reload — `busyKeys` still
+      // marks the card pending. This covers picker transitions to a status
+      // that isn't a column on this board (targetColIdx undefined), which would
+      // otherwise make the card disappear until the refetch.
       const from = issues.find((i) => i.key === issueKey)?.statusId;
-      const optimistic = from !== undefined && from !== transition.toStatusId;
+      const optimistic =
+        opts.targetColIdx !== undefined && from !== undefined && from !== transition.toStatusId;
       if (optimistic) {
         // The overlay lives until reconcile confirms the write — not until this
         // callback returns — so the pending style persists correctly even when
