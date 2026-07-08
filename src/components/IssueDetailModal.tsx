@@ -233,7 +233,10 @@ export function IssueDetailModal({
   const innerWidth = Math.max(60, termCols - 4);
   const sideWidth = Math.min(Math.max(26, Math.floor(innerWidth * 0.34)), innerWidth - 30);
   const mainWidth = innerWidth - sideWidth;
-  const bodyHeight = Math.max(3, innerHeight - 5);
+  // The 5 fixed rows + body fill the modal box exactly, so the body yields a
+  // row per visible toast — otherwise the ToastStack (last child) overflows the
+  // fixed-height box and Ink clips it, and toasts never appear in the modal.
+  const bodyHeight = Math.max(3, innerHeight - 5 - toasts.length);
 
   const mainLines = useMemo(
     () => (detail ? renderDetailLines(detail, mainWidth) : []),

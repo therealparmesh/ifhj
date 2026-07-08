@@ -1,7 +1,13 @@
 import { Box, Text, useInput } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { readBoardCache, writeBoardCache } from "../cache";
+import {
+  type RecentIssue,
+  readBoardCache,
+  readRecents,
+  writeBoardCache,
+  writeRecents,
+} from "../cache";
 import type { JiraConfig } from "../config";
 import { editInNeovim } from "../editor";
 import { useDimensions, useLoading } from "../hooks";
@@ -53,7 +59,7 @@ import { LoadingLine } from "./LoadingLine";
 import { NvimBanner } from "./NvimBanner";
 import { ProgressBar } from "./ProgressBar";
 import { QuickAddModal } from "./QuickAddModal";
-import { type RecentIssue, QuickOpen } from "./QuickOpen";
+import { QuickOpen } from "./QuickOpen";
 import { SwimlaneGrid } from "./SwimlaneGrid";
 import { SwimlaneHeader } from "./SwimlaneHeader";
 import { TitleEditModal } from "./TitleEditModal";
@@ -186,6 +192,26 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   // After a transition, follow the moved card to its new column on reload.
   const pendingFocusKey = useRef<string | null>(null);
   const [recents, setRecents] = useState<RecentIssue[]>([]);
+
+  // Push a card to the front of the MRU recents list (deduped, capped at 20)
+  // and persist it, so quick-open (`R`) starts populated across sessions.
+  // Called both when opening a card's detail and after any successful
+  // operation on it — anything you touch is "recent". Reads the summary from
+  // whatever's currently loaded, falling back to the key.
+  const touchRecent = useCallback(
+    (key: string) => {
+      setRecents((prev) => {
+        const summary =
+          issues.find((i) => i.key === key)?.summary ??
+          prev.find((r) => r.key === key)?.summary ??
+          key;
+        const next = [{ key, summary }, ...prev.filter((r) => r.key !== key)].slice(0, 20);
+        void writeRecents(cfg, board.id, next);
+        return next;
+      });
+    },
+    [issues, cfg, board.id],
+  );
 
   // Keys of issues with a board-repositioning mutation in flight (a transition
   // or rerank POST + the reload that follows). Such cards render with a
@@ -405,6 +431,11 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     void load();
   }, [load]);
 
+  // Load persisted quick-open recents once per board.
+  useEffect(() => {
+    readRecents(cfg, board.id).then(setRecents);
+  }, [cfg, board.id]);
+
   /**
    * Coalesced background reload. Rapid optimistic moves would otherwise each
    * fire a full board refetch; instead, if a reload is already running a caller
@@ -511,11 +542,14 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     [matches, matchIdx, flash, query, focusMatch],
   );
 
-  // Layout math — columns beyond `maxColumns` require ←/→ paging. The `-3`
-  // covers the header row, the progress-line row, and one for the height base;
-  // the footer takes its own rows.
+  // Layout math — columns beyond `maxColumns` require ←/→ paging. Header +
+  // progress + grid + footer sum to termRows-1, leaving one free row that fits
+  // a single toast. The board box is a fixed termRows tall, so a *stack* of
+  // toasts would overflow and Ink would clip all but the first — the grid
+  // yields a row for each toast beyond the first. One toast (the common case)
+  // costs nothing; the shrink is transient and reverts when they clear.
   const footerRows = modal.kind === "search" ? 5 : 3;
-  const columnHeight = Math.max(6, termRows - 3 - footerRows);
+  const columnHeight = Math.max(6, termRows - 3 - footerRows - Math.max(0, toasts.length - 1));
   const columnInnerHeight = columnHeight - 2; // minus border top/bottom
   const perCardLines = 5; // card = 3 content + 1 spacer + 1 (border-ish) handled via marginBottom
   const cardsVisible = Math.max(1, Math.floor(columnInnerHeight / perCardLines));
@@ -653,6 +687,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       try {
         await transitionIssue(cfg, issueKey, transition.id, opts.fields);
         flash(`${issueKey} → ${transition.name}`, "ok");
+        touchRecent(issueKey);
         await coalescedReload();
       } catch (e) {
         if (optimistic) clearPending(issueKey);
@@ -662,7 +697,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         if (!optimistic) markBusy(issueKey, false);
       }
     },
-    [cfg, issues, flash, coalescedReload, markBusy, startPending, clearPending],
+    [cfg, issues, flash, coalescedReload, markBusy, startPending, clearPending, touchRecent],
   );
 
   const moveToColumn = useCallback(
@@ -790,12 +825,13 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       }
       await updateDescription(cfg, issue.key, raw);
       flash(`${issue.key} description updated`, "ok");
+      touchRecent(issue.key);
       await load();
     } catch (e) {
       setModal({ kind: "none" });
       flash(errorMessage(e), "err");
     }
-  }, [currentIssue, cfg, flash, load, ensureUsers]);
+  }, [currentIssue, cfg, flash, load, ensureUsers, touchRecent]);
 
   const doAssignToMe = useCallback(async () => {
     const issue = currentIssue;
@@ -806,11 +842,12 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     try {
       await track(assignIssueToMe(cfg, issue.key));
       flash(`${issue.key} assigned to you`, "ok");
+      touchRecent(issue.key);
       await load();
     } catch (e) {
       flash(errorMessage(e), "err");
     }
-  }, [currentIssue, cfg, flash, load, track]);
+  }, [currentIssue, cfg, flash, load, track, touchRecent]);
 
   const doFuzzyTransition = useCallback(async () => {
     const issue = currentIssue;
@@ -860,6 +897,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         );
         pendingFocusKey.current = issue.key;
         flash(`${issue.key} reranked ${direction === -1 ? "up" : "down"}`, "ok");
+        touchRecent(issue.key);
         await coalescedReload();
       } catch (e) {
         flash(errorMessage(e), "err");
@@ -879,17 +917,16 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       coalescedReload,
       pendingKeys,
       markBusy,
+      touchRecent,
     ],
   );
 
   const openDetailForKey = useCallback(
     (key: string) => {
-      const issue = issues.find((i) => i.key === key);
-      const summary = issue?.summary ?? key;
-      setRecents((prev) => [{ key, summary }, ...prev.filter((r) => r.key !== key).slice(0, 19)]);
+      touchRecent(key);
       setModal({ kind: "detail", issueKey: key });
     },
-    [issues],
+    [touchRecent],
   );
 
   const openDetail = useCallback(() => {
@@ -1028,12 +1065,13 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
             : `created ${created.key} (couldn't move to ${targetCol.name})`,
           landed ? "ok" : "info",
         );
+        touchRecent(created.key);
         await load();
       } catch (e) {
         flash(errorMessage(e), "err");
       }
     },
-    [cfg, conf, flash, load, closeModal],
+    [cfg, conf, flash, load, closeModal, touchRecent],
   );
 
   // Nudge the cursor within the active column / across columns.
@@ -1393,6 +1431,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           try {
             await updateSummary(cfg, editKey, next);
             flash(`${editKey} title updated`, "ok");
+            touchRecent(editKey);
             await load();
           } catch (e) {
             flash(errorMessage(e), "err");

@@ -159,6 +159,10 @@ Moves are optimistic. The card jumps to its destination immediately, dimmed with
 
 When a board defines swimlanes, `s` groups it into horizontal lanes. Custom (JQL) lanes come from the board's own config, evaluated server-side; assignee, epic, issue-type, and parent lanes are grouped locally. Cards render one per line so several lanes fit on screen at once.
 
+### Quick open
+
+`R` opens a finder. Empty query lists recently-touched cards — anything you view or successfully act on (move, rerank, assign, edit, create). Recents persist per board across sessions at `~/.cache/ifhj/`. Type to search all issues in the project.
+
 ### Card order
 
 Within a column, cards keep Jira's rank order — except finished-work columns (any status in Jira's "done" category, whatever the column is named), which sort newest-updated first so fresh completions don't get buried under stale rank.

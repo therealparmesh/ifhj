@@ -1,14 +1,13 @@
 import { Box, Text } from "ink";
 import { useEffect, useRef, useState } from "react";
 
+import type { RecentIssue } from "../cache";
 import type { JiraConfig } from "../config";
 import { useDimensions } from "../hooks";
 import { type IssueSearchResult, searchIssues } from "../jira";
 import { clamp, fg, stickyScroll, theme, truncate } from "../ui";
 import { Hint } from "./Hint";
 import { TextInput } from "./TextInput";
-
-export type RecentIssue = { key: string; summary: string };
 
 /**
  * Quick-open finder (opened with `R`). Empty query → the recently-visited

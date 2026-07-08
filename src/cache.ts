@@ -62,3 +62,34 @@ export async function writeBoardCache(
     await Bun.write(cachePath(cfg.server, boardId), JSON.stringify(data));
   } catch {}
 }
+
+/** Recently-touched issues, persisted per server+board so quick-open (`R`)
+ *  starts populated across sessions. Newest first. */
+export type RecentIssue = { key: string; summary: string };
+
+function recentsPath(server: string, boardId: number): string {
+  return join(CACHE_DIR, `${serverSlug(server)}-board-${boardId}-recents.json`);
+}
+
+export async function readRecents(cfg: JiraConfig, boardId: number): Promise<RecentIssue[]> {
+  try {
+    const f = Bun.file(recentsPath(cfg.server, boardId));
+    if (!(await f.exists())) return [];
+    const data = await f.json();
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function writeRecents(
+  cfg: JiraConfig,
+  boardId: number,
+  recents: RecentIssue[],
+): Promise<void> {
+  try {
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(CACHE_DIR, { recursive: true });
+    await Bun.write(recentsPath(cfg.server, boardId), JSON.stringify(recents));
+  } catch {}
+}
