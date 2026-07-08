@@ -16,6 +16,7 @@ import {
 import { errorMessage, fg, theme, truncate } from "../ui";
 import { FilterPicker } from "./FilterPicker";
 import { Hint } from "./Hint";
+import { LoadingLine } from "./LoadingLine";
 import { NvimBanner } from "./NvimBanner";
 
 /**
@@ -536,7 +537,7 @@ function SubmittingBanner({ onEscape }: { onEscape: () => void }) {
   });
   return (
     <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.accent}>
-      <Text color={theme.accent}>◴ creating issue…</Text>
+      <LoadingLine label="creating issue…" />
       <Box marginTop={1}>
         <Text color={theme.muted}>esc to abandon (request may still land)</Text>
       </Box>

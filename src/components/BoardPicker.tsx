@@ -5,6 +5,7 @@ import type { JiraConfig } from "../config";
 import { useDimensions } from "../hooks";
 import { type Board, listBoards } from "../jira";
 import { clamp, errorMessage, fg, stickyScroll, theme, truncate } from "../ui";
+import { LoadingLine } from "./LoadingLine";
 import { TextInput } from "./TextInput";
 
 type Props = {
@@ -112,8 +113,7 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
           ifhj
         </Text>
         <Box marginTop={1}>
-          <Text color={theme.info}>◴ </Text>
-          <Text color={theme.muted}>loading boards…</Text>
+          <LoadingLine label="loading boards…" />
         </Box>
       </Box>
     );

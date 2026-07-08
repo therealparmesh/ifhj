@@ -41,6 +41,7 @@ import { Hint } from "./Hint";
 import { formatShortDate, renderDetailLines } from "./IssueDetailLines";
 import { InlineFieldInput } from "./IssueDetailSide";
 import { ListPicker } from "./ListPicker";
+import { LoadingLine } from "./LoadingLine";
 import { NvimBanner } from "./NvimBanner";
 import { ProgressBar } from "./ProgressBar";
 import { ToastStack, useToasts } from "./Toasts";
@@ -172,15 +173,22 @@ export function IssueDetailModal({
     }
   }, [cfg, projectKey]);
 
+  // First load is fatal (full-screen error); once the issue is loaded, a failed
+  // refresh or post-save re-fetch just flashes a toast and keeps the view up —
+  // same first-load-fatal / reload-toast split the board uses.
+  const hasLoadedOnce = useRef(false);
   const fetchDetail = useCallback(async () => {
     try {
       const d = await track(getIssueDetail(cfg, issueKey));
       setDetail(d);
       setLoadError(null);
+      hasLoadedOnce.current = true;
     } catch (e) {
-      setLoadError(errorMessage(e));
+      const msg = errorMessage(e);
+      if (hasLoadedOnce.current) showFlash(msg, "err");
+      else setLoadError(msg);
     }
-  }, [cfg, issueKey, track]);
+  }, [cfg, issueKey, track, showFlash]);
 
   useEffect(() => {
     void fetchDetail();
@@ -195,9 +203,13 @@ export function IssueDetailModal({
 
   const doSave = useCallback(
     async (fn: () => Promise<void>, successMsg: string) => {
+      // `saving` gates input during the write (you can't fire another edit
+      // mid-save); the animated progress line is the only *visual* — the whole
+      // save (mutation + the fetchDetail refresh) runs through `track` so the
+      // bar stays lit continuously across both.
       setSaving(true);
       try {
-        await fn();
+        await track(fn());
         showFlash(successMsg, "ok");
         await fetchDetail();
         onRefresh();
@@ -207,7 +219,7 @@ export function IssueDetailModal({
         setSaving(false);
       }
     },
-    [fetchDetail, showFlash, onRefresh],
+    [fetchDetail, showFlash, onRefresh, track],
   );
 
   // Layout. Fixed siblings inside the modal box: header row (1) + summary
@@ -652,7 +664,7 @@ export function IssueDetailModal({
         borderColor={theme.accent}
         padding={1}
       >
-        <Text color={theme.accent}>◴ loading {issueKey}…</Text>
+        <LoadingLine label={`loading ${issueKey}…`} />
       </Box>
     );
   }
@@ -753,7 +765,6 @@ export function IssueDetailModal({
           </>
         ) : null}
         {detail.watching ? <Text color={theme.info}> ◉</Text> : null}
-        {saving ? <Text color={theme.warning}> ◴ saving…</Text> : null}
       </Box>
       <Box paddingX={1}>
         <Text {...fg(theme.fg)} bold>

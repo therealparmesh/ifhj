@@ -41,6 +41,7 @@ export function QuickOpen({
   const [idx, setIdx] = useState(0);
   const [results, setResults] = useState<IssueSearchResult[]>([]);
   const [loading, setLoading] = useState(false);
+  const [searchError, setSearchError] = useState(false);
   const scrollRef = useRef(0);
   // Sequence-guard so a slow global search that resolves after a newer
   // keystroke (or after cancel) can't overwrite fresher results.
@@ -62,12 +63,18 @@ export function QuickOpen({
     }
     const seq = ++searchSeq.current;
     setLoading(true);
+    setSearchError(false);
     const t = setTimeout(async () => {
       try {
         const r = await searchIssues(cfg, q.trim());
         if (seq === searchSeq.current) setResults(r);
       } catch {
-        if (seq === searchSeq.current) setResults([]);
+        // Surface failure in the section label rather than passing it off as
+        // "no matches" — a network error and an empty result look different.
+        if (seq === searchSeq.current) {
+          setResults([]);
+          setSearchError(true);
+        }
       } finally {
         if (seq === searchSeq.current) setLoading(false);
       }
@@ -96,9 +103,11 @@ export function QuickOpen({
     // a zero-result search reads clearly instead of showing a bare header.
     const label = loading
       ? "all issues · searching…"
-      : globalResults.length === 0
-        ? "all issues · no matches"
-        : "all issues";
+      : searchError
+        ? "all issues · search failed"
+        : globalResults.length === 0
+          ? "all issues · no matches"
+          : "all issues";
     rows.push({ kind: "sep", label });
     for (const r of globalResults)
       rows.push({ kind: "issue", key: r.key, summary: r.summary, issueType: r.issueType });

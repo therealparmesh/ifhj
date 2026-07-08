@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import { BoardView } from "./components/Board";
 import { BoardPicker } from "./components/BoardPicker";
+import { LoadingLine } from "./components/LoadingLine";
 import { type Settings, loadConfig, type JiraConfig, loadSettings } from "./config";
 import type { Board } from "./jira";
 import { errorMessage, setTheme, theme } from "./ui";
@@ -60,8 +61,7 @@ function App() {
           <Text color={theme.muted}>— startup</Text>
         </Box>
         <Box marginTop={1}>
-          <Text color={theme.info}>◴ </Text>
-          <Text color={theme.muted}>loading…</Text>
+          <LoadingLine label="loading…" />
         </Box>
       </Box>
     );

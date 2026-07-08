@@ -6,6 +6,7 @@ import { useDimensions } from "../hooks";
 import { type IssueSearchResult, searchByJql } from "../jira";
 import { clamp, errorMessage, fg, stickyScroll, theme, truncate } from "../ui";
 import { Hint } from "./Hint";
+import { LoadingLine } from "./LoadingLine";
 import { TextInput } from "./TextInput";
 
 export function JqlView({
@@ -75,7 +76,7 @@ export function JqlView({
       ) : null}
       {loading ? (
         <Box marginTop={1}>
-          <Text color={theme.accent}>searching…</Text>
+          <LoadingLine label="searching…" />
         </Box>
       ) : results.length > 0 ? (
         <JqlResults results={results} idx={idx} setIdx={setIdx} onPick={onPick} />

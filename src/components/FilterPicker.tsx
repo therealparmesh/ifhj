@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { clamp, fg, stickyScroll, theme } from "../ui";
 import { Hint } from "./Hint";
+import { LoadingLine } from "./LoadingLine";
 import { TextInput } from "./TextInput";
 
 type FilterItem = { id: string; label: string; hint?: string | undefined };
@@ -136,7 +137,7 @@ export function FilterPicker({
       </Box>
       <Box marginTop={1} flexDirection="column">
         {loading ? (
-          <Text color={theme.accent}>◴ searching…</Text>
+          <LoadingLine label="searching…" />
         ) : filtered.length === 0 ? (
           <Text color={theme.muted}>no matches</Text>
         ) : (

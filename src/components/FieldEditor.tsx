@@ -11,6 +11,7 @@ import {
 import { errorMessage, theme } from "../ui";
 import { FilterPicker } from "./FilterPicker";
 import { InlineFieldInput } from "./IssueDetailSide";
+import { LoadingLine } from "./LoadingLine";
 
 /**
  * Single-field editor that renders an appropriate sub-picker for the
@@ -94,7 +95,7 @@ export function FieldEditor({
           {field.name}
         </Text>
         <Box marginTop={1}>
-          <Text color={theme.muted}>loading users…</Text>
+          <LoadingLine label="loading users…" />
         </Box>
       </Box>
     );
