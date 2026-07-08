@@ -151,6 +151,18 @@ Pick a board. Everything's keyboard from there.
 | `r`             | refresh                         |
 | `Esc` / `q`     | close                           |
 
+### Moving cards
+
+Moves are optimistic. The card jumps to its destination immediately, dimmed with a `◴` while the transition POSTs in the background, then settles when Jira confirms — or snaps back with an error if it's rejected. Different cards move at once; a card mid-move is locked until it lands.
+
+### Swimlanes
+
+When a board defines swimlanes, `s` groups it into horizontal lanes. Custom (JQL) lanes come from the board's own config, evaluated server-side; assignee, epic, issue-type, and parent lanes are grouped locally. Cards render one per line so several lanes fit on screen at once.
+
+### Card order
+
+Within a column, cards keep Jira's rank order — except finished-work columns (any status in Jira's "done" category, whatever the column is named), which sort newest-updated first so fresh completions don't get buried under stale rank.
+
 ### Editable fields
 
 Assignee, priority, parent, story points, labels, components, fix versions, due date. Tab to the fields pane, Enter to edit, `x` to clear. Array fields (labels, components, fix versions) give you add/remove/clear options.
