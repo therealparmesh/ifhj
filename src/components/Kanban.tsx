@@ -193,6 +193,7 @@ function Card({
           {...fg(summaryColor)}
           bold={selected && !busy}
           inverse={selected && !busy}
+          wrap="truncate"
           {...matchBgProps}
         >
           {summaryText}
@@ -200,6 +201,7 @@ function Card({
         <Text
           {...fg(busy ? theme.warning : selected ? theme.fg : theme.muted)}
           inverse={selected && !busy}
+          wrap="truncate"
           {...matchBgProps}
         >
           {metaText}
