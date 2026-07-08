@@ -49,6 +49,7 @@ import { IssueDetailModal } from "./IssueDetailModal";
 import { JqlView } from "./JqlView";
 import { ColumnView, PagingArrow } from "./Kanban";
 import { ListPicker } from "./ListPicker";
+import { LoadingLine } from "./LoadingLine";
 import { NvimBanner } from "./NvimBanner";
 import { ProgressBar } from "./ProgressBar";
 import { QuickAddModal } from "./QuickAddModal";
@@ -130,6 +131,16 @@ function swimlaneStrategyLabel(strategy: BoardSwimlanes["strategy"] | undefined)
 
 type CellRef = { col: number; row: number };
 
+/** Does an issue match the search query? `q` must already be lowercased.
+ *  Shared by the flat board's cell matches and the swimlane key matches. */
+function issueMatches(issue: Issue, q: string): boolean {
+  return (
+    issue.summary.toLowerCase().includes(q) ||
+    issue.key.toLowerCase().includes(q) ||
+    (issue.assignee ?? "").toLowerCase().includes(q)
+  );
+}
+
 export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   const { cols: termCols, rows: termRows } = useDimensions();
 
@@ -191,6 +202,45 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     });
   }, []);
 
+  // Optimistic move overlay: key → { from, to } status ids. Applied at render
+  // time (see `displayIssues`) so a card jumps to its target column the instant
+  // the move starts, before the POST resolves. Cleared on POST failure (card
+  // snaps back) or — on success — once refetched data shows the write took
+  // effect (the reconcile effect below). `from` lets reconcile detect success
+  // even when a workflow post-function redirects the card to a status other
+  // than the predicted `to`.
+  type PendingMove = { from: string; to: string };
+  const [pendingMove, setPendingMove] = useState<ReadonlyMap<string, PendingMove>>(new Map());
+  const startPending = useCallback((key: string, from: string, to: string) => {
+    setPendingMove((prev) => {
+      const cur = prev.get(key);
+      if (cur && cur.from === from && cur.to === to) return prev;
+      const next = new Map(prev);
+      next.set(key, { from, to });
+      return next;
+    });
+  }, []);
+  const clearPending = useCallback((key: string) => {
+    setPendingMove((prev) => {
+      if (!prev.has(key)) return prev;
+      const next = new Map(prev);
+      next.delete(key);
+      return next;
+    });
+  }, []);
+
+  // A card is "pending" — rendered in the loading style and blocked from
+  // further actions — if it has a write in flight (busyKeys: rerank, or a
+  // transition's lookup phase) OR an optimistic move overlay (pendingMove).
+  // Both the grids and the action guard read this union, so the two mechanisms
+  // never disagree about whether a card is settling.
+  const pendingKeys = useMemo((): ReadonlySet<string> => {
+    if (pendingMove.size === 0) return busyKeys;
+    const s = new Set(busyKeys);
+    for (const k of pendingMove.keys()) s.add(k);
+    return s;
+  }, [busyKeys, pendingMove]);
+
   const setActiveRowAt = useCallback((col: number, row: number) => {
     setActiveRows((prev) => {
       const arr = prev.slice();
@@ -210,16 +260,27 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     if (filters.epic) list = list.filter((i) => i.epicKey === filters.epic);
     return list;
   }, [issues, filters]);
+  // Overlay optimistic moves: a card with a pending move is shown under its
+  // target status (so it renders in the destination column) until the real
+  // data catches up. Everything downstream — columns, lanes, cursor — sees the
+  // card already moved, so the whole board reflects it with no special-casing.
+  const displayIssues = useMemo(() => {
+    if (pendingMove.size === 0) return filteredIssues;
+    return filteredIssues.map((i) => {
+      const pm = pendingMove.get(i.key);
+      return pm && pm.to !== i.statusId ? { ...i, statusId: pm.to } : i;
+    });
+  }, [filteredIssues, pendingMove]);
   const columns = useMemo(
-    () => (conf ? buildColumns(conf.columns, filteredIssues) : []),
-    [conf, filteredIssues],
+    () => (conf ? buildColumns(conf.columns, displayIssues) : []),
+    [conf, displayIssues],
   );
 
   // Grouped lanes for the swimlane view — same filtered issues, bucketed by
   // the board's strategy. Only meaningful when `swimlanes` is present.
   const lanes: Lane[] = useMemo(
-    () => (conf && swimlanes ? buildLanes(conf.columns, filteredIssues, swimlanes) : []),
-    [conf, swimlanes, filteredIssues],
+    () => (conf && swimlanes ? buildLanes(conf.columns, displayIssues, swimlanes) : []),
+    [conf, swimlanes, displayIssues],
   );
   const hasSwimlanes = !!swimlanes && swimlanes.strategy !== "none";
 
@@ -262,6 +323,36 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     setActiveRows((prev) => c.columns.map((_, i) => prev[i] ?? 0));
     scrollsRef.current = c.columns.map((_, i) => scrollsRef.current[i] ?? 0);
   }, []);
+
+  // Reconcile optimistic moves against real data: drop a card's overlay once a
+  // refetch shows the write took effect — its real status has left `from`
+  // (reached `to`, or wherever a workflow post-function redirected it). This is
+  // what makes a *successful* move stick without a snap: the overlay dissolves
+  // only when reality confirms the move, so it never flickers to a stale status
+  // between the POST and the refetch, and once dropped the card renders at its
+  // true status. A failed move clears its own overlay in the catch.
+  //
+  // Clearing is reload-driven, not timer-driven — no polling. In the rare case
+  // Jira's board read lags the write (returns the old status just after the
+  // POST), the card simply stays in its target column, in the pending style,
+  // until the next reload (any other move, rerank, or `r`) confirms it. The
+  // data is already correct; only the "settling" cue lingers.
+  useEffect(() => {
+    if (pendingMove.size === 0) return;
+    const status = new Map(issues.map((i) => [i.key, i.statusId]));
+    setPendingMove((prev) => {
+      let next: Map<string, PendingMove> | null = null;
+      for (const [key, pm] of prev) {
+        const real = status.get(key);
+        // Gone from the board, or moved off its origin status → move landed.
+        if (real === undefined || real !== pm.from) {
+          next ??= new Map(prev);
+          next.delete(key);
+        }
+      }
+      return next ?? prev;
+    });
+  }, [issues, pendingMove]);
 
   const load = useCallback(async () => {
     setLoadError(null);
@@ -315,6 +406,33 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   }, [load]);
 
   /**
+   * Coalesced background reload. Rapid optimistic moves would otherwise each
+   * fire a full board refetch; instead, if a reload is already running a caller
+   * just sets a "rerun once more when you're done" flag and returns, so a burst
+   * of N moves collapses to at most one in-flight reload plus one trailing
+   * catch-up — never N stacked refetches, and it always ends on fresh data.
+   * (Optimistic overlays keep each card in place until its own reload confirms
+   * it, so a caller returning early never drops a move.)
+   */
+  const reloading = useRef(false);
+  const reloadAgain = useRef(false);
+  const coalescedReload = useCallback(async () => {
+    if (reloading.current) {
+      reloadAgain.current = true;
+      return;
+    }
+    reloading.current = true;
+    try {
+      do {
+        reloadAgain.current = false;
+        await load();
+      } while (reloadAgain.current);
+    } finally {
+      reloading.current = false;
+    }
+  }, [load]);
+
+  /**
    * While the search bar is open, highlights should track what the user is
    * typing. Otherwise they track the committed query.
    */
@@ -325,12 +443,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     const out: CellRef[] = [];
     columns.forEach((c, ci) => {
       c.issues.forEach((issue, ri) => {
-        if (
-          issue.summary.toLowerCase().includes(q) ||
-          issue.key.toLowerCase().includes(q) ||
-          (issue.assignee ?? "").toLowerCase().includes(q)
-        )
-          out.push({ col: ci, row: ri });
+        if (issueMatches(issue, q)) out.push({ col: ci, row: ri });
       });
     });
     return out;
@@ -342,16 +455,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   const swimMatchSet = useMemo(() => {
     if (!liveQuery.trim()) return new Set<string>();
     const q = liveQuery.toLowerCase();
-    return new Set(
-      filteredIssues
-        .filter(
-          (i) =>
-            i.summary.toLowerCase().includes(q) ||
-            i.key.toLowerCase().includes(q) ||
-            (i.assignee ?? "").toLowerCase().includes(q),
-        )
-        .map((i) => i.key),
-    );
+    return new Set(filteredIssues.filter((i) => issueMatches(i, q)).map((i) => i.key));
   }, [filteredIssues, liveQuery]);
 
   // Without this clamp the footer reads "4/2" after matches shrink.
@@ -493,8 +597,6 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     return col.issues[activeRows[activeCol] ?? 0] ?? null;
   }, [swimView, lanes, swimCursor, columns, activeCol, activeRows]);
 
-  const moving = useRef(false);
-
   /**
    * Execute a transition POST, following the card to its new column. If
    * the workflow attaches a required-fields screen (`requiredFields` is
@@ -518,26 +620,43 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         });
         return;
       }
-      markBusy(issueKey, true);
+      // Optimistic overlay: the card jumps to the target status immediately
+      // (rendered in "pending" style via pendingKeys) and the cursor follows
+      // it there, so the move feels instant. `from` is the card's current
+      // status — kept so reconcile can tell the write landed even if a workflow
+      // post-function redirects the card to a status other than the predicted
+      // target. Only overlay a real reposition: if the target equals the
+      // current status (a self-loop transition) or we can't resolve the current
+      // status, an overlay would never reconcile away, so skip it and just POST
+      // + reload. `busyKeys` still marks the card pending in that case.
+      const from = issues.find((i) => i.key === issueKey)?.statusId;
+      const optimistic = from !== undefined && from !== transition.toStatusId;
+      if (optimistic) {
+        // The overlay lives until reconcile confirms the write — not until this
+        // callback returns — so the pending style persists correctly even when
+        // the reload was coalesced into another move's.
+        startPending(issueKey, from, transition.toStatusId);
+      } else {
+        markBusy(issueKey, true);
+      }
+      if (opts.targetColIdx !== undefined) {
+        setActiveCol(opts.targetColIdx);
+        setSwimCursor((c) => ({ ...c, col: opts.targetColIdx! }));
+      }
+      pendingFocusKey.current = issueKey;
       try {
         await transitionIssue(cfg, issueKey, transition.id, opts.fields);
         flash(`${issueKey} → ${transition.name}`, "ok");
-        // Snap the destination column on both cursors — the pending-focus
-        // effect resolves the exact row/lane once the reload lands.
-        if (opts.targetColIdx !== undefined) {
-          setActiveCol(opts.targetColIdx);
-          setSwimCursor((c) => ({ ...c, col: opts.targetColIdx! }));
-        }
-        pendingFocusKey.current = issueKey;
-        await load();
+        await coalescedReload();
       } catch (e) {
+        if (optimistic) clearPending(issueKey);
         pendingFocusKey.current = null;
         flash(errorMessage(e), "err");
       } finally {
-        markBusy(issueKey, false);
+        if (!optimistic) markBusy(issueKey, false);
       }
     },
-    [cfg, flash, load, markBusy],
+    [cfg, issues, flash, coalescedReload, markBusy, startPending, clearPending],
   );
 
   const moveToColumn = useCallback(
@@ -545,17 +664,17 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       const issue = issueOverride ?? currentIssue;
       if (!issue || !conf) return;
       if (targetColIdx < 0 || targetColIdx >= conf.columns.length) return;
-      /**
-       * Reject rapid re-entry while a move is in flight — spamming `<` / `>`
-       * otherwise stacks transitions and races the focus snap.
-       */
-      if (moving.current) {
+      // Per-card guard (not a global lock): a card already settling can't be
+      // re-moved, but other cards move freely and concurrently. That's what
+      // makes fast multi-card moves work without stacking transitions on one
+      // card or racing its focus snap.
+      if (pendingKeys.has(issue.key)) {
         flash(`${issue.key} is updating…`, "info");
         return;
       }
-      moving.current = true;
-      // Mark busy up front so the card shows its spinner during the (possibly
-      // slow) transition lookup, not just once commitTransition runs.
+      // markBusy covers the transition-lookup phase, before the optimistic
+      // overlay exists; commitTransition's startPending takes over as the
+      // pending signal the moment we POST.
       markBusy(issue.key, true);
       const targetCol = conf.columns[targetColIdx]!;
       try {
@@ -575,11 +694,14 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       } catch (e) {
         flash(errorMessage(e), "err");
       } finally {
-        moving.current = false;
+        // Release the lookup-phase flag. On the POST path the overlay is now
+        // the pending signal (dropped by reconcile); on the no-candidate,
+        // required-fields-screen, or error paths this is the only flag to
+        // clear, so the card doesn't stay stuck.
         markBusy(issue.key, false);
       }
     },
-    [currentIssue, conf, cfg, flash, commitTransition, markBusy],
+    [currentIssue, conf, cfg, flash, commitTransition, markBusy, pendingKeys],
   );
 
   /**
@@ -719,7 +841,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         return;
       }
       const neighbor = col.issues[targetRow]!;
-      if (busyKeys.has(issue.key)) {
+      if (pendingKeys.has(issue.key)) {
         flash(`${issue.key} is updating…`, "info");
         return;
       }
@@ -732,7 +854,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         );
         pendingFocusKey.current = issue.key;
         flash(`${issue.key} reranked ${direction === -1 ? "up" : "down"}`, "ok");
-        await load();
+        await coalescedReload();
       } catch (e) {
         flash(errorMessage(e), "err");
       } finally {
@@ -748,8 +870,8 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       activeRows,
       cfg,
       flash,
-      load,
-      busyKeys,
+      coalescedReload,
+      pendingKeys,
       markBusy,
     ],
   );
@@ -984,10 +1106,11 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       if (swimView && input === "G")
         return setSwimCursor((c) => snapToCard(lanes, lanes.length - 1, c.col));
 
-      // Block mutating actions on a card that's mid-update (transition or
-      // rerank in flight). Read-only actions (view, yank, open, refresh) and
-      // navigation stay live so the user can look around while it settles.
-      if (currentIssue && busyKeys.has(currentIssue.key)) {
+      // Block mutating actions on a card that's mid-update (a transition or
+      // rerank in flight, or an optimistic move still settling). Read-only
+      // actions (view, yank, open, refresh) and navigation stay live so the
+      // user can look around while it settles.
+      if (currentIssue && pendingKeys.has(currentIssue.key)) {
         const mutating =
           key.return ||
           input === "e" ||
@@ -1153,8 +1276,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           <Text color={theme.muted}>— {board.name}</Text>
         </Box>
         <Box marginTop={1}>
-          <Text color={theme.info}>◴ </Text>
-          <Text color={theme.muted}>loading board…</Text>
+          <LoadingLine label="loading board…" />
         </Box>
       </Box>
     );
@@ -1285,10 +1407,15 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         onTransition={async () => {
           const key = modal.issueKey;
           try {
-            const trs = await getTransitions(cfg, key);
-            if (trs.length === 0) return;
+            const trs = await track(getTransitions(cfg, key));
+            if (trs.length === 0) {
+              flash("no transitions available", "info");
+              return;
+            }
             setModal({ kind: "transition-picker", transitions: trs, issueKey: key });
-          } catch {}
+          } catch (e) {
+            flash(errorMessage(e), "err");
+          }
         }}
         onCreateSubtask={(parentKey) => {
           closeModal();
@@ -1544,7 +1671,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
                 width={gridWidth}
                 height={swimVisibleRows}
                 matchSet={swimMatchSet}
-                busyKeys={busyKeys}
+                busyKeys={pendingKeys}
                 scrollRef={swimScrollRef}
               />
             </Box>
@@ -1568,7 +1695,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
                   scroll={scrollFor(ci, col.issues.length)}
                   cardsVisible={cardsVisible}
                   matchSet={matchSet}
-                  busyKeys={busyKeys}
+                  busyKeys={pendingKeys}
                   colIdx={ci}
                 />
               );
