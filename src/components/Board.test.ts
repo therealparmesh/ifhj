@@ -113,6 +113,7 @@ test("the newest overlapping load owns rendered and cached board data", async ()
       await waitFor(() => reloads.length === 2, "second refresh");
       reloads[1].resolve(issuePage(issue("PROJ-1", "fresh state")));
       await waitFor(() => terminal.output().includes("fresh state"), "fresh render");
+      await waitFor(async () => (await cache.readBoardCache(cfg, 7))?.issues[0]?.summary === "fresh state", "fresh cache write");
       reloads[0].resolve(issuePage(issue("PROJ-1", "stale state")));
       await nextTurn();
       await nextTurn();
@@ -161,6 +162,7 @@ test("an unmounted board cannot commit or continue an old load", async () => {
       await waitFor(() => requests.length === 2, "fresh load");
       requests[1].resolve(issuePage(issue("PROJ-1", "fresh instance")));
       await waitFor(() => freshTerminal.output().includes("fresh instance"), "fresh instance render");
+      await waitFor(async () => (await cache.readBoardCache(cfg, 7))?.issues[0]?.summary === "fresh instance", "fresh instance cache write");
       requests[0].resolve(issuePage(issue("PROJ-1", "disposed instance")));
       await nextTurn();
       await nextTurn();
