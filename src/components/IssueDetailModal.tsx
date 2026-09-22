@@ -267,21 +267,16 @@ export function IssueDetailModal({
     [fetchDetail, lifetime, showFlash, onRefresh, track],
   );
 
-  // Layout. Fixed siblings inside the modal box: header row (1) + summary
-  // row (1) + top separator (1) + bottom separator (1) + footer row (1) = 5
-  // lines. The body row takes whatever's left. Earlier math said `-4` which
-  // off-by-one'd the body by a line, causing Yoga to clip the last row in
-  // both the main pane and the side pane — which showed up as "the cursor
-  // disappears after pressing down 3-4 times" because the focused slot was
-  // the clipped one.
+  // Header, summary, two separators, and the two-row footer consume six rows.
   const innerHeight = Math.max(10, termRows - 4);
   const innerWidth = Math.max(60, termCols - 4);
+  const paddedWidth = Math.max(1, innerWidth - 2);
   const sideWidth = Math.min(Math.max(26, Math.floor(innerWidth * 0.34)), innerWidth - 30);
   const mainWidth = innerWidth - sideWidth;
-  // The 5 fixed rows + body fill the modal box exactly, so the body yields a
+  // The fixed rows + body fill the modal box exactly, so the body yields a
   // row per visible toast — otherwise the ToastStack (last child) overflows the
   // fixed-height box and Ink clips it, and toasts never appear in the modal.
-  const bodyHeight = Math.max(3, innerHeight - 5 - toasts.length);
+  const bodyHeight = Math.max(3, innerHeight - 6 - toasts.length);
 
   const mainLines = useMemo(
     () => (detail ? renderDetailLines(detail, mainWidth) : []),
@@ -864,9 +859,9 @@ export function IssueDetailModal({
           same row, so it animates during a refresh without shifting layout. */}
       <Box paddingX={1}>
         {busy ? (
-          <ProgressBar width={Math.max(1, innerWidth)} active />
+          <ProgressBar width={paddedWidth} active />
         ) : (
-          <Text color={theme.divider}>{"─".repeat(Math.max(0, innerWidth))}</Text>
+          <Text color={theme.divider}>{"─".repeat(paddedWidth)}</Text>
         )}
       </Box>
 
@@ -923,16 +918,16 @@ export function IssueDetailModal({
 
       {/* Footer */}
       <Box paddingX={1}>
-        <Text color={theme.divider}>{"─".repeat(Math.max(0, innerWidth))}</Text>
+        <Text color={theme.divider}>{"─".repeat(paddedWidth)}</Text>
       </Box>
-      <Box paddingX={1} justifyContent="space-between">
-        <Box flexWrap="wrap">
+      <Box paddingX={1} flexDirection="column">
+        <Box>
           <Hint k="tab" label="pane" />
-          <Hint k="↑↓" label="scroll" />
+          <Hint k="↑↓" label="nav" />
           {pane === "body" ? (
             <>
               <Hint k="[ ]" label="comment" />
-              <Hint k="c" label="add comment" />
+              <Hint k="c" label="add" />
             </>
           ) : (
             <>
@@ -940,19 +935,23 @@ export function IssueDetailModal({
               <Hint k="x" label="clear" />
             </>
           )}
-          <Hint k="e E" label="title/desc" />
-          <Hint k="t" label="transition" />
-          <Hint k="m" label="move" />
-          <Hint k="C" label="subtask" />
-          <Hint k="w" label={detail.watching ? "unwatch" : "watch"} />
-          <Hint k="y" label="yank" />
-          <Hint k="esc" label="close" />
+          <Hint k="e/E" label="title/desc" />
         </Box>
-        <Text color={theme.muted}>
-          {pane === "fields"
-            ? `${fieldCursor + 1}/${fieldRows.length}`
-            : `${clampedScroll + 1}-${Math.min(clampedScroll + bodyHeight, mainLines.length)}/${mainLines.length}`}
-        </Text>
+        <Box justifyContent="space-between">
+          <Box>
+            <Hint k="t" label="status" />
+            <Hint k="m" label="move" />
+            <Hint k="C" label="subtask" />
+            <Hint k="w" label={detail.watching ? "unwatch" : "watch"} />
+            <Hint k="y" label="yank" />
+            <Hint k="esc" label="close" />
+          </Box>
+          <Text color={theme.muted}>
+            {pane === "fields"
+              ? `${fieldCursor + 1}/${fieldRows.length}`
+              : `${clampedScroll + 1}-${Math.min(clampedScroll + bodyHeight, mainLines.length)}/${mainLines.length}`}
+          </Text>
+        </Box>
       </Box>
       <ToastStack toasts={toasts} maxWidth={innerWidth} />
     </Box>

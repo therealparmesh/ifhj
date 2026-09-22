@@ -11,6 +11,8 @@ import { CreateWizard } from "./CreateWizard";
 type RenderResult = ReturnType<typeof render>;
 
 const originalFetch = globalThis.fetch;
+const columnsDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "columns");
+const rowsDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "rows");
 const apps: RenderResult[] = [];
 const inputApps = new WeakMap<PassThrough, RenderResult>();
 const inputReady = new WeakMap<PassThrough, Promise<void>>();
@@ -21,7 +23,16 @@ afterEach(() => {
   restoreEditor = null;
   globalThis.fetch = originalFetch;
   for (const app of apps.splice(0)) app.unmount();
+  if (columnsDescriptor) Object.defineProperty(process.stdout, "columns", columnsDescriptor);
+  else delete (process.stdout as unknown as Record<string, unknown>)["columns"];
+  if (rowsDescriptor) Object.defineProperty(process.stdout, "rows", rowsDescriptor);
+  else delete (process.stdout as unknown as Record<string, unknown>)["rows"];
 });
+
+function setDimensions(columns: number, rows: number): void {
+  Object.defineProperty(process.stdout, "columns", { configurable: true, value: columns });
+  Object.defineProperty(process.stdout, "rows", { configurable: true, value: rows });
+}
 
 async function send(stdin: PassThrough, input: string) {
   const app = inputApps.get(stdin);
@@ -747,4 +758,43 @@ test("browse cancellation is idempotent and disables later input", async () => {
   expect(cancels).toBe(1);
   expect(editorMock).toHaveBeenCalledTimes(0);
   expect(requests).toBe(0);
+});
+
+test("keeps create separators and cancel controls to one bounded frame", async () => {
+  for (const [columns, rows] of [
+    [80, 24],
+    [120, 40],
+  ] as const) {
+    setDimensions(columns, rows);
+    const terminal = createTerminal(columns, rows);
+    const app = render(
+      <CreateWizard
+        cfg={cfg}
+        projectKey="TEST"
+        types={[]}
+        linkTypes={[]}
+        onCancel={() => {}}
+        onDone={() => {}}
+        onError={() => {}}
+      />,
+      {
+        interactive: true,
+        stdin: terminal.stdin as unknown as typeof process.stdin,
+        stdout: terminal.stdout as unknown as typeof process.stdout,
+        stderr: new PassThrough() as unknown as typeof process.stderr,
+        exitOnCtrlC: false,
+        patchConsole: false,
+      },
+    );
+    apps.push(app);
+    await app.waitUntilRenderFlush();
+    const frame = Bun.stripANSI(terminal.output());
+    const lines = frame.split("\n");
+    expect(lines.length).toBeLessThanOrEqual(rows);
+    expect(Math.max(...lines.map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(columns);
+    expect(lines.filter((line) => /─{20}/.test(line))).toHaveLength(4);
+    expect(frame).toContain("esc cancel");
+    app.unmount();
+    apps.splice(apps.indexOf(app), 1);
+  }
 });

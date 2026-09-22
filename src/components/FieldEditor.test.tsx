@@ -26,8 +26,11 @@ function renderEditor(
   onSubmit: (value: EditableFieldValue | null) => void,
   current?: EditableFieldValue,
   projectKey = "PROJ",
+  onCancel: () => void = () => {},
 ) {
   const { stdin, stdout, output } = createTerminal();
+  const rawModes: boolean[] = [];
+  stdin.setRawMode = (raw) => rawModes.push(raw);
   const app = render(
     <FieldEditor
       cfg={cfg}
@@ -35,7 +38,7 @@ function renderEditor(
       field={editableField}
       {...(current !== undefined ? { current } : {})}
       onSubmit={onSubmit}
-      onCancel={() => {}}
+      onCancel={onCancel}
     />,
     {
       interactive: true,
@@ -54,7 +57,7 @@ function renderEditor(
     await nextTurn();
     await app.waitUntilRenderFlush();
   };
-  return { app, send, output };
+  return { app, send, stdin, rawModes, output };
 }
 
 type FieldSpec<T> = T extends unknown ? Omit<T, "id" | "name" | "hasDefaultValue"> : never;
@@ -69,6 +72,28 @@ function makeField(value: FieldSpec<EditableField>): EditableField {
 }
 
 describe("FieldEditor", () => {
+  test("keeps Escape active when an async user picker replaces its loading screen", async () => {
+    globalThis.fetch = (async (_input) =>
+      Response.json([{ accountId: "a", displayName: "Synthetic User" }])) as typeof fetch;
+    let cancelled = 0;
+    const { app, stdin, rawModes, output } = renderEditor(
+      makeField({ kind: "user", required: false }),
+      () => {},
+      { accountId: "a" },
+      "PROJ",
+      () => cancelled++,
+    );
+
+    await waitFor(() => output().includes("Synthetic User"), "user picker");
+    await nextTurn();
+    expect(rawModes).toEqual([true]);
+    stdin.write("\u001b");
+    await waitFor(() => cancelled > 0, "user picker cancellation");
+    await app.waitUntilRenderFlush();
+
+    expect(cancelled).toBe(1);
+  });
+
   test("rejects non-finite numbers instead of submitting JSON null", async () => {
     const submitted: (EditableFieldValue | null)[] = [];
     const { send } = renderEditor(makeField({ kind: "number", required: false }), (value) =>

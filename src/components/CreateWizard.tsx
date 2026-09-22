@@ -598,7 +598,7 @@ function CreateForm({
         <Text color={theme.muted}> are required. ⏎ edits the focused field.</Text>
       </Box>
       <Box paddingX={1}>
-        <Text color={theme.divider}>{"─".repeat(Math.max(0, innerWidth))}</Text>
+        <Text color={theme.divider}>{"─".repeat(Math.max(0, innerWidth - 2))}</Text>
       </Box>
 
       {/* Body */}
@@ -622,7 +622,7 @@ function CreateForm({
 
       {/* Footer */}
       <Box paddingX={1}>
-        <Text color={theme.divider}>{"─".repeat(Math.max(0, innerWidth))}</Text>
+        <Text color={theme.divider}>{"─".repeat(Math.max(0, innerWidth - 2))}</Text>
       </Box>
       <Box paddingX={1}>
         <Hint k="↑↓" label="nav" />

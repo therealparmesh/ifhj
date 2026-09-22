@@ -14,7 +14,7 @@ afterEach(() => {
   for (const app of apps.splice(0)) app.unmount();
 });
 
-async function renderInput(initial: string, onSubmit?: (value: string) => void) {
+async function renderInput(initial: string, onSubmit?: (value: string) => void, width?: number) {
   const { stdin, stdout, output, clearOutput } = createTerminal(80, 20);
   let renderResolve: (() => void) | undefined;
   let value = initial;
@@ -26,7 +26,14 @@ async function renderInput(initial: string, onSubmit?: (value: string) => void) 
       value = next;
       setCurrent(next);
     };
-    return <TextInput value={current} onChange={replace} {...(onSubmit ? { onSubmit } : {})} />;
+    return (
+      <TextInput
+        value={current}
+        onChange={replace}
+        {...(onSubmit ? { onSubmit } : {})}
+        {...(width === undefined ? {} : { width })}
+      />
+    );
   }
 
   const app = render(<ControlledInput />, {
@@ -114,5 +121,35 @@ describe("TextInput Unicode editing", () => {
     expect(await submitted).toBe("AX🙂B");
     await input.flush();
     expect(input.value()).toBe("AX🙂B");
+  });
+
+  test("keeps a long Unicode value and cursor visible while moving across its viewport", async () => {
+    const value = `START_界e\u0301👨‍👩‍👧‍👦${"x".repeat(40)}VISIBLE_END`;
+    let submit!: (value: string) => void;
+    const submitted = new Promise<string>((resolve) => {
+      submit = resolve;
+    });
+    const input = await renderInput(value, submit, 20);
+    let rendered = Bun.stripANSI(input.output());
+    expect(rendered).toContain("VISIBLE_END");
+    expect(
+      Math.max(...rendered.split("\n").map((line) => Bun.stringWidth(line))),
+    ).toBeLessThanOrEqual(20);
+
+    input.clearOutput();
+    await input.act(() => input.stdin.write("\x01"));
+    rendered = Bun.stripANSI(input.output());
+    expect(rendered).toContain("START_");
+    expect(rendered).not.toContain("�");
+
+    await input.act(() => input.stdin.write("\x1b[C"));
+    await input.act(() => input.stdin.write("\x1b[D"));
+    input.clearOutput();
+    await input.act(() => input.stdin.write("\x05"));
+    expect(Bun.stripANSI(input.output())).toContain("VISIBLE_END");
+
+    input.stdin.write("\r");
+    expect(await submitted).toBe(value);
+    expect(input.value()).toBe(value);
   });
 });

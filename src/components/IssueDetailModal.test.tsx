@@ -5,10 +5,12 @@ import { render } from "ink";
 
 import type { JiraConfig } from "../config";
 import * as editor from "../editor";
-import { createTerminal, deferred, nextTurn, waitFor } from "../test/utils";
+import { createTerminal, deferred, nextTurn, sendInput, waitFor } from "../test/utils";
 import { IssueDetailModal } from "./IssueDetailModal";
 
 const originalFetch = globalThis.fetch;
+const columnsDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "columns");
+const rowsDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "rows");
 const apps: ReturnType<typeof render>[] = [];
 let restoreEditor: (() => void) | null = null;
 
@@ -17,7 +19,16 @@ afterEach(() => {
   restoreEditor?.();
   restoreEditor = null;
   for (const app of apps.splice(0)) app.unmount();
+  if (columnsDescriptor) Object.defineProperty(process.stdout, "columns", columnsDescriptor);
+  else delete (process.stdout as unknown as Record<string, unknown>)["columns"];
+  if (rowsDescriptor) Object.defineProperty(process.stdout, "rows", rowsDescriptor);
+  else delete (process.stdout as unknown as Record<string, unknown>)["rows"];
 });
+
+function setDimensions(columns: number, rows: number): void {
+  Object.defineProperty(process.stdout, "columns", { configurable: true, value: columns });
+  Object.defineProperty(process.stdout, "rows", { configurable: true, value: rows });
+}
 
 function json(value: unknown): Response {
   return new Response(JSON.stringify(value), {
@@ -568,4 +579,97 @@ test("a nondefault estimate remains visible through actual detail field metadata
   await waitFor(() => /estimate\s+7/.test(terminal.output()), "configured estimate detail field");
   expect(terminal.output()).toMatch(/estimate\s+7/);
   app.unmount();
+});
+
+test("keeps separators, two-row footer, and the selected last field visible", async () => {
+  const customFields = Object.fromEntries(
+    Array.from({ length: 18 }, (_, index) => [
+      `customfield_${1000 + index}`,
+      { name: `Custom ${index}`, required: false, schema: { type: "string" } },
+    ]),
+  );
+
+  for (const [columns, rows] of [
+    [80, 24],
+    [120, 40],
+  ] as const) {
+    setDimensions(columns, rows);
+    const pendingIssue = deferred<Response>();
+    globalThis.fetch = (async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/rest/api/3/field") return json([]);
+      if (url.pathname === "/rest/api/3/myself") return json({ accountId: "test" });
+      if (url.pathname.endsWith("/comment")) return json({ comments: [] });
+      if (url.pathname.endsWith("/editmeta")) return json({ fields: customFields });
+      if (url.pathname === "/rest/api/3/issue/TEST-1") return pendingIssue.promise;
+      throw new Error(`unexpected request: ${url}`);
+    }) as typeof fetch;
+
+    const terminal = createTerminal(columns, rows);
+    const app = render(
+      <IssueDetailModal
+        cfg={{ server: "https://detail-layout.invalid", authHeader: "Basic test" }}
+        projectKey="TEST"
+        issueKey="TEST-1"
+        ensureUsers={async () => []}
+        onClose={() => {}}
+        onMove={() => {}}
+        onTransition={() => {}}
+        onCreateSubtask={() => {}}
+        onRefresh={() => {}}
+      />,
+      {
+        interactive: true,
+        stdin: terminal.stdin as unknown as typeof process.stdin,
+        stdout: terminal.stdout as unknown as typeof process.stdout,
+        stderr: new PassThrough() as unknown as typeof process.stderr,
+        exitOnCtrlC: false,
+        patchConsole: false,
+      },
+    );
+    apps.push(app);
+    await app.waitUntilRenderFlush();
+    terminal.clearOutput();
+    const detail = issue("TEST-1", "Synthetic layout detail");
+    Object.assign(
+      detail.fields,
+      Object.fromEntries(Object.keys(customFields).map((id) => [id, "value"])),
+    );
+    pendingIssue.resolve(json(detail));
+    await waitFor(() => terminal.output().includes("Synthetic layout detail"), "layout detail");
+
+    const loaded = Bun.stripANSI(terminal.output());
+    const loadedLines = loaded.split("\n");
+    expect(loadedLines.length).toBeLessThanOrEqual(rows);
+    expect(Math.max(...loadedLines.map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(
+      columns,
+    );
+    expect(loaded).not.toMatch(/^│?\s*─{1,5}\s*│?\s*$/m);
+    expect(loaded).toContain("t status");
+    expect(loaded).toContain("esc close");
+
+    await sendInput(app, terminal.stdin, "\t");
+    await sendInput(app, terminal.stdin, "G");
+    terminal.clearOutput();
+    const finalColumns = columns === 80 ? 120 : 80;
+    const finalRows = rows === 24 ? 40 : 24;
+    setDimensions(finalColumns, finalRows);
+    terminal.stdout.columns = finalColumns;
+    terminal.stdout.rows = finalRows;
+    process.stdout.emit("resize");
+    await nextTurn();
+    await app.waitUntilRenderFlush();
+    const selected = Bun.stripANSI(terminal.output());
+    const selectedLines = selected.split("\n");
+    expect(selectedLines.length).toBeLessThanOrEqual(finalRows);
+    expect(Math.max(...selectedLines.map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(
+      finalColumns,
+    );
+    expect(selected).toContain("custom 17");
+    expect(selected).toContain("29/29");
+    expect(selected).toContain("esc close");
+
+    app.unmount();
+    apps.splice(apps.indexOf(app), 1);
+  }
 });

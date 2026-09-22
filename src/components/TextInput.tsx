@@ -2,7 +2,7 @@ import { Box, Text, useInput } from "ink";
 import { useRef, useState } from "react";
 
 import { graphemes } from "../text";
-import { fg, theme } from "../ui";
+import { fg, theme, truncate } from "../ui";
 
 /**
  * Always used in controlled mode. Refs advance the cursor and latest emitted
@@ -17,6 +17,8 @@ type Props = {
   onUpArrow?: () => void;
   onDownArrow?: () => void;
   isActive?: boolean;
+  /** Display width in terminal cells. The controlled value remains unmodified. */
+  width?: number;
 };
 
 function prevWordBoundary(s: string, from: number): number {
@@ -60,6 +62,7 @@ export function TextInput({
   onUpArrow,
   onDownArrow,
   isActive = true,
+  width,
 }: Props) {
   const cursor = useRef(value.length);
   const currentValue = useRef(value);
@@ -184,22 +187,21 @@ export function TextInput({
   const showPlaceholder = value.length === 0 && placeholder;
 
   if (showPlaceholder) {
+    const placeholderWidth = width === undefined ? undefined : Math.max(0, width - 1);
     return (
-      <Box>
-        <Text color={theme.muted}>{placeholder}</Text>
+      <Box {...(width === undefined ? {} : { width, height: 1, overflow: "hidden" as const })}>
+        <Text color={theme.muted} {...(width === undefined ? {} : { wrap: "truncate" as const })}>
+          {placeholderWidth === undefined ? placeholder : truncate(placeholder, placeholderWidth)}
+        </Text>
         {isActive ? <Text color={theme.accent}>▍</Text> : null}
       </Box>
     );
   }
 
-  // Render with an inline cursor by inverting the char at `cursor`.
-  const before = value.slice(0, cursor.current);
-  const nextCursor = nextCharacterBoundary(value, cursor.current);
-  const at = value.slice(cursor.current, nextCursor);
-  const after = value.slice(nextCursor);
+  const { before, at, after } = inputViewport(value, cursor.current, width);
 
   return (
-    <Box>
+    <Box {...(width === undefined ? {} : { width, height: 1, overflow: "hidden" as const })}>
       <Text {...fg(theme.fg)}>{before}</Text>
       {isActive ? (
         at.length > 0 ? (
@@ -215,4 +217,32 @@ export function TextInput({
       <Text {...fg(theme.fg)}>{after}</Text>
     </Box>
   );
+}
+
+function inputViewport(value: string, cursor: number, width: number | undefined) {
+  const nextCursor = nextCharacterBoundary(value, cursor);
+  const at = value.slice(cursor, nextCursor);
+  if (width === undefined) {
+    return { before: value.slice(0, cursor), at, after: value.slice(nextCursor) };
+  }
+
+  let remaining = Math.max(0, width - (at ? Bun.stringWidth(at) : 1));
+  let before = "";
+  const previous = Array.from(graphemes(value.slice(0, cursor)), ({ segment }) => segment);
+  for (let index = previous.length - 1; index >= 0; index--) {
+    const segment = previous[index]!;
+    const segmentWidth = Bun.stringWidth(segment);
+    if (segmentWidth > remaining) break;
+    before = segment + before;
+    remaining -= segmentWidth;
+  }
+
+  let after = "";
+  for (const { segment } of graphemes(value.slice(nextCursor))) {
+    const segmentWidth = Bun.stringWidth(segment);
+    if (segmentWidth > remaining) break;
+    after += segment;
+    remaining -= segmentWidth;
+  }
+  return { before, at, after };
 }

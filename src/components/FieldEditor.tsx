@@ -70,16 +70,14 @@ export function FieldEditor({
     };
   }, [cfg, projectKey, field.id, field.kind]);
 
-  // Esc during the loading / error screens — FilterPicker and
-  // InlineFieldInput own their own keyboard once rendered.
+  // Keep this subscription mounted while a child editor replaces the loading
+  // screen. Dropping the last subscription resets Ink's pending input parser.
+  // Child editors own Escape after the transient screen has gone.
   const inTransientScreen =
     loadError !== null || ((field.kind === "user" || field.kind === "user-list") && users === null);
-  useInput(
-    (_input, key) => {
-      if (key.escape) onCancel();
-    },
-    { isActive: inTransientScreen },
-  );
+  useInput((_input, key) => {
+    if (inTransientScreen && key.escape) onCancel();
+  });
 
   if (loadError) {
     return (

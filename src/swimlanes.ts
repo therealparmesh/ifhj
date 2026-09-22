@@ -156,9 +156,7 @@ function laneHeight(lane: Lane, colStart = 0, colEnd = lane.columns.length): num
  * `vr.lane` always indexes the full `lanes` array so the grid can look up the
  * lane directly.
  */
-export type VisualRow =
-  | { kind: "title"; lane: number }
-  | { kind: "cards"; lane: number; row: number };
+type VisualRow = { kind: "title"; lane: number } | { kind: "cards"; lane: number; row: number };
 
 export function visualRows(
   lanes: Lane[],

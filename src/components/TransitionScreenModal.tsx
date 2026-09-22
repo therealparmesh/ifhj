@@ -1,9 +1,10 @@
 import { Box, Text, useInput } from "ink";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 
 import type { JiraConfig } from "../config";
+import { useDimensions } from "../hooks";
 import type { EditableField, EditableFieldValue, Transition } from "../jira";
-import { clamp, fg, theme, truncate } from "../ui";
+import { clamp, fg, stickyScroll, theme, truncate } from "../ui";
 import { FieldEditor } from "./FieldEditor";
 import { Hint } from "./Hint";
 
@@ -63,8 +64,10 @@ export function TransitionScreenModal({
   onCancel: (values?: Record<string, EditableFieldValue>) => void;
   onSubmit: (fields: Record<string, EditableFieldValue>) => void;
 }) {
+  const { cols: termCols, rows: termRows } = useDimensions();
   const [values, setValues] = useState<Record<string, EditableFieldValue>>(initialValues);
   const [idx, setIdx] = useState(0);
+  const scrollRef = useRef(0);
   const [editing, setEditing] = useState<EditableField | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
@@ -141,6 +144,14 @@ export function TransitionScreenModal({
   }
 
   const cursor = clamp(idx, 0, Math.max(0, fields.length - 1));
+  // Padding, borders, headings, footer, and status consume 14 rows.
+  const fieldWindow = Math.max(1, termRows - 14);
+  const scroll = stickyScroll(fields.length, fieldWindow, cursor, scrollRef.current);
+  scrollRef.current = scroll;
+  const visibleFields = fields.slice(scroll, scroll + fieldWindow);
+  const contentWidth = Math.max(1, termCols - 6);
+  const issueText = ` · ${issueKey}`;
+  const titleWidth = Math.max(1, contentWidth - Bun.stringWidth(issueText));
   const labelWidth = Math.min(
     24,
     Math.max(
@@ -148,23 +159,25 @@ export function TransitionScreenModal({
       fields.reduce((m, f) => Math.max(m, f.name.length), 10),
     ),
   );
-  const rowWidth = 72;
+  const rowWidth = Math.min(72, contentWidth);
   const valueWidth = Math.max(10, rowWidth - labelWidth - 4);
 
   return (
     <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.accent}>
-      <Box>
-        <Text color={theme.accent} bold>
-          {transition.name}
+      <Box width={contentWidth} height={1} overflow="hidden">
+        <Text color={theme.accent} bold wrap="truncate">
+          {truncate(transition.name, titleWidth)}
         </Text>
-        <Text color={theme.muted}> · {issueKey}</Text>
+        <Text color={theme.muted}>{issueText}</Text>
       </Box>
       <Box marginTop={1}>
-        <Text color={theme.muted}>fill required fields, then press s to submit</Text>
+        <Text color={theme.muted} wrap="truncate">
+          fill required fields, then press s to submit
+        </Text>
       </Box>
       <Box flexDirection="column" marginTop={1}>
-        {fields.map((f, i) => {
-          const focused = i === cursor;
+        {visibleFields.map((f, i) => {
+          const focused = scroll + i === cursor;
           const pointer = focused ? "> " : "  ";
           const labelCell = truncate(f.name, labelWidth).padEnd(labelWidth);
           const hasValue =
@@ -191,19 +204,28 @@ export function TransitionScreenModal({
           );
         })}
       </Box>
-      <Box marginTop={1}>
-        <Hint k="↑↓" label="nav" />
-        <Hint k="⏎" label="edit" />
-        <Hint k="s" label="submit" />
-        <Hint k="esc" label="cancel" />
+      <Box marginTop={1} justifyContent="space-between">
+        <Box>
+          <Hint k="↑↓" label="nav" />
+          <Hint k="⏎" label="edit" />
+          <Hint k="s" label="submit" />
+          <Hint k="esc" label="cancel" />
+        </Box>
+        <Text color={theme.muted}>
+          {cursor + 1}/{fields.length}
+        </Text>
       </Box>
       {statusMsg ? (
         <Box marginTop={1}>
-          <Text color={theme.error}>{statusMsg}</Text>
+          <Text color={theme.error} wrap="truncate">
+            {statusMsg}
+          </Text>
         </Box>
       ) : missing.length > 0 ? (
         <Box marginTop={1}>
-          <Text color={theme.muted}>missing: {missing.join(", ")}</Text>
+          <Text color={theme.muted} wrap="truncate">
+            missing: {missing.join(", ")}
+          </Text>
         </Box>
       ) : null}
     </Box>

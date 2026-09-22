@@ -96,6 +96,8 @@ Pick a board. Everything's keyboard from there.
 
 Press `?` for help. Scroll with ↑/↓ or Page Up/Page Down; Home/End jumps to either end.
 
+Pickers and required-field screens scroll to keep the selected row and controls visible on standard 80×24 terminals. Long picker queries scroll horizontally with the cursor.
+
 ## Keybindings
 
 ### Board

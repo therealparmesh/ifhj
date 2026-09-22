@@ -1,7 +1,8 @@
 import { Box, Text, useInput } from "ink";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { clamp, fg, stickyScroll, theme } from "../ui";
+import { useDimensions } from "../hooks";
+import { clamp, fg, stickyScroll, theme, truncate } from "../ui";
 import { Hint } from "./Hint";
 import { LoadingLine } from "./LoadingLine";
 import { TextInput } from "./TextInput";
@@ -18,9 +19,6 @@ function filterItems(items: FilterItem[], query: string): FilterItem[] {
       item.id.toLowerCase().includes(lower),
   );
 }
-
-// Keep the picker compact — beyond this the user should filter instead.
-const MAX_PICKER_ROWS = 15;
 
 /**
  * Filterable picker. Items are either supplied up-front (small lists like
@@ -58,6 +56,10 @@ export function FilterPicker({
   currentId?: string;
   borderColor?: string;
 }) {
+  const { cols: termCols, rows: termRows } = useDimensions();
+  // Padding, borders, title, input, indicators, and footer need 14 rows.
+  const maxPickerRows = Math.max(1, Math.min(15, termRows - 14));
+  const innerWidth = Math.max(1, termCols - 6);
   const [q, setQ] = useState("");
   /**
    * Seed the cursor onto the current selection so reopening a picker for a
@@ -76,7 +78,7 @@ export function FilterPicker({
    * scroll can never disagree on a frame. Seeded so `currentId` deep in the
    * list doesn't flash the wrong window.
    */
-  const scrollRef = useRef(initialIdx >= MAX_PICKER_ROWS ? initialIdx - MAX_PICKER_ROWS + 1 : 0);
+  const scrollRef = useRef(initialIdx >= maxPickerRows ? initialIdx - maxPickerRows + 1 : 0);
 
   // Async caller owns filtering — pass items through. Otherwise filter locally.
   const filtered = useMemo(() => {
@@ -113,20 +115,21 @@ export function FilterPicker({
   // just the underlying state; it can briefly exceed `filtered.length`
   // after a filter narrows the list, and `cursor` absorbs that via clamp.
   const cursor = clamp(idx, 0, Math.max(0, filtered.length - 1));
-  const scroll = stickyScroll(filtered.length, MAX_PICKER_ROWS, cursor, scrollRef.current);
+  const scroll = stickyScroll(filtered.length, maxPickerRows, cursor, scrollRef.current);
   scrollRef.current = scroll;
 
   const accent = borderColor ?? theme.accent;
   return (
     <Box flexDirection="column" padding={2} borderStyle="round" borderColor={accent}>
-      <Text color={accent} bold>
+      <Text color={accent} bold wrap="truncate">
         {title}
       </Text>
-      <Box marginTop={1}>
+      <Box marginTop={1} width={innerWidth} height={1} overflow="hidden">
         <Text color={theme.muted}>› </Text>
         <TextInput
           value={q}
           placeholder={placeholder ?? "type to filter…"}
+          width={Math.max(1, innerWidth - 2)}
           onChange={setQ}
           onUpArrow={() => setIdx(clamp(cursor - 1, 0, Math.max(0, filtered.length - 1)))}
           onDownArrow={() => setIdx(clamp(cursor + 1, 0, Math.max(0, filtered.length - 1)))}
@@ -151,6 +154,8 @@ export function FilterPicker({
             filtered={filtered}
             idx={cursor}
             scroll={scroll}
+            maxRows={maxPickerRows}
+            width={innerWidth}
             {...(currentId ? { currentId } : {})}
           />
         )}
@@ -177,14 +182,18 @@ function PickerRows({
   filtered,
   idx,
   scroll,
+  maxRows,
+  width,
   currentId,
 }: {
   filtered: FilterItem[];
   idx: number;
   scroll: number;
+  maxRows: number;
+  width: number;
   currentId?: string;
 }) {
-  const end = Math.min(filtered.length, scroll + MAX_PICKER_ROWS);
+  const end = Math.min(filtered.length, scroll + maxRows);
   const hiddenAbove = scroll;
   const hiddenBelow = filtered.length - end;
   return (
@@ -193,14 +202,26 @@ function PickerRows({
       {filtered.slice(scroll, end).map((it, i) => {
         const absolute = scroll + i;
         const selected = absolute === idx;
+        const activeText = it.id === currentId ? " (active)" : "";
+        const available = Math.max(1, width - 2 - Bun.stringWidth(activeText));
+        const hintWidth = it.hint
+          ? Math.min(Bun.stringWidth(it.hint) + 1, Math.floor(available / 2))
+          : 0;
+        const hintText = hintWidth > 1 ? ` ${truncate(it.hint!, hintWidth - 1)}` : "";
+        const labelText = truncate(it.label, Math.max(1, available - Bun.stringWidth(hintText)));
         return (
-          <Box key={it.id}>
+          <Box key={it.id} width={width} height={1} overflow="hidden">
             <Text color={selected ? theme.accent : theme.muted}>{selected ? "> " : "  "}</Text>
-            <Text {...fg(selected ? theme.fg : theme.fgDim)} bold={selected} inverse={selected}>
-              {it.label}
+            <Text
+              {...fg(selected ? theme.fg : theme.fgDim)}
+              bold={selected}
+              inverse={selected}
+              wrap="truncate"
+            >
+              {labelText}
             </Text>
-            {it.hint ? <Text color={theme.muted}> {it.hint}</Text> : null}
-            {it.id === currentId ? <Text color={theme.warning}> (active)</Text> : null}
+            {hintText ? <Text color={theme.muted}>{hintText}</Text> : null}
+            {activeText ? <Text color={theme.warning}>{activeText}</Text> : null}
           </Box>
         );
       })}
