@@ -40,6 +40,7 @@ test("later timer phases keep an active cell at narrow widths and clean up", asy
 
   try {
     app = render(<ProgressBar width={1} active />, {
+      interactive: true,
       stdout: stdout as unknown as typeof process.stdout,
       stderr: new PassThrough() as unknown as typeof process.stderr,
       patchConsole: false,

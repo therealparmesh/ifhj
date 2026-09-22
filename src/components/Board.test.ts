@@ -60,6 +60,7 @@ async function runBoardCase(name: string, body: string): Promise<unknown> {
               onExit() {},
             }),
             {
+              interactive: true,
               stdin: terminal.stdin,
               stdout: terminal.stdout,
               stderr: new PassThrough(),

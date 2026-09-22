@@ -72,6 +72,7 @@ function headers(display: "points" | "time") {
       />
     </Box>,
     {
+      interactive: true,
       stdout: terminal.stdout as unknown as typeof process.stdout,
       stderr: new PassThrough() as unknown as typeof process.stderr,
       patchConsole: false,

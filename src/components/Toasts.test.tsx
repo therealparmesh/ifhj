@@ -36,6 +36,7 @@ test("unmount clears toast timers and ignores late error flashes", async () => {
 
   try {
     app = render(<Harness />, {
+      interactive: true,
       stdout: new PassThrough() as unknown as typeof process.stdout,
       stderr: new PassThrough() as unknown as typeof process.stderr,
       patchConsole: false,

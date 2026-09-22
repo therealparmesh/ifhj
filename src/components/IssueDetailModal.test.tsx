@@ -86,6 +86,7 @@ test("an older issue request cannot replace a newer issue", async () => {
   };
   const { stdin, stdout, output, clearOutput } = createTerminal();
   const app = render(<IssueDetailModal {...props} issueKey="PROJ-1" />, {
+    interactive: true,
     stdin: stdin as unknown as typeof process.stdin,
     stdout: stdout as unknown as typeof process.stdout,
     stderr: new PassThrough() as unknown as typeof process.stderr,
@@ -149,6 +150,7 @@ test("same-issue refreshes keep only the latest reverse-order result", async () 
   };
   const { stdin, stdout, output, clearOutput } = createTerminal();
   const app = render(<IssueDetailModal {...props} />, {
+    interactive: true,
     stdin: stdin as unknown as typeof process.stdin,
     stdout: stdout as unknown as typeof process.stdout,
     stderr: new PassThrough() as unknown as typeof process.stderr,
@@ -237,6 +239,7 @@ test("a save from a previous issue cannot refresh or publish into the current is
   };
   const { stdin, stdout, output, clearOutput } = createTerminal();
   const app = render(<IssueDetailModal {...props} issueKey="PROJ-1" />, {
+    interactive: true,
     stdin: stdin as unknown as typeof process.stdin,
     stdout: stdout as unknown as typeof process.stdout,
     stderr: new PassThrough() as unknown as typeof process.stderr,
@@ -298,6 +301,7 @@ test("a subtask cannot open another subtask flow beneath itself", async () => {
       onRefresh={() => {}}
     />,
     {
+      interactive: true,
       stdin: stdin as unknown as typeof process.stdin,
       stdout: stdout as unknown as typeof process.stdout,
       stderr: new PassThrough() as unknown as typeof process.stderr,
@@ -348,6 +352,7 @@ test("parent and transition actions wait for loaded issue metadata", async () =>
       onRefresh={() => {}}
     />,
     {
+      interactive: true,
       stdin: stdin as unknown as typeof process.stdin,
       stdout: stdout as unknown as typeof process.stdout,
       stderr: new PassThrough() as unknown as typeof process.stderr,
@@ -439,6 +444,7 @@ test("an unmounted detail cannot refresh after an old save completes", async () 
       onRefresh={() => refreshes++}
     />,
     {
+      interactive: true,
       stdin: terminal.stdin as unknown as typeof process.stdin,
       stdout: terminal.stdout as unknown as typeof process.stdout,
       stderr: new PassThrough() as unknown as typeof process.stderr,
@@ -493,6 +499,7 @@ test("an editor result after detail unmount cannot start a write", async () => {
       onRefresh={() => refreshes++}
     />,
     {
+      interactive: true,
       stdin: terminal.stdin as unknown as typeof process.stdin,
       stdout: terminal.stdout as unknown as typeof process.stdout,
       stderr: new PassThrough() as unknown as typeof process.stderr,
@@ -550,6 +557,7 @@ test("a nondefault estimate remains visible through actual detail field metadata
       onRefresh={() => {}}
     />,
     {
+      interactive: true,
       stdin: terminal.stdin as unknown as typeof process.stdin,
       stdout: terminal.stdout as unknown as typeof process.stdout,
       stderr: new PassThrough() as unknown as typeof process.stderr,

@@ -27,6 +27,7 @@ function boardResponse(boards: Board[]): Response {
 function mount(cfg: JiraConfig, onPick: (value: Board) => void) {
   const terminal = createTerminal();
   const app = render(<BoardPicker cfg={cfg} onPick={onPick} onQuit={() => {}} />, {
+    interactive: true,
     stdin: terminal.stdin as unknown as typeof process.stdin,
     stdout: terminal.stdout as unknown as typeof process.stdout,
     stderr: new PassThrough() as unknown as typeof process.stderr,

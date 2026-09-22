@@ -29,6 +29,7 @@ function mount(recents: RecentIssue[], onPick: (key: string) => void, onCancel =
   const app = render(
     <QuickOpen cfg={cfg} recents={recents} onPick={onPick} onCancel={onCancel} />,
     {
+      interactive: true,
       stdin: terminal.stdin as unknown as typeof process.stdin,
       stdout: terminal.stdout as unknown as typeof process.stdout,
       stderr: new PassThrough() as unknown as typeof process.stderr,

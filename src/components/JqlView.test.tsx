@@ -26,6 +26,7 @@ function renderJql(onPick: (key: string) => void, onCancel: () => void) {
   const { stdin, stdout, output } = createTerminal();
   const cfg: JiraConfig = { server: "https://jql.invalid", authHeader: "Basic test" };
   const app = render(<JqlView cfg={cfg} onPick={onPick} onCancel={onCancel} />, {
+    interactive: true,
     stdin: stdin as unknown as typeof process.stdin,
     stdout: stdout as unknown as typeof process.stdout,
     stderr: new PassThrough() as unknown as typeof process.stderr,

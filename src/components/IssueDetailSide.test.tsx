@@ -17,6 +17,7 @@ test("inline field submits batched typing and Return with the latest value", asy
       onSubmit={(value) => submitted.push(value)}
     />,
     {
+      interactive: true,
       stdin: terminal.stdin as unknown as typeof process.stdin,
       stdout: terminal.stdout as unknown as typeof process.stdout,
       stderr: new PassThrough() as unknown as typeof process.stderr,

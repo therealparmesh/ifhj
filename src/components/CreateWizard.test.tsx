@@ -65,6 +65,7 @@ function mount(
       onError={callbacks.onError ?? (() => {})}
     />,
     {
+      interactive: true,
       stdin: stdin as unknown as typeof process.stdin,
       stdout: stdout as unknown as typeof process.stdout,
       stderr: new PassThrough() as unknown as typeof process.stderr,
@@ -129,6 +130,7 @@ test("a reopened target picker cannot submit results from its previous session",
   resolveReopened(Response.json({ isLast: true, issues: [] }));
 
   await send(stdin, "\u001b");
+  await waitFor(() => cancelled > 0, "wizard close after reopened target");
   expect(cancelled).toBe(1);
 });
 
@@ -712,6 +714,7 @@ test("explicit cancel suppresses a pending create result and its later link", as
   await send(stdin, "s");
   await waitFor(() => createStarted, "pending create request");
   await send(stdin, "\u001b");
+  await waitFor(() => cancels > 0, "pending create cancellation");
   expect(cancels).toBe(1);
   await send(stdin, "s");
   await send(stdin, "\r");
@@ -736,6 +739,7 @@ test("browse cancellation is idempotent and disables later input", async () => {
   const { stdin } = mount({ onCancel: () => cancels++ });
 
   await send(stdin, "\u001b");
+  await waitFor(() => cancels > 0, "browse cancellation");
   await send(stdin, "\r");
   await send(stdin, "s");
   await send(stdin, "\u001b");

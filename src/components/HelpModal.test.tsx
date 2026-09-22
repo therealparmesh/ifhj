@@ -3,7 +3,7 @@ import { PassThrough } from "node:stream";
 
 import { render } from "ink";
 
-import { createTerminal, nextTurn, sendInput } from "../test/utils";
+import { createTerminal, nextTurn, sendInput, waitFor } from "../test/utils";
 import { HelpModal } from "./HelpModal";
 
 const apps: ReturnType<typeof render>[] = [];
@@ -40,6 +40,7 @@ function renderHelp(onClose = () => {}, columns = 80, rows = 24) {
   setDimensions(columns, rows);
   const terminal = createTerminal(columns, rows);
   const app = render(<HelpModal onClose={onClose} />, {
+    interactive: true,
     stdin: terminal.stdin as unknown as typeof process.stdin,
     stdout: terminal.stdout as unknown as typeof process.stdout,
     stderr: new PassThrough() as unknown as typeof process.stderr,
@@ -125,6 +126,7 @@ test("preserves Escape, q, question-mark, and Return close keys", async () => {
     const { app, terminal } = renderHelp(() => closes++);
     await app.waitUntilRenderFlush();
     await sendInput(app, terminal.stdin, key);
+    await waitFor(() => closes > 0, `HelpModal close for ${JSON.stringify(key)}`);
     expect(closes).toBe(1);
     app.unmount();
     apps.splice(apps.indexOf(app), 1);

@@ -24,6 +24,7 @@ test("useLoading remains busy until all concurrent promises settle", async () =>
   }
 
   const app = render(<Harness />, {
+    interactive: true,
     stdout: new PassThrough() as unknown as typeof process.stdout,
     stderr: new PassThrough() as unknown as typeof process.stderr,
     patchConsole: false,

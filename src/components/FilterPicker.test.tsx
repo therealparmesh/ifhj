@@ -20,6 +20,7 @@ test("local picker selects from the latest batched query", async () => {
       onCancel={() => {}}
     />,
     {
+      interactive: true,
       stdin: terminal.stdin as unknown as typeof process.stdin,
       stdout: terminal.stdout as unknown as typeof process.stdout,
       stderr: new PassThrough() as unknown as typeof process.stderr,

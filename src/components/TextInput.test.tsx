@@ -30,6 +30,7 @@ async function renderInput(initial: string, onSubmit?: (value: string) => void) 
   }
 
   const app = render(<ControlledInput />, {
+    interactive: true,
     stdin: stdin as unknown as typeof process.stdin,
     stdout: stdout as unknown as typeof process.stdout,
     stderr: new PassThrough() as unknown as typeof process.stderr,

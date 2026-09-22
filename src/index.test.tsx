@@ -62,6 +62,7 @@ describe("CLI terminal lifecycle", () => {
             const Broken = () => { throw new Error("render failed"); };
             const app = render(React.createElement(Broken), {
               alternateScreen: true,
+              interactive: true,
               patchConsole: false,
             });
             try { await app.waitUntilExit(); } catch { process.stdout.write("CAUGHT\\n"); }
@@ -94,6 +95,7 @@ describe("CLI terminal lifecycle", () => {
               const { render, Text } = await import("ink");
               render(React.createElement(Text, null, "ready"), {
                 alternateScreen: true,
+                interactive: true,
                 patchConsole: false,
               });
               process.stdout.write("READY\\n");
