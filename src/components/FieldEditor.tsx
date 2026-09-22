@@ -46,7 +46,16 @@ export function FieldEditor({
   const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (field.kind !== "user" && field.kind !== "user-list") return;
+    setLoadError(null);
+    if (field.kind !== "user" && field.kind !== "user-list") {
+      setUsers([]);
+      return;
+    }
+    setUsers(null);
+    if (!projectKey) {
+      setUsers([]);
+      return;
+    }
     let cancelled = false;
     (async () => {
       try {
@@ -59,7 +68,7 @@ export function FieldEditor({
     return () => {
       cancelled = true;
     };
-  }, [cfg, projectKey, field.kind]);
+  }, [cfg, projectKey, field.id, field.kind]);
 
   // Esc during the loading / error screens — FilterPicker and
   // InlineFieldInput own their own keyboard once rendered.
@@ -109,25 +118,40 @@ export function FieldEditor({
         items={field.allowedValues.map((v) => ({ id: v.id, label: v.name }))}
         {...(currentId ? { currentId } : {})}
         onPick={(id) => onSubmit({ id })}
-        onClear={() => onSubmit(null)}
+        {...(!field.required ? { onClear: () => onSubmit(null) } : {})}
         onCancel={onCancel}
       />
     );
   }
 
   if (field.kind === "option-list") {
-    // Build-then-submit: pick one at a time, each pick commits the
-    // accumulated list to the caller. Cancel leaves the list unchanged.
-    // `clear all` submits an empty array so the caller knows to clear.
     const existing = (current as { id: string }[] | undefined) ?? [];
     const existingIds = new Set(existing.map((e) => e.id));
-    const remaining = field.allowedValues.filter((v) => !existingIds.has(v.id));
     return (
       <FilterPicker
         title={`${field.name} (${existing.length} selected)`}
-        items={remaining.map((v) => ({ id: v.id, label: v.name }))}
-        onPick={(id) => onSubmit([...existing, { id }])}
-        onClear={() => onSubmit([])}
+        items={field.allowedValues.map((v) => ({
+          id: v.id,
+          label: v.name,
+          ...(existingIds.has(v.id)
+            ? {
+                hint:
+                  field.required && existing.length === 1
+                    ? "required; keep selected"
+                    : "selected; pick to remove",
+              }
+            : {}),
+        }))}
+        onPick={(id) => {
+          if (existingIds.has(id)) {
+            if (!field.required || existing.length > 1) {
+              onSubmit(existing.filter((value) => value.id !== id));
+            }
+          } else {
+            onSubmit([...existing, { id }]);
+          }
+        }}
+        {...(!field.required ? { onClear: () => onSubmit([]) } : {})}
         onCancel={onCancel}
       />
     );
@@ -141,7 +165,7 @@ export function FieldEditor({
         items={users.map((u) => ({ id: u.accountId, label: u.displayName }))}
         {...(currentId ? { currentId } : {})}
         onPick={(accountId) => onSubmit({ accountId })}
-        onClear={() => onSubmit(null)}
+        {...(!field.required ? { onClear: () => onSubmit(null) } : {})}
         onCancel={onCancel}
       />
     );
@@ -150,13 +174,31 @@ export function FieldEditor({
   if (field.kind === "user-list" && users) {
     const existing = (current as { accountId: string }[] | undefined) ?? [];
     const existingIds = new Set(existing.map((e) => e.accountId));
-    const remaining = users.filter((u) => !existingIds.has(u.accountId));
     return (
       <FilterPicker
         title={`${field.name} (${existing.length} selected)`}
-        items={remaining.map((u) => ({ id: u.accountId, label: u.displayName }))}
-        onPick={(accountId) => onSubmit([...existing, { accountId }])}
-        onClear={() => onSubmit([])}
+        items={users.map((u) => ({
+          id: u.accountId,
+          label: u.displayName,
+          ...(existingIds.has(u.accountId)
+            ? {
+                hint:
+                  field.required && existing.length === 1
+                    ? "required; keep selected"
+                    : "selected; pick to remove",
+              }
+            : {}),
+        }))}
+        onPick={(accountId) => {
+          if (existingIds.has(accountId)) {
+            if (!field.required || existing.length > 1) {
+              onSubmit(existing.filter((value) => value.accountId !== accountId));
+            }
+          } else {
+            onSubmit([...existing, { accountId }]);
+          }
+        }}
+        {...(!field.required ? { onClear: () => onSubmit([]) } : {})}
         onCancel={onCancel}
       />
     );
@@ -168,14 +210,17 @@ export function FieldEditor({
       <InlineFieldInput
         field={field.name}
         initial={initial}
-        placeholder="number (empty to clear)"
+        placeholder={field.required ? "number" : "number (empty to clear)"}
         onSubmit={(raw) => {
           const trimmed = raw.trim();
-          if (trimmed === "") return onSubmit(null);
+          if (trimmed === "") {
+            if (!field.required) onSubmit(null);
+            return;
+          }
           const n = Number(trimmed);
           // Non-numeric: no-op. The input stays mounted with the user's
           // text so they can correct it; the placeholder names the format.
-          if (Number.isNaN(n)) return;
+          if (!Number.isFinite(n)) return;
           onSubmit(n);
         }}
         onCancel={onCancel}
@@ -189,10 +234,13 @@ export function FieldEditor({
       <InlineFieldInput
         field={field.name}
         initial={initial}
-        placeholder="YYYY-MM-DD (empty to clear)"
+        placeholder={field.required ? "YYYY-MM-DD" : "YYYY-MM-DD (empty to clear)"}
         onSubmit={(raw) => {
           const trimmed = raw.trim();
-          if (trimmed === "") return onSubmit(null);
+          if (trimmed === "") {
+            if (!field.required) onSubmit(null);
+            return;
+          }
           // Reject both malformed and impossible dates (e.g. 2026-13-45)
           // before they POST — a round-trip parse catches calendar overflow
           // that the shape regex alone would pass.
@@ -213,13 +261,13 @@ export function FieldEditor({
       <InlineFieldInput
         field={field.name}
         initial={initial}
-        placeholder="comma-separated (empty to clear)"
+        placeholder={field.required ? "comma-separated" : "comma-separated (empty to clear)"}
         onSubmit={(raw) => {
           const tokens = raw
             .split(",")
             .map((s) => s.trim())
             .filter((s) => s.length > 0);
-          onSubmit(tokens.length === 0 ? [] : tokens);
+          if (tokens.length > 0 || !field.required) onSubmit(tokens);
         }}
         onCancel={onCancel}
       />
@@ -233,10 +281,11 @@ export function FieldEditor({
     <InlineFieldInput
       field={field.name}
       initial={initial}
-      placeholder="text (empty to clear)"
+      placeholder={field.required ? "text" : "text (empty to clear)"}
       onSubmit={(raw) => {
         const trimmed = raw.trim();
-        onSubmit(trimmed === "" ? null : raw);
+        if (trimmed !== "") onSubmit(raw);
+        else if (!field.required) onSubmit(null);
       }}
       onCancel={onCancel}
     />

@@ -14,9 +14,24 @@ type Props = {
   onQuit: () => void;
 };
 
+function filterBoards(boards: Board[], query: string): Board[] {
+  const q = query.toLowerCase().trim();
+  if (!q) return boards;
+  return boards.filter(
+    (board) =>
+      board.name.toLowerCase().includes(q) ||
+      (board.projectKey ?? "").toLowerCase().includes(q) ||
+      (board.projectName ?? "").toLowerCase().includes(q) ||
+      board.type.toLowerCase().includes(q),
+  );
+}
+
 export function BoardPicker({ cfg, onPick, onQuit }: Props) {
-  const [boards, setBoards] = useState<Board[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState<{
+    cfg: JiraConfig;
+    boards: Board[] | null;
+    error: string | null;
+  }>({ cfg, boards: null, error: null });
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState(0);
   // Scroll is derived from the cursor at render time via a ref anchor. No
@@ -26,20 +41,13 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
 
   useEffect(() => {
     let cancelled = false;
+    setLoaded({ cfg, boards: null, error: null });
     (async () => {
       try {
         const list = await listBoards(cfg);
-        // Jira sometimes returns dupes across pages — dedupe by id.
-        const seen = new Set<number>();
-        const unique: Board[] = [];
-        for (const b of list) {
-          if (seen.has(b.id)) continue;
-          seen.add(b.id);
-          unique.push(b);
-        }
-        if (!cancelled) setBoards(unique);
+        if (!cancelled) setLoaded({ cfg, boards: list, error: null });
       } catch (e) {
-        if (!cancelled) setError(errorMessage(e));
+        if (!cancelled) setLoaded({ cfg, boards: null, error: errorMessage(e) });
       }
     })();
     return () => {
@@ -47,18 +55,10 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
     };
   }, [cfg]);
 
-  const filtered = useMemo(() => {
-    if (!boards) return [];
-    const q = query.toLowerCase().trim();
-    if (!q) return boards;
-    return boards.filter(
-      (b) =>
-        b.name.toLowerCase().includes(q) ||
-        (b.projectKey ?? "").toLowerCase().includes(q) ||
-        (b.projectName ?? "").toLowerCase().includes(q) ||
-        b.type.toLowerCase().includes(q),
-    );
-  }, [boards, query]);
+  const boards = loaded.cfg === cfg ? loaded.boards : null;
+  const error = loaded.cfg === cfg ? loaded.error : null;
+
+  const filtered = useMemo(() => filterBoards(boards ?? [], query), [boards, query]);
 
   const viewportHeight = Math.max(5, rows - 8);
 
@@ -143,8 +143,13 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
           onChange={setQuery}
           onUpArrow={() => setIndex(clamp(cursor - 1, 0, clampedLen))}
           onDownArrow={() => setIndex(clamp(cursor + 1, 0, clampedLen))}
-          onSubmit={() => {
-            const b = filtered[cursor];
+          onSubmit={(submittedQuery) => {
+            const submitted = filterBoards(boards, submittedQuery);
+            const submittedCursor =
+              submittedQuery.trim().toLowerCase() === query.trim().toLowerCase()
+                ? clamp(index, 0, Math.max(0, submitted.length - 1))
+                : 0;
+            const b = submitted[submittedCursor];
             if (b) onPick(b);
           }}
           onCancel={onQuit}

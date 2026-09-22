@@ -14,8 +14,10 @@ import { useDimensions, useLoading } from "../hooks";
 import {
   type BoardConfig,
   type BoardSwimlanes,
+  type EditableField,
   type Issue,
   type IssueLinkType,
+  type IssueSearchResult,
   type IssueType,
   type JiraUser,
   type Transition,
@@ -25,6 +27,7 @@ import {
   getAssignableUsers,
   getBoardConfig,
   getBoardSwimlanes,
+  getCreateFields,
   rankIssue,
   getBoardIssues,
   getIssueLinkTypes,
@@ -42,10 +45,12 @@ import {
   buildLanes,
   findCursor,
   moveCursor,
+  reconcileCursor,
   snapToCard,
 } from "../swimlanes";
 import { clamp, copyToClipboard, errorMessage, openInBrowser, stickyScroll, theme } from "../ui";
 import { BoardHeader } from "./BoardHeader";
+import { createBoardUsersLoader } from "./boardUsers";
 import { CreateWizard } from "./CreateWizard";
 import { FilterPicker } from "./FilterPicker";
 import { FilterPickerModal } from "./FilterPickerModal";
@@ -80,17 +85,30 @@ type Modal =
   | { kind: "help" }
   | { kind: "search" }
   | { kind: "card-action" }
-  | { kind: "move-picker"; issueKey?: string }
-  | { kind: "transition-picker"; transitions: Transition[]; issueKey: string }
-  | { kind: "transition-screen"; transition: Transition; issueKey: string; targetColIdx?: number }
+  | { kind: "move-picker"; issue: Issue }
+  | { kind: "transition-picker"; transitions: Transition[]; issueKey: string; projectKey: string }
+  | {
+      kind: "transition-screen";
+      transition: Transition;
+      issueKey: string;
+      projectKey: string;
+      targetColIdx?: number;
+    }
   | { kind: "filter-menu" }
   | { kind: "filter-assignee"; names: string[] }
   | { kind: "filter-type"; types: string[] }
   | { kind: "filter-sprint"; sprints: string[] }
   | { kind: "filter-label"; labels: string[] }
   | { kind: "filter-epic"; epics: string[] }
-  | { kind: "create"; types: IssueType[]; linkTypes: IssueLinkType[]; parentKey?: string }
-  | { kind: "quick-add"; colIdx: number; typeName: string; value: string }
+  | {
+      kind: "create";
+      projectKey: string;
+      types: IssueType[];
+      linkTypes: IssueLinkType[];
+      parent?: IssueSearchResult;
+      initialType?: IssueType;
+    }
+  | { kind: "quick-add"; colIdx: number; type: IssueType; value: string }
   | { kind: "detail"; issueKey: string }
   | { kind: "title-edit"; issueKey: string; current: string }
   | { kind: "nvim" }
@@ -115,6 +133,17 @@ const EMPTY_FILTERS: Filters = {
 
 function activeFilterCount(f: Filters): number {
   return Object.values(f).filter(Boolean).length;
+}
+
+function needsMoreThanTitle(fields: EditableField[]): boolean {
+  return fields.some(
+    (field) =>
+      field.required &&
+      !field.hasDefaultValue &&
+      field.id !== "project" &&
+      field.id !== "issuetype" &&
+      field.id !== "summary",
+  );
 }
 
 /** Human label for the active swimlane grouping, shown in the header. */
@@ -182,17 +211,33 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   const [searchBuffer, setSearchBuffer] = useState("");
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
 
-  // Link & issue types don't change for the life of the board — fetch once, reuse.
-  const metaCache = useRef<{ types: IssueType[]; linkTypes: IssueLinkType[] } | null>(null);
+  type BoardMeta = { types: IssueType[]; linkTypes: IssueLinkType[] };
+  const metaCache = useRef<{ projectKey: string; value: Promise<BoardMeta> } | null>(null);
   // Assignable-users cache for @-completion in the editor, shared across every
   // edit path that shells out on this board — including the detail modal, which
   // takes `ensureUsers` as a prop rather than fetching its own copy.
-  const usersRef = useRef<JiraUser[] | null>(null);
+  const usersLoader = useMemo(
+    () => createBoardUsersLoader((projectKey) => getAssignableUsers(cfg, projectKey)),
+    [cfg],
+  );
   // First load is fatal; reload failures just flash a toast.
   const hasLoadedOnce = useRef(false);
   // After a transition, follow the moved card to its new column on reload.
-  const pendingFocusKey = useRef<string | null>(null);
+  const pendingFocus = useRef<{ key: string; afterVersion: number } | null>(null);
+  const boardDataVersion = useRef(0);
   const [recents, setRecents] = useState<RecentIssue[]>([]);
+  const recentsTouched = useRef(false);
+  const recentsLoaded = useRef(false);
+  const loadSeq = useRef(0);
+  const activeRef = useRef(false);
+  const reloading = useRef(false);
+  const reloadAgain = useRef(false);
+  const reloadPromise = useRef<Promise<void> | null>(null);
+  const dispose = useCallback(() => {
+    activeRef.current = false;
+    loadSeq.current++;
+    reloadAgain.current = false;
+  }, []);
 
   // Push a card to the front of the MRU recents list (deduped, capped at 20)
   // and persist it, so quick-open (`R`) starts populated across sessions.
@@ -201,6 +246,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   // whatever's currently loaded, falling back to the key.
   const touchRecent = useCallback(
     (key: string, summaryOverride?: string) => {
+      recentsTouched.current = true;
       setRecents((prev) => {
         // Prefer an explicit summary (freshly-created cards aren't in `issues`
         // yet), then the loaded card, then a prior recents entry, then the key.
@@ -210,7 +256,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           prev.find((r) => r.key === key)?.summary ??
           key;
         const next = [{ key, summary }, ...prev.filter((r) => r.key !== key)].slice(0, 20);
-        void writeRecents(cfg, board.id, next);
+        if (recentsLoaded.current) void writeRecents(cfg, board.id, next);
         return next;
       });
     },
@@ -348,6 +394,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   }, [issues]);
 
   const applyBoardData = useCallback((c: BoardConfig, is: Issue[]) => {
+    boardDataVersion.current++;
     setConf(c);
     setIssues(is);
     setActiveRows((prev) => c.columns.map((_, i) => prev[i] ?? 0));
@@ -385,9 +432,13 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   }, [issues, pendingMove]);
 
   const load = useCallback(async () => {
+    if (!activeRef.current) return;
+    const seq = ++loadSeq.current;
+    const isCurrent = () => activeRef.current && seq === loadSeq.current;
     setLoadError(null);
     if (!hasLoadedOnce.current) {
       const cached = await readBoardCache(cfg, board.id);
+      if (!isCurrent()) return;
       if (cached) {
         applyBoardData(cached.config, cached.issues);
         hasLoadedOnce.current = true;
@@ -399,20 +450,10 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     try {
       await track(
         (async () => {
-          const [c, is] = await Promise.all([
-            getBoardConfig(cfg, board.id),
-            getBoardIssues(cfg, board.id),
-          ]);
-          // Filter-based boards (created from a saved filter, or spanning
-          // several projects) have no `location`, so the config endpoint gives
-          // no project key. Fall back to the prefix of the first issue key
-          // (PROJ-123 → PROJ) so project-scoped actions — create, quick-add,
-          // @-mention users — still work on single-project filter boards
-          // instead of hitting `.../undefined`.
-          if (!c.projectKey) {
-            const derived = is[0]?.key.split("-")[0];
-            if (derived) c.projectKey = derived;
-          }
+          const c = await getBoardConfig(cfg, board.id);
+          if (!isCurrent()) return;
+          const is = await getBoardIssues(cfg, board.id, c.estimationFieldId);
+          if (!isCurrent()) return;
           applyBoardData(c, is);
           hasLoadedOnce.current = true;
           void writeBoardCache(cfg, board.id, c, is);
@@ -421,10 +462,12 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           // it self-degrades to strategy "none", so the flat board is
           // unaffected if it fails.
           const idToKey = new Map(is.map((i) => [i.id, i.key]));
-          setSwimlanes(await getBoardSwimlanes(cfg, board.id, idToKey));
+          const nextSwimlanes = await getBoardSwimlanes(cfg, board.id, idToKey);
+          if (isCurrent()) setSwimlanes(nextSwimlanes);
         })(),
       );
     } catch (e) {
+      if (!isCurrent()) return;
       const msg = errorMessage(e);
       if (hasLoadedOnce.current) flash(msg, "err");
       else setLoadError(msg);
@@ -432,39 +475,62 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   }, [cfg, board.id, flash, applyBoardData, track]);
 
   useEffect(() => {
+    activeRef.current = true;
     void load();
-  }, [load]);
+    return dispose;
+  }, [load, dispose]);
 
   // Load persisted quick-open recents once per board.
   useEffect(() => {
-    readRecents(cfg, board.id).then(setRecents);
+    let cancelled = false;
+    void (async () => {
+      const saved = await readRecents(cfg, board.id);
+      if (cancelled) return;
+      setRecents((current) => {
+        const currentKeys = new Set(current.map((recent) => recent.key));
+        const merged = [
+          ...current,
+          ...saved.filter((recent) => !currentKeys.has(recent.key)),
+        ].slice(0, 20);
+        recentsLoaded.current = true;
+        if (recentsTouched.current) void writeRecents(cfg, board.id, merged);
+        return merged;
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [cfg, board.id]);
 
   /**
    * Coalesced background reload. Rapid optimistic moves would otherwise each
    * fire a full board refetch; instead, if a reload is already running a caller
-   * just sets a "rerun once more when you're done" flag and returns, so a burst
+   * sets a "rerun once more when you're done" flag and joins it, so a burst
    * of N moves collapses to at most one in-flight reload plus one trailing
    * catch-up — never N stacked refetches, and it always ends on fresh data.
-   * (Optimistic overlays keep each card in place until its own reload confirms
-   * it, so a caller returning early never drops a move.)
+   * All callers wait through the trailing reload before releasing their card's
+   * busy state.
    */
-  const reloading = useRef(false);
-  const reloadAgain = useRef(false);
   const coalescedReload = useCallback(async () => {
+    if (!activeRef.current) return;
     if (reloading.current) {
       reloadAgain.current = true;
-      return;
+      return reloadPromise.current;
     }
     reloading.current = true;
-    try {
-      do {
-        reloadAgain.current = false;
-        await load();
-      } while (reloadAgain.current);
-    } finally {
-      reloading.current = false;
-    }
+    const pending = (async () => {
+      try {
+        do {
+          reloadAgain.current = false;
+          await load();
+        } while (activeRef.current && reloadAgain.current);
+      } finally {
+        reloading.current = false;
+        reloadPromise.current = null;
+      }
+    })();
+    reloadPromise.current = pending;
+    return pending;
   }, [load]);
 
   /**
@@ -474,7 +540,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   const liveQuery = modal.kind === "search" ? searchBuffer : query;
   const matches = useMemo(() => {
     if (!liveQuery.trim()) return [] as CellRef[];
-    const q = liveQuery.toLowerCase();
+    const q = liveQuery.trim().toLowerCase();
     const out: CellRef[] = [];
     columns.forEach((c, ci) => {
       c.issues.forEach((issue, ri) => {
@@ -489,7 +555,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   // flat board's col:row). Same query, keyed differently.
   const swimMatchSet = useMemo(() => {
     if (!liveQuery.trim()) return new Set<string>();
-    const q = liveQuery.toLowerCase();
+    const q = liveQuery.trim().toLowerCase();
     return new Set(filteredIssues.filter((i) => issueMatches(i, q)).map((i) => i.key));
   }, [filteredIssues, liveQuery]);
 
@@ -554,16 +620,22 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   // costs nothing; the shrink is transient and reverts when they clear.
   const footerRows = modal.kind === "search" ? 5 : 3;
   const columnHeight = Math.max(6, termRows - 3 - footerRows - Math.max(0, toasts.length - 1));
-  const columnInnerHeight = columnHeight - 2; // minus border top/bottom
-  const perCardLines = 5; // card = 3 content + 1 spacer + 1 (border-ish) handled via marginBottom
-  const cardsVisible = Math.max(1, Math.floor(columnInnerHeight / perCardLines));
+  // Each card uses three content rows plus one margin row. Inside the column
+  // border, reserve one row for the header and up to two scroll indicators.
+  const columnInnerHeight = columnHeight - 2;
+  const cardsVisible = Math.max(1, Math.floor((columnInnerHeight - 3) / 4));
   // The swimlane grid draws single-line rows in this many terminal lines (the
   // SwimlaneHeader + divider take 2 of the columnHeight rows). PageUp/Down in
   // swim view pages by this, not `cardsVisible` (which is a flat rich-card
   // count and would under-page badly).
   const swimVisibleRows = Math.max(3, columnHeight - 2);
 
-  const visibleColCount = Math.min(maxColumns, columns.length);
+  const gap = 1;
+  const arrowChannel = 2;
+  const gridWidth = termCols - arrowChannel * 2;
+  const widthBound = Math.max(1, Math.floor((gridWidth + gap) / (18 + gap)));
+  const visibleColCount = Math.min(maxColumns, widthBound, columns.length);
+  const estimateDisplay = conf?.estimationFieldId === "timeoriginalestimate" ? "time" : "points";
   const colWindowStart = Math.max(
     0,
     Math.min(columns.length - visibleColCount, effectiveCol - Math.floor(visibleColCount / 2)),
@@ -575,10 +647,11 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   /**
    * Clamp each column's active row into bounds when a column's issue list
    * shrinks (e.g. toggling the assignee filter) so the cursor doesn't sit
-   * past the last card. Column *count* never changes — buildColumns always
-   * maps every colDef — only the per-column issue lists grow and shrink.
+   * past the last card. The active column is also clamped when a refreshed
+   * board configuration changes the column count.
    */
   useEffect(() => {
+    setActiveCol((current) => clamp(current, 0, Math.max(0, columns.length - 1)));
     if (columns.length === 0) return;
     setActiveRows((prev) => {
       let changed = false;
@@ -602,15 +675,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
    */
   useEffect(() => {
     if (!swimView || lanes.length === 0) return;
-    setSwimCursor((c) => {
-      const lane = Math.min(c.lane, lanes.length - 1);
-      const cols = lanes[lane]!.columns;
-      const col = Math.min(c.col, Math.max(0, cols.length - 1));
-      const rowMax = Math.max(0, (cols[col]?.issues.length ?? 0) - 1);
-      const row = Math.min(c.row, rowMax);
-      if (lane === c.lane && col === c.col && row === c.row) return c;
-      return { lane, col, row };
-    });
+    setSwimCursor((cursor) => reconcileCursor(lanes, cursor));
   }, [lanes, swimView]);
 
   /**
@@ -635,6 +700,15 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     return col.issues[activeRows[activeCol] ?? 0] ?? null;
   }, [swimView, lanes, swimCursor, columns, activeCol, activeRows]);
 
+  const projectForIssue = useCallback(
+    (issueKey: string): string =>
+      issues.find((issue) => issue.key === issueKey)?.projectKey ||
+      issueKey.split("-")[0] ||
+      conf?.projectKey ||
+      "",
+    [issues, conf],
+  );
+
   /**
    * Execute a transition POST, following the card to its new column. If
    * the workflow attaches a required-fields screen (`requiredFields` is
@@ -647,13 +721,18 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     async (
       issueKey: string,
       transition: Transition,
-      opts: { targetColIdx?: number; fields?: Record<string, EditableFieldValue> } = {},
+      opts: {
+        targetColIdx?: number;
+        fields?: Record<string, EditableFieldValue>;
+        projectKey?: string;
+      } = {},
     ) => {
       if (transition.requiredFields.length > 0 && !opts.fields) {
         setModal({
           kind: "transition-screen",
           transition,
           issueKey,
+          projectKey: opts.projectKey || projectForIssue(issueKey),
           ...(opts.targetColIdx !== undefined ? { targetColIdx: opts.targetColIdx } : {}),
         });
         return;
@@ -673,6 +752,9 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       // that isn't a column on this board (targetColIdx undefined), which would
       // otherwise make the card disappear until the refetch.
       const from = issues.find((i) => i.key === issueKey)?.statusId;
+      const sourceColIdx = conf?.columns.findIndex((column) =>
+        column.statusIds.includes(from ?? ""),
+      );
       const optimistic =
         opts.targetColIdx !== undefined && from !== undefined && from !== transition.toStatusId;
       if (optimistic) {
@@ -687,21 +769,38 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         setActiveCol(opts.targetColIdx);
         setSwimCursor((c) => ({ ...c, col: opts.targetColIdx! }));
       }
-      pendingFocusKey.current = issueKey;
       try {
         await transitionIssue(cfg, issueKey, transition.id, opts.fields);
+        pendingFocus.current = { key: issueKey, afterVersion: boardDataVersion.current + 1 };
         flash(`${issueKey} → ${transition.name}`, "ok");
         touchRecent(issueKey);
         await coalescedReload();
       } catch (e) {
-        if (optimistic) clearPending(issueKey);
-        pendingFocusKey.current = null;
+        if (optimistic) {
+          clearPending(issueKey);
+          if (sourceColIdx !== undefined && sourceColIdx >= 0) {
+            setActiveCol(sourceColIdx);
+            setSwimCursor((cursor) => ({ ...cursor, col: sourceColIdx }));
+          }
+        }
+        if (pendingFocus.current?.key === issueKey) pendingFocus.current = null;
         flash(errorMessage(e), "err");
       } finally {
         if (!optimistic) markBusy(issueKey, false);
       }
     },
-    [cfg, issues, flash, coalescedReload, markBusy, startPending, clearPending, touchRecent],
+    [
+      cfg,
+      conf,
+      issues,
+      flash,
+      coalescedReload,
+      markBusy,
+      startPending,
+      clearPending,
+      touchRecent,
+      projectForIssue,
+    ],
   );
 
   const moveToColumn = useCallback(
@@ -735,7 +834,10 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         // fields screen so the move stays frictionless — and let
         // commitTransition surface the screen only if that's the only path.
         const chosen = candidates.find((t) => t.requiredFields.length === 0) ?? candidates[0]!;
-        await commitTransition(issue.key, chosen, { targetColIdx });
+        await commitTransition(issue.key, chosen, {
+          targetColIdx,
+          projectKey: issue.projectKey || projectForIssue(issue.key),
+        });
       } catch (e) {
         flash(errorMessage(e), "err");
       } finally {
@@ -746,7 +848,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         markBusy(issue.key, false);
       }
     },
-    [currentIssue, conf, cfg, flash, commitTransition, markBusy, pendingKeys],
+    [currentIssue, conf, cfg, flash, commitTransition, markBusy, pendingKeys, projectForIssue],
   );
 
   /**
@@ -757,13 +859,14 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
    * changes (e.g. toggling a filter mid-flight) shouldn't consume it.
    */
   useEffect(() => {
-    const key = pendingFocusKey.current;
-    if (!key) return;
+    const request = pendingFocus.current;
+    if (!request || boardDataVersion.current < request.afterVersion) return;
+    const { key } = request;
     if (swimView) {
       const sc = findCursor(lanes, key);
       if (sc) {
         setSwimCursor(sc);
-        pendingFocusKey.current = null;
+        pendingFocus.current = null;
       }
       return;
     }
@@ -773,7 +876,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       if (ri !== -1) {
         setActiveCol(ci);
         setActiveRowAt(ci, ri);
-        pendingFocusKey.current = null;
+        pendingFocus.current = null;
         return;
       }
     }
@@ -803,24 +906,17 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
    * so the editor's `@` completion menu can offer real teammates. Fetch
    * failure isn't fatal — we just open the editor without the menu.
    */
-  const ensureUsers = useCallback(async (): Promise<JiraUser[]> => {
-    if (!conf) return [];
-    try {
-      if (!usersRef.current) {
-        usersRef.current = await getAssignableUsers(cfg, conf.projectKey);
-      }
-      return usersRef.current;
-    } catch {
-      return [];
-    }
-  }, [cfg, conf]);
+  const ensureUsers = useCallback(
+    async (projectKey: string): Promise<JiraUser[]> => usersLoader(projectKey),
+    [usersLoader],
+  );
 
   // Pre-warm the assignable-users list as soon as the board's project is
   // known, so the first `@`-mention edit opens the editor instantly instead of
-  // blocking on this fetch behind the "editing…" banner. Cached in usersRef,
+  // blocking on this fetch behind the "editing…" banner. Cached by project,
   // so the edit paths (board + detail modal) reuse it. Fire-and-forget.
   useEffect(() => {
-    if (conf) void ensureUsers();
+    if (conf?.projectKey) void ensureUsers(conf.projectKey);
   }, [conf, ensureUsers]);
 
   const doEditDescription = useCallback(async () => {
@@ -828,7 +924,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     if (!issue) return;
     setModal({ kind: "nvim" });
     try {
-      const mentionUsers = await ensureUsers();
+      const mentionUsers = await ensureUsers(issue.projectKey || projectForIssue(issue.key));
       const raw = await editInNeovim(issue.description, `${issue.key}-desc.md`, { mentionUsers });
       setModal({ kind: "none" });
       if (raw.trim() === issue.description.trim()) {
@@ -843,7 +939,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       setModal({ kind: "none" });
       flash(errorMessage(e), "err");
     }
-  }, [currentIssue, cfg, flash, load, ensureUsers, touchRecent]);
+  }, [currentIssue, cfg, flash, load, ensureUsers, touchRecent, projectForIssue]);
 
   const doAssignToMe = useCallback(async () => {
     const issue = currentIssue;
@@ -873,11 +969,16 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         flash("no transitions available", "info");
         return;
       }
-      setModal({ kind: "transition-picker", transitions: trs, issueKey: issue.key });
+      setModal({
+        kind: "transition-picker",
+        transitions: trs,
+        issueKey: issue.key,
+        projectKey: issue.projectKey || projectForIssue(issue.key),
+      });
     } catch (e) {
       flash(errorMessage(e), "err");
     }
-  }, [currentIssue, cfg, flash, track]);
+  }, [currentIssue, cfg, flash, track, projectForIssue]);
 
   const doRerank = useCallback(
     async (direction: -1 | 1) => {
@@ -907,7 +1008,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           issue.key,
           direction === -1 ? { before: neighbor.key } : { after: neighbor.key },
         );
-        pendingFocusKey.current = issue.key;
+        pendingFocus.current = { key: issue.key, afterVersion: boardDataVersion.current + 1 };
         flash(`${issue.key} reranked ${direction === -1 ? "up" : "down"}`, "ok");
         touchRecent(issue.key);
         await coalescedReload();
@@ -967,51 +1068,57 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   const openBoardInBrowser = useCallback(async () => {
     if (!conf) return;
     try {
-      /**
-       * Team-managed / next-gen URL. Classic projects use
-       * /secure/RapidBoard.jspa?rapidView=… — Jira usually redirects anyway.
-       */
-      await openInBrowser(
-        `${cfg.server}/jira/software/projects/${conf.projectKey}/boards/${board.id}`,
-      );
+      const path = conf.projectKey
+        ? `/jira/software/projects/${conf.projectKey}/boards/${board.id}`
+        : `/secure/RapidBoard.jspa?rapidView=${board.id}`;
+      await openInBrowser(`${cfg.server}${path}`);
       flash(`opened board in browser`, "ok");
     } catch (e) {
       flash(errorMessage(e), "err");
     }
   }, [cfg.server, conf, board.id, flash]);
 
-  /**
-   * Hydrate (and memoize) the issue-type + link-type catalog. Both are
-   * board-lifetime constants, so one fetch covers every caller that needs
-   * them: `c` (full wizard) and the subtask path out of the detail modal.
-   */
-  const ensureMeta = useCallback(async (): Promise<{
-    types: IssueType[];
-    linkTypes: IssueLinkType[];
-  }> => {
-    if (!conf) throw new Error("board config not loaded");
-    // Filter/multi-project boards with no issues yet expose no project key, so
-    // there's nothing to scope a create against — fail with a clear message
-    // rather than POSTing to `.../undefined`.
-    if (!conf.projectKey) throw new Error("no project on this board — can't create issues here");
-    if (!metaCache.current) {
-      const [types, linkTypes] = await track(
-        Promise.all([getIssueTypes(cfg, conf.projectKey), getIssueLinkTypes(cfg)]),
-      );
-      metaCache.current = { types: types.filter((t) => !t.subtask), linkTypes };
-    }
-    return metaCache.current;
-  }, [cfg, conf, track]);
+  /** Cache one project's issue-type and link-type catalog at a time. Detail
+   * views on multi-project boards can replace it with the issue's project. */
+  const ensureMeta = useCallback(
+    async (
+      projectKey: string,
+    ): Promise<{
+      types: IssueType[];
+      linkTypes: IssueLinkType[];
+    }> => {
+      if (!projectKey) throw new Error("no project selected — can't create issues here");
+      if (metaCache.current?.projectKey !== projectKey) {
+        const value = track(
+          Promise.all([getIssueTypes(cfg, projectKey), getIssueLinkTypes(cfg)]).then(
+            ([types, linkTypes]) => ({ types, linkTypes }),
+          ),
+        );
+        metaCache.current = { projectKey, value };
+      }
+      const entry = metaCache.current;
+      try {
+        const value = await entry.value;
+        return value;
+      } catch (error) {
+        if (metaCache.current === entry) metaCache.current = null;
+        throw error;
+      }
+    },
+    [cfg, track],
+  );
 
   const startCreate = useCallback(async () => {
     if (!conf) return;
     try {
-      const { types, linkTypes } = await ensureMeta();
+      if (!conf.projectKey) throw new Error("no project on this board — can't create issues here");
+      const { types: allTypes, linkTypes } = await ensureMeta(conf.projectKey);
+      const types = allTypes.filter((type) => !type.subtask);
       if (types.length === 0) {
         flash("no creatable issue types", "err");
         return;
       }
-      setModal({ kind: "create", types, linkTypes });
+      setModal({ kind: "create", projectKey: conf.projectKey, types, linkTypes });
     } catch (e) {
       flash(errorMessage(e), "err");
     }
@@ -1026,20 +1133,34 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   const startQuickAdd = useCallback(async () => {
     if (!conf) return;
     try {
-      const { types } = await ensureMeta();
+      if (!conf.projectKey) throw new Error("no project on this board — can't create issues here");
+      const { types: allTypes, linkTypes } = await ensureMeta(conf.projectKey);
+      const types = allTypes.filter((type) => !type.subtask);
       const defaultType = types[0];
       if (!defaultType) {
         flash("no creatable issue types", "err");
         return;
       }
-      setModal({ kind: "quick-add", colIdx: effectiveCol, typeName: defaultType.name, value: "" });
+      const fields = await getCreateFields(cfg, conf.projectKey, defaultType.id);
+      if (needsMoreThanTitle(fields)) {
+        setModal({
+          kind: "create",
+          projectKey: conf.projectKey,
+          types,
+          linkTypes,
+          initialType: defaultType,
+        });
+        flash("this issue type has more required fields; opened full create", "info");
+        return;
+      }
+      setModal({ kind: "quick-add", colIdx: effectiveCol, type: defaultType, value: "" });
     } catch (e) {
       flash(errorMessage(e), "err");
     }
-  }, [conf, ensureMeta, effectiveCol, flash]);
+  }, [cfg, conf, ensureMeta, effectiveCol, flash]);
 
   const submitQuickAdd = useCallback(
-    async (colIdx: number, typeName: string, title: string) => {
+    async (colIdx: number, type: IssueType, title: string) => {
       if (!conf) return;
       const trimmed = title.trim();
       if (!trimmed) {
@@ -1053,35 +1174,64 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         return;
       }
       closeModal();
+      let created: { key: string };
       try {
-        const created = await createIssue(cfg, conf.projectKey, typeName, trimmed, "");
+        created = await createIssue(cfg, conf.projectKey, type.id, trimmed, "");
+      } catch (e) {
+        flash(errorMessage(e), "err");
+        return;
+      }
+
+      setActiveCol(colIdx);
+      setSwimCursor((c) => ({ ...c, col: colIdx }));
+      pendingFocus.current = { key: created.key, afterVersion: boardDataVersion.current + 1 };
+      touchRecent(created.key, trimmed);
+
+      let landed = false;
+      let warning: string | null = null;
+      try {
         // Jira drops the issue into the workflow's initial status, which
         // usually isn't where the cursor was. Transition if it's not already
         // in the target column; soft-fail if the workflow blocks the jump.
         const statusId = await getIssueStatusId(cfg, created.key);
-        let landed = targetCol.statusIds.includes(statusId);
+        landed = targetCol.statusIds.includes(statusId);
         if (!landed) {
           const trs = await getTransitions(cfg, created.key);
-          const hop = trs.find((t) => targetCol.statusIds.includes(t.toStatusId));
+          const candidates = trs.filter((transition) =>
+            targetCol.statusIds.includes(transition.toStatusId),
+          );
+          const hop =
+            candidates.find((transition) => transition.requiredFields.length === 0) ??
+            candidates[0];
           if (hop) {
+            if (hop.requiredFields.length > 0) {
+              await load();
+              flash(`created ${created.key}; complete required fields to move it`, "info");
+              setModal({
+                kind: "transition-screen",
+                transition: hop,
+                issueKey: created.key,
+                projectKey: conf.projectKey,
+                targetColIdx: colIdx,
+              });
+              return;
+            }
             await transitionIssue(cfg, created.key, hop.id);
             landed = true;
+          } else {
+            warning = `no transition to ${targetCol.name}`;
           }
         }
-        setActiveCol(colIdx);
-        setSwimCursor((c) => ({ ...c, col: colIdx }));
-        pendingFocusKey.current = created.key;
-        flash(
-          landed
-            ? `created ${created.key} in ${targetCol.name}`
-            : `created ${created.key} (couldn't move to ${targetCol.name})`,
-          landed ? "ok" : "info",
-        );
-        touchRecent(created.key, trimmed);
-        await load();
       } catch (e) {
-        flash(errorMessage(e), "err");
+        warning = errorMessage(e);
       }
+      flash(
+        landed
+          ? `created ${created.key} in ${targetCol.name}`
+          : `created ${created.key}${warning ? `; couldn't move: ${warning}` : ""}`,
+        landed ? "ok" : "info",
+      );
+      await load();
     },
     [cfg, conf, flash, load, closeModal, touchRecent],
   );
@@ -1195,7 +1345,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       if (input === "o") return void openIssueInBrowser();
       if (input === "m") {
         if (!currentIssue) return flash("no issue selected", "info");
-        setModal({ kind: "move-picker" });
+        setModal({ kind: "move-picker", issue: currentIssue });
         return;
       }
       // Rerank uses [ / ] — plain brackets transmit reliably on every
@@ -1361,7 +1511,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           else if (id === "title") void doEditSummary();
           else if (id === "desc") void doEditDescription();
           else if (id === "transition") void doFuzzyTransition();
-          else if (id === "move") setModal({ kind: "move-picker" });
+          else if (id === "move") setModal({ kind: "move-picker", issue: currentIssue });
           else if (id === "assign-me") void doAssignToMe();
           else if (id === "open") void openIssueInBrowser();
         }}
@@ -1369,46 +1519,25 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     );
   }
   if (modal.kind === "move-picker") {
-    // Explicit issueKey (e.g. from detail modal after a just-created card)
-    // must resolve against the fresh issues list — falling back to
-    // currentIssue would silently move the wrong card.
-    const targetIssue = modal.issueKey
-      ? issues.find((i) => i.key === modal.issueKey)
-      : currentIssue;
-    if (targetIssue) {
-      const currentColIdx = conf.columns.findIndex((c) =>
-        c.statusIds.includes(targetIssue.statusId),
-      );
-      return (
-        <FilterPicker
-          title={`move ${targetIssue.key} to…`}
-          items={conf.columns.map((c, i) => ({ id: String(i), label: c.name }))}
-          {...(currentColIdx >= 0 ? { currentId: String(currentColIdx) } : {})}
-          onCancel={closeModal}
-          onPick={(id) => {
-            closeModal();
-            const idx = Number(id);
-            const col = conf.columns[idx];
-            if (!col) return;
-            if (col.statusIds.includes(targetIssue.statusId)) {
-              flash("already in that column", "info");
-              return;
-            }
-            void moveToColumn(idx, targetIssue);
-          }}
-        />
-      );
-    }
-    // Issue not in the current issues list yet — likely a just-created card
-    // mid-reload. Render the picker in a loading state; it resolves on its
-    // own once issues update, and esc still cancels via FilterPicker.
+    const targetIssue = modal.issue;
+    const currentColIdx = conf.columns.findIndex((c) => c.statusIds.includes(targetIssue.statusId));
     return (
       <FilterPicker
-        title={`move ${modal.issueKey ?? "issue"} to…`}
-        items={[]}
-        loading
+        title={`move ${targetIssue.key} to…`}
+        items={conf.columns.map((c, i) => ({ id: String(i), label: c.name }))}
+        {...(currentColIdx >= 0 ? { currentId: String(currentColIdx) } : {})}
         onCancel={closeModal}
-        onPick={() => {}}
+        onPick={(id) => {
+          closeModal();
+          const idx = Number(id);
+          const col = conf.columns[idx];
+          if (!col) return;
+          if (col.statusIds.includes(targetIssue.statusId)) {
+            flash("already in that column", "info");
+            return;
+          }
+          void moveToColumn(idx, targetIssue);
+        }}
       />
     );
   }
@@ -1417,10 +1546,10 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     return (
       <QuickAddModal
         colName={colName}
-        typeName={modal.typeName}
+        typeName={modal.type.name}
         value={modal.value}
         onChange={(v) => setModal({ ...modal, value: v })}
-        onSubmit={(val) => void submitQuickAdd(modal.colIdx, modal.typeName, val)}
+        onSubmit={(val) => void submitQuickAdd(modal.colIdx, modal.type, val)}
         onCancel={closeModal}
       />
     );
@@ -1457,12 +1586,12 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     return (
       <IssueDetailModal
         cfg={cfg}
-        projectKey={conf.projectKey}
+        projectKey={projectForIssue(modal.issueKey)}
         issueKey={modal.issueKey}
         ensureUsers={ensureUsers}
         onClose={closeModal}
-        onMove={() => setModal({ kind: "move-picker", issueKey: modal.issueKey })}
-        onTransition={async () => {
+        onMove={(issue) => setModal({ kind: "move-picker", issue })}
+        onTransition={async (projectKey) => {
           const key = modal.issueKey;
           try {
             const trs = await track(getTransitions(cfg, key));
@@ -1470,17 +1599,19 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
               flash("no transitions available", "info");
               return;
             }
-            setModal({ kind: "transition-picker", transitions: trs, issueKey: key });
+            setModal({ kind: "transition-picker", transitions: trs, issueKey: key, projectKey });
           } catch (e) {
             flash(errorMessage(e), "err");
           }
         }}
-        onCreateSubtask={(parentKey) => {
+        onCreateSubtask={(parent) => {
           closeModal();
           void (async () => {
             try {
-              const { types, linkTypes } = await ensureMeta();
-              setModal({ kind: "create", types, linkTypes, parentKey });
+              const { types: allTypes, linkTypes } = await ensureMeta(parent.projectKey);
+              const types = allTypes.filter((type) => type.subtask);
+              if (types.length === 0) throw new Error("no subtask issue types in this project");
+              setModal({ kind: "create", projectKey: parent.projectKey, types, linkTypes, parent });
             } catch (e) {
               flash(errorMessage(e), "err");
             }
@@ -1509,7 +1640,10 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           // commitTransition runs through to POST with no modal up.
           const targetIdx = conf.columns.findIndex((c) => c.statusIds.includes(tr.toStatusId));
           closeModal();
-          void commitTransition(pickerKey, tr, targetIdx !== -1 ? { targetColIdx: targetIdx } : {});
+          void commitTransition(pickerKey, tr, {
+            projectKey: modal.projectKey,
+            ...(targetIdx !== -1 ? { targetColIdx: targetIdx } : {}),
+          });
         }}
       />
     );
@@ -1521,17 +1655,17 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     return (
       <TransitionScreenModal
         cfg={cfg}
-        projectKey={conf.projectKey}
+        projectKey={modal.projectKey}
         issueKey={screenKey}
         transition={screenTr}
         onCancel={closeModal}
         onSubmit={(fields) => {
           closeModal();
-          void commitTransition(
-            screenKey,
-            screenTr,
-            screenTargetIdx !== undefined ? { targetColIdx: screenTargetIdx, fields } : { fields },
-          );
+          void commitTransition(screenKey, screenTr, {
+            projectKey: modal.projectKey,
+            fields,
+            ...(screenTargetIdx !== undefined ? { targetColIdx: screenTargetIdx } : {}),
+          });
         }}
       />
     );
@@ -1652,33 +1786,34 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     return (
       <CreateWizard
         cfg={cfg}
-        projectKey={conf.projectKey}
+        projectKey={modal.projectKey}
         types={modal.types}
         linkTypes={modal.linkTypes}
-        defaultParent={modal.parentKey}
+        initialType={modal.initialType}
+        defaultParent={modal.parent}
         ensureUsers={ensureUsers}
         onCancel={closeModal}
-        onDone={({ key, title, linkSummary }) => {
+        onDone={({ key, title, linkSummary, warning }) => {
           const headline = `created ${key}: ${title}`;
-          flash(linkSummary ? `${headline} · ${linkSummary}` : headline, "ok");
-          pendingFocusKey.current = key;
-          // Reload in the background so the new card shows up on the board
-          // beneath the detail view — the user closes detail and lands on it.
+          const linked = linkSummary ? `${headline} · ${linkSummary}` : headline;
+          flash(warning ? `${linked}; ${warning}` : linked, warning ? "info" : "ok");
+          pendingFocus.current = { key, afterVersion: boardDataVersion.current + 1 };
+          // Clean creates open detail. Partial success stays on the board so
+          // its warning is visible; both paths reload and focus the new card.
           void load();
-          void openDetailForKey(key, title);
+          if (warning) {
+            touchRecent(key, title);
+            closeModal();
+          } else void openDetailForKey(key, title);
         }}
         onError={(msg) => {
           flash(msg, "err");
-          closeModal();
         }}
       />
     );
   }
 
   // Main kanban view.
-  const gap = 1;
-  const arrowChannel = 2;
-  const gridWidth = termCols - arrowChannel * 2;
   const colWidth = Math.max(
     18,
     Math.floor((gridWidth - gap * (visibleColCount - 1)) / Math.max(1, visibleColCount)),
@@ -1693,6 +1828,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         visibleIssueCount={filteredIssues.length}
         totalIssueCount={issues.length}
         visiblePointSum={filteredIssues.reduce((a, i) => a + (i.storyPoints ?? 0), 0)}
+        estimateDisplay={estimateDisplay}
         colIndex={effectiveCol}
         colCount={columns.length}
         filterCount={activeFilterCount(filters)}
@@ -1717,6 +1853,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
                 visibleColCount={visibleColCount}
                 activeCol={swimCursor.col}
                 width={gridWidth}
+                estimateDisplay={estimateDisplay}
               />
               <Box>
                 <Text color={theme.divider}>{"─".repeat(Math.max(0, gridWidth))}</Text>
@@ -1755,6 +1892,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
                   matchSet={matchSet}
                   busyKeys={pendingKeys}
                   colIdx={ci}
+                  estimateDisplay={estimateDisplay}
                 />
               );
             })}

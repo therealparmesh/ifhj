@@ -19,10 +19,10 @@ const DEFAULT_FIELD_IDS: FieldIds = {
 type FieldIds = { epicLink: string; sprint: string; storyPoints: string };
 
 /**
- * Resolved field ids are stable for the life of a server, so cache them per
- * `cfg.server` — one `/field` fetch covers every board and issue this run.
+ * Resolved field ids are stable for the life of a credential, so cache them
+ * per server and auth header. The promise also coalesces concurrent callers.
  */
-const fieldIdCache = new Map<string, FieldIds>();
+const fieldIdCache = new Map<string, Promise<FieldIds>>();
 
 /**
  * Discover the epic-link, sprint, and story-points field ids for this tenant.
@@ -33,24 +33,31 @@ const fieldIdCache = new Map<string, FieldIds>();
  * failure falls back wholesale to `DEFAULT_FIELD_IDS`; nothing here is fatal.
  */
 async function resolveFieldIds(cfg: JiraConfig): Promise<FieldIds> {
-  const cached = fieldIdCache.get(cfg.server);
+  const cacheKey = `${cfg.server}\0${cfg.authHeader}`;
+  const cached = fieldIdCache.get(cacheKey);
   if (cached) return cached;
-  let ids: FieldIds = { ...DEFAULT_FIELD_IDS };
-  try {
+
+  const discovery = (async () => {
     const data = await jget(cfg, `/rest/api/3/field`);
-    const fields: any[] = Array.isArray(data) ? data : [];
+    if (!Array.isArray(data)) throw new Error("field discovery returned a malformed response");
+    const fields: any[] = data;
     const byCustom = (key: string) =>
       fields.find((f) => (f?.schema?.custom ?? "").endsWith(key))?.id;
-    ids = {
+    return {
       epicLink: byCustom("gh-epic-link") ?? DEFAULT_FIELD_IDS.epicLink,
       sprint: byCustom("gh-sprint") ?? DEFAULT_FIELD_IDS.sprint,
       storyPoints: byCustom("jsw-story-points") ?? DEFAULT_FIELD_IDS.storyPoints,
     };
-  } catch {
-    // `/field` unreachable or malformed — the defaults still work on most tenants.
-  }
-  fieldIdCache.set(cfg.server, ids);
-  return ids;
+  })();
+  let pending: Promise<FieldIds>;
+  pending = discovery.catch(() => {
+    // Failure handling belongs to the shared promise so every concurrent
+    // caller gets the fallback. Eviction lets a later operation retry.
+    if (fieldIdCache.get(cacheKey) === pending) fieldIdCache.delete(cacheKey);
+    return { ...DEFAULT_FIELD_IDS };
+  });
+  fieldIdCache.set(cacheKey, pending);
+  return pending;
 }
 
 export type Board = {
@@ -85,10 +92,11 @@ export type BoardConfig = {
   name: string;
   projectKey: string;
   columns: BoardColumn[];
+  estimationFieldId?: string;
 };
 
 /** One swimlane's identity (custom lanes only — field lanes are derived). */
-export type SwimlaneDef = { id: string; name: string };
+type SwimlaneDef = { id: string; name: string };
 
 /**
  * Swimlane layout for a board, sourced from the internal GreenHopper board
@@ -122,6 +130,10 @@ export type Issue = {
   /** ISO timestamp of the last update, for recency sort in done columns. */
   updated: string;
   issueType: string;
+  issueTypeId?: string;
+  issueTypeHierarchyLevel?: number;
+  projectKey?: string;
+  subtask?: boolean;
   assignee?: string;
   priority?: string;
   epicKey?: string;
@@ -143,9 +155,9 @@ export type Transition = {
 };
 
 /**
- * Normalized view of a Jira field's edit metadata. Derived from both the
- * workflow-transition screen expand and the per-issue /editmeta — the shape
- * is identical in both responses, so one parser covers both call sites.
+ * Normalized view of Jira field metadata. Workflow transition screens,
+ * per-issue edit metadata, and per-type create metadata use the same shape,
+ * so one parser covers all three call sites.
  * The closed union lets the field-editor component dispatch by `kind`
  * without re-inspecting loose schema strings.
  */
@@ -226,7 +238,7 @@ export type EditableFieldValue =
   | string[] // labels / string-list
   | number; // number
 
-export type IssueType = { id: string; name: string; subtask: boolean };
+export type IssueType = { id: string; name: string; subtask: boolean; hierarchyLevel?: number };
 
 export type Comment = {
   id: string;
@@ -281,13 +293,37 @@ async function jget(cfg: JiraConfig, path: string): Promise<any> {
   return res.json();
 }
 
+function nextPageStart(
+  data: any,
+  currentStart: number,
+  itemCount: number,
+  errorMessage: string,
+): number | null {
+  const hasMetadata =
+    Number.isInteger(data.startAt) ||
+    Number.isInteger(data.maxResults) ||
+    Number.isFinite(data.total) ||
+    typeof data.isLast === "boolean";
+  if (!hasMetadata) return null;
+  const responseStart = Number.isInteger(data.startAt) ? data.startAt : currentStart;
+  const responseSize = Number.isInteger(data.maxResults) ? data.maxResults : itemCount;
+  const nextStart = responseStart + responseSize;
+  if (data.isLast || (Number.isFinite(data.total) && nextStart >= data.total)) return null;
+  if (responseSize <= 0 || nextStart <= currentStart) throw new Error(errorMessage);
+  return nextStart;
+}
+
 export async function listBoards(cfg: JiraConfig): Promise<Board[]> {
   const all: Board[] = [];
+  const seen = new Set<number>();
   let startAt = 0;
   const pageSize = 50;
   while (true) {
     const data = await jget(cfg, `/rest/agile/1.0/board?startAt=${startAt}&maxResults=${pageSize}`);
-    for (const b of data.values ?? []) {
+    const values: any[] = Array.isArray(data.values) ? data.values : [];
+    for (const b of values) {
+      if (seen.has(b.id)) continue;
+      seen.add(b.id);
       all.push({
         id: b.id,
         name: b.name,
@@ -296,9 +332,9 @@ export async function listBoards(cfg: JiraConfig): Promise<Board[]> {
         projectName: b.location?.projectName,
       });
     }
-    if (data.isLast || (data.values?.length ?? 0) < pageSize) break;
-    startAt += pageSize;
-    if (startAt > 5000) break;
+    const next = nextPageStart(data, startAt, values.length, "board pagination did not advance");
+    if (next === null) break;
+    startAt = next;
   }
   return all;
 }
@@ -315,13 +351,22 @@ export async function getBoardConfig(cfg: JiraConfig, boardId: number): Promise<
     if (Number.isFinite(max) && max > 0) out.max = max;
     return out;
   });
-  return {
+  const config: BoardConfig = {
     name: data.name,
-    // The configuration endpoint's `location` uses `key` (verified against
-    // live boards) — distinct from the board-list endpoint's `projectKey`.
-    projectKey: data.location?.key,
+    projectKey: "",
     columns,
   };
+  const estimationFieldId = data.estimation?.field?.fieldId;
+  if (
+    data.estimation?.type === "field" &&
+    typeof estimationFieldId === "string" &&
+    estimationFieldId.length > 0
+  ) {
+    config.estimationFieldId = estimationFieldId;
+  }
+  // The configuration endpoint's `location` uses `key`, unlike board lists.
+  if (data.location?.key) config.projectKey = String(data.location.key);
+  return config;
 }
 
 /**
@@ -396,8 +441,13 @@ export async function getBoardSwimlanes(
   return { strategy, lanes: [], laneByKey: {} };
 }
 
-export async function getBoardIssues(cfg: JiraConfig, boardId: number): Promise<Issue[]> {
+export async function getBoardIssues(
+  cfg: JiraConfig,
+  boardId: number,
+  estimationFieldId?: string,
+): Promise<Issue[]> {
   const cf = await resolveFieldIds(cfg);
+  const estimateField = estimationFieldId || cf.storyPoints;
   const fields = [
     "summary",
     "status",
@@ -407,9 +457,10 @@ export async function getBoardIssues(cfg: JiraConfig, boardId: number): Promise<
     "priority",
     "description",
     "labels",
+    "project",
     cf.epicLink,
     cf.sprint,
-    cf.storyPoints,
+    estimateField,
     "parent",
   ].join(",");
   const all: Issue[] = [];
@@ -442,20 +493,31 @@ export async function getBoardIssues(cfg: JiraConfig, boardId: number): Promise<
         statusCategory: String(f.status?.statusCategory?.key ?? ""),
         updated: f.updated ?? "",
         issueType: f.issuetype?.name ?? "",
+        issueTypeId: String(f.issuetype?.id ?? ""),
+        ...(Number.isInteger(f.issuetype?.hierarchyLevel)
+          ? { issueTypeHierarchyLevel: Number(f.issuetype.hierarchyLevel) }
+          : {}),
+        projectKey: String(f.project?.key ?? it.key?.split("-")[0] ?? ""),
+        subtask: Boolean(f.issuetype?.subtask),
         labels: Array.isArray(f.labels) ? f.labels : [],
       };
       if (f.assignee?.displayName) issue.assignee = f.assignee.displayName;
       if (f.priority?.name) issue.priority = f.priority.name;
       if (activeSprint?.name) issue.sprintName = activeSprint.name;
-      if (typeof f[cf.storyPoints] === "number") issue.storyPoints = f[cf.storyPoints];
+      if (typeof f[estimateField] === "number") issue.storyPoints = f[estimateField];
       const epic = f[cf.epicLink] || f.parent?.key;
       if (epic) issue.epicKey = epic;
       all.push(issue);
     }
-    if ((data.issues?.length ?? 0) < 100) break;
-    startAt += 100;
-    // Matches listBoards' cap. Bump if real boards start hitting it.
-    if (startAt > 5000) break;
+    const page: any[] = Array.isArray(data.issues) ? data.issues : [];
+    const next = nextPageStart(
+      data,
+      startAt,
+      page.length,
+      "board issue pagination did not advance",
+    );
+    if (next === null) break;
+    startAt = next;
   }
   return all;
 }
@@ -499,6 +561,12 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
     statusName: f.status?.name ?? "",
     statusCategory: String(f.status?.statusCategory?.key ?? ""),
     issueType: f.issuetype?.name ?? "",
+    issueTypeId: String(f.issuetype?.id ?? ""),
+    ...(Number.isInteger(f.issuetype?.hierarchyLevel)
+      ? { issueTypeHierarchyLevel: Number(f.issuetype.hierarchyLevel) }
+      : {}),
+    projectKey: String(f.project?.key ?? data.key?.split("-")[0] ?? ""),
+    subtask: Boolean(f.issuetype?.subtask),
     labels: Array.isArray(f.labels) ? f.labels : [],
     components: Array.isArray(f.components) ? f.components.map((c: any) => c.name) : [],
     fixVersions: Array.isArray(f.fixVersions) ? f.fixVersions.map((v: any) => v.name) : [],
@@ -604,10 +672,9 @@ export async function getTransitions(cfg: JiraConfig, issueKey: string): Promise
 }
 
 /**
- * Normalize Jira's loose field-metadata shape — the same structure appears
- * in both `/transitions?expand=transitions.fields` and `/editmeta` — into
- * a closed union of field kinds the UI can dispatch against. Callers
- * decide whether to filter by `required`.
+ * Normalize Jira's loose transition, edit, and create field metadata into a
+ * closed union of field kinds the UI can dispatch against. Callers decide
+ * whether to filter by `required`.
  */
 function parseEditableFields(fields: Record<string, any>): EditableField[] {
   const out: EditableField[] = [];
@@ -621,6 +688,8 @@ function parseEditableFields(fields: Record<string, any>): EditableField[] {
     };
     const schemaType = String(raw.schema?.type ?? "");
     const itemsType = String(raw.schema?.items ?? "");
+    const customType = String(raw.schema?.custom ?? "");
+    const systemType = String(raw.schema?.system ?? "");
     const allowedValues: EditableOption[] = Array.isArray(raw.allowedValues)
       ? raw.allowedValues.map((v: any) => ({
           id: String(v.id ?? v.value ?? v.name),
@@ -658,14 +727,21 @@ function parseEditableFields(fields: Record<string, any>): EditableField[] {
       schemaType === "component"
     ) {
       out.push({ ...base, kind: "option", allowedValues });
-    } else if (schemaType === "string") {
+    } else if (
+      schemaType === "string" &&
+      !customType.endsWith(":textarea") &&
+      systemType !== "description" &&
+      systemType !== "environment"
+    ) {
       out.push({ ...base, kind: "text" });
     } else if (schemaType === "number") {
       out.push({ ...base, kind: "number" });
-    } else if (schemaType === "date" || schemaType === "datetime") {
+    } else if (schemaType === "date") {
       out.push({ ...base, kind: "date" });
     } else {
-      out.push({ ...base, kind: "unsupported", schemaType });
+      const unsupportedType =
+        systemType === "description" || systemType === "environment" ? "richtext" : schemaType;
+      out.push({ ...base, kind: "unsupported", schemaType: unsupportedType });
     }
   }
   return out;
@@ -713,15 +789,61 @@ export async function updateDescription(
 }
 
 export async function getIssueTypes(cfg: JiraConfig, projectKey: string): Promise<IssueType[]> {
-  const data = await jget(
-    cfg,
-    `/rest/api/3/issue/createmeta/${encodeURIComponent(projectKey)}/issuetypes`,
-  );
-  return (data.issueTypes ?? data.values ?? []).map((t: any) => ({
+  const base = `/rest/api/3/issue/createmeta/${encodeURIComponent(projectKey)}/issuetypes`;
+  const all: any[] = [];
+  let startAt = 0;
+  while (true) {
+    const data = await jget(cfg, `${base}?startAt=${startAt}&maxResults=100`);
+    const values: any[] = Array.isArray(data.values)
+      ? data.values
+      : Array.isArray(data.issueTypes)
+        ? data.issueTypes
+        : [];
+    all.push(...values);
+    const next = nextPageStart(
+      data,
+      startAt,
+      values.length,
+      "issue type pagination did not advance",
+    );
+    if (next === null) break;
+    startAt = next;
+  }
+  return all.map((t: any) => ({
     id: String(t.id),
     name: t.name,
     subtask: !!t.subtask,
+    ...(Number.isInteger(t.hierarchyLevel) ? { hierarchyLevel: Number(t.hierarchyLevel) } : {}),
   }));
+}
+
+export async function getCreateFields(
+  cfg: JiraConfig,
+  projectKey: string,
+  issueTypeId: string,
+): Promise<EditableField[]> {
+  const base = `/rest/api/3/issue/createmeta/${encodeURIComponent(projectKey)}/issuetypes/${encodeURIComponent(issueTypeId)}`;
+  const all: any[] = [];
+  let startAt = 0;
+  while (true) {
+    const data = await jget(cfg, `${base}?startAt=${startAt}&maxResults=100`);
+    const fields: any[] = Array.isArray(data.fields) ? data.fields : [];
+    all.push(...fields);
+    const next = nextPageStart(
+      data,
+      startAt,
+      fields.length,
+      "create field pagination did not advance",
+    );
+    if (next === null) break;
+    startAt = next;
+  }
+  const byId: Record<string, any> = {};
+  for (const field of all) {
+    const id = field?.fieldId;
+    if (id) byId[String(id)] = field;
+  }
+  return parseEditableFields(byId);
 }
 
 export type IssueLinkType = {
@@ -744,8 +866,12 @@ export async function getIssueLinkTypes(cfg: JiraConfig): Promise<IssueLinkType[
 
 export type IssueSearchResult = {
   key: string;
+  projectKey: string;
   summary: string;
   issueType: string;
+  issueTypeId: string;
+  subtask: boolean;
+  hierarchyLevel?: number;
 };
 
 /**
@@ -805,30 +931,19 @@ export async function createIssueLink(
 export type JiraUser = { accountId: string; displayName: string };
 
 export async function getAssignableUsers(cfg: JiraConfig, projectKey: string): Promise<JiraUser[]> {
+  if (!projectKey.trim()) return [];
   const proj = encodeURIComponent(projectKey);
-  const pageSize = 100;
-  const all: JiraUser[] = [];
-  let startAt = 0;
-  // Paginate — a single 100-cap page silently drops assignable users on large
-  // projects, hiding valid picks from the assignee editor and @-mention list.
-  while (true) {
-    const data = await jget(
-      cfg,
-      `/rest/api/3/user/assignable/search?project=${proj}&startAt=${startAt}&maxResults=${pageSize}`,
-    );
-    const page: any[] = Array.isArray(data) ? data : [];
-    for (const u of page) {
-      all.push({
-        accountId: String(u.accountId),
-        displayName: u.displayName ?? u.emailAddress ?? u.accountId,
-      });
-    }
-    if (page.length < pageSize) break;
-    startAt += pageSize;
-    // Matches the other paginated fetches' safety cap.
-    if (startAt > 5000) break;
-  }
-  return all;
+  // Jira filters assignability after selecting a range, so a short page does
+  // not mean end-of-data. Request the endpoint's documented full 1,000 range.
+  const data = await jget(
+    cfg,
+    `/rest/api/3/user/assignable/search?project=${proj}&startAt=0&maxResults=1000`,
+  );
+  const users: any[] = Array.isArray(data) ? data : [];
+  return users.map((u) => ({
+    accountId: String(u.accountId),
+    displayName: u.displayName ?? u.emailAddress ?? u.accountId,
+  }));
 }
 
 export async function updateIssueField(
@@ -894,17 +1009,48 @@ export async function searchByJql(
   jql: string,
   limit = 50,
 ): Promise<IssueSearchResult[]> {
-  const res = await jf(cfg, `/rest/api/3/search/jql`, {
-    method: "POST",
-    body: JSON.stringify({ jql, fields: ["summary", "issuetype"], maxResults: limit }),
-  });
-  if (!res.ok) throw new Error(`jql search ${res.status}: ${await res.text()}`);
-  const data = (await res.json()) as any;
-  return (data.issues ?? []).map((i: any) => ({
-    key: i.key,
-    summary: i.fields?.summary ?? "",
-    issueType: i.fields?.issuetype?.name ?? "",
-  }));
+  const wanted = Math.max(0, Math.floor(limit));
+  if (wanted === 0) return [];
+  const all: IssueSearchResult[] = [];
+  const seenKeys = new Set<string>();
+  const seenTokens = new Set<string>();
+  let nextPageToken: string | undefined;
+  while (all.length < wanted) {
+    const body: Record<string, unknown> = {
+      jql,
+      fields: ["summary", "issuetype", "project"],
+      maxResults: Math.min(100, wanted - all.length),
+    };
+    if (nextPageToken) body["nextPageToken"] = nextPageToken;
+    const res = await jf(cfg, `/rest/api/3/search/jql`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`jql search ${res.status}: ${await res.text()}`);
+    const data = (await res.json()) as any;
+    const issues: any[] = Array.isArray(data.issues) ? data.issues : [];
+    for (const i of issues) {
+      if (seenKeys.has(i.key)) continue;
+      seenKeys.add(i.key);
+      all.push({
+        key: i.key,
+        projectKey: String(i.fields?.project?.key ?? i.key?.split("-")[0] ?? ""),
+        summary: i.fields?.summary ?? "",
+        issueType: i.fields?.issuetype?.name ?? "",
+        issueTypeId: String(i.fields?.issuetype?.id ?? ""),
+        subtask: Boolean(i.fields?.issuetype?.subtask),
+        ...(Number.isInteger(i.fields?.issuetype?.hierarchyLevel)
+          ? { hierarchyLevel: Number(i.fields.issuetype.hierarchyLevel) }
+          : {}),
+      });
+      if (all.length === wanted) break;
+    }
+    if (data.isLast || !data.nextPageToken) break;
+    nextPageToken = String(data.nextPageToken);
+    if (seenTokens.has(nextPageToken)) throw new Error("JQL pagination token repeated");
+    seenTokens.add(nextPageToken);
+  }
+  return all;
 }
 
 export async function rankIssue(
@@ -935,23 +1081,27 @@ export async function assignIssueToMe(cfg: JiraConfig, issueKey: string): Promis
 export async function createIssue(
   cfg: JiraConfig,
   projectKey: string,
-  typeName: string,
+  issueTypeId: string,
   summary: string,
   description: string,
   parentKey?: string,
+  suppliedFields: Record<string, EditableFieldValue> = {},
 ): Promise<{ key: string }> {
-  const fields: any = {
+  const fields: Record<string, unknown> = {
+    ...suppliedFields,
     project: { key: projectKey },
-    issuetype: { name: typeName },
+    issuetype: { id: issueTypeId },
     summary,
   };
-  if (description) fields.description = textToAdf(description);
+  delete fields["description"];
+  delete fields["parent"];
+  if (description) fields["description"] = textToAdf(description);
   /**
    * `parent` is canonical for epic-child and sub-task links in Jira Cloud.
    * The legacy `customfield_10014` ("Epic Link") is deliberately not set —
    * team-managed projects reject it with "cannot be set on this issue type".
    */
-  if (parentKey) fields.parent = { key: parentKey };
+  if (parentKey) fields["parent"] = { key: parentKey };
   const res = await jf(cfg, `/rest/api/3/issue`, {
     method: "POST",
     body: JSON.stringify({ fields }),

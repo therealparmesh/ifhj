@@ -1,3 +1,5 @@
+import { graphemes } from "./text";
+
 /**
  * Theme contract — a semantic palette, not a literal one. Slots describe
  * *roles* (error, accent, divider) rather than aesthetics (pink, violet),
@@ -143,15 +145,42 @@ export function typeGlyph(type: string): string {
 
 export function truncate(s: string, n: number): string {
   if (n <= 0) return "";
-  return s.length <= n ? s : s.slice(0, Math.max(0, n - 1)) + "…";
+  if (Bun.stringWidth(s) <= n) return s;
+  const budget = n - 1;
+  let out = "";
+  let width = 0;
+  for (const { segment } of graphemes(s)) {
+    const segmentWidth = Bun.stringWidth(segment);
+    if (width + segmentWidth > budget) break;
+    out += segment;
+    width += segmentWidth;
+  }
+  return out + "…";
 }
 
 /**
  * Format a story-point sum: keep 0.5 intact but drop the trailing `.0` on
  * integers so "5p" beats "5.0p".
  */
-export function formatPoints(n: number): string {
+function formatPoints(n: number): string {
   return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
+
+export type EstimateDisplay = "points" | "time";
+
+export function formatEstimate(value: number, display: EstimateDisplay): string {
+  if (display === "points") return `${formatPoints(value)}p`;
+  const sign = value < 0 ? "-" : "";
+  let remaining = Math.abs(value);
+  const hours = Math.floor(remaining / 3600);
+  remaining -= hours * 3600;
+  const minutes = Math.floor(remaining / 60);
+  const seconds = remaining - minutes * 60;
+  const parts: string[] = [];
+  if (hours > 0) parts.push(`${hours}h`);
+  if (minutes > 0) parts.push(`${minutes}m`);
+  if (seconds > 0 || parts.length === 0) parts.push(`${formatPoints(seconds)}s`);
+  return sign + parts.join(" ");
 }
 
 export function initials(name: string | undefined | null): string {
@@ -161,8 +190,14 @@ export function initials(name: string | undefined | null): string {
     .split(/\s+/)
     .filter((p) => p.length > 0);
   if (parts.length === 0) return "—";
-  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
-  return (parts[0]![0]! + parts.at(-1)![0]!).toUpperCase();
+  const first = (part: string) => graphemes(part)[Symbol.iterator]().next().value?.segment ?? "";
+  if (parts.length === 1) {
+    return Array.from(graphemes(parts[0]!), ({ segment }) => segment)
+      .slice(0, 2)
+      .join("")
+      .toUpperCase();
+  }
+  return (first(parts[0]!) + first(parts.at(-1)!)).toUpperCase();
 }
 
 export function assigneeColor(name: string | undefined | null): string {
@@ -229,7 +264,7 @@ export async function openInBrowser(url: string): Promise<void> {
     platform === "darwin"
       ? ["open", url]
       : platform === "win32"
-        ? ["cmd", "/c", "start", "", url]
+        ? ["rundll32", "url.dll,FileProtocolHandler", url]
         : ["xdg-open", url];
   const proc = Bun.spawn(cmd, { stdio: ["ignore", "ignore", "ignore"] });
   await proc.exited;

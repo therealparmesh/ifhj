@@ -1,5 +1,6 @@
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import type { JiraUser } from "./jira";
 import { writeMentionAssets } from "./nvimMention";
@@ -50,27 +51,32 @@ export async function editInNeovim(
   if (!editor) {
     throw new Error("no editor found on $PATH — install Neovim or Vim (e.g. `mise use -g neovim`)");
   }
-  const path = join(tmpdir(), `ifhj-${Date.now()}-${filename}`);
-  await Bun.write(path, initial);
-
-  // Only stand up mention assets when there's actually a non-empty user
-  // list. Empty list → spawn plain nvim (same as before the feature).
-  const assets =
-    opts.mentionUsers && opts.mentionUsers.length > 0
-      ? await writeMentionAssets(opts.mentionUsers)
-      : null;
+  const dir = await mkdtemp(join(tmpdir(), "ifhj-edit-"));
+  const path = join(dir, basename(filename) || "edit.md");
+  let assets: Awaited<ReturnType<typeof writeMentionAssets>> | null = null;
 
   const stdin = process.stdin;
   const stdout = process.stdout;
 
   const savedListeners = stdin.listeners("data") as ((chunk: Buffer | string) => void)[];
   const wasRaw = stdin.isRaw;
+  let inputDetached = false;
+  let text = initial;
+  let failure: unknown;
 
   try {
+    await writeFile(path, initial, { mode: 0o600 });
+    // Empty user lists do not need completion assets.
+    assets =
+      opts.mentionUsers && opts.mentionUsers.length > 0
+        ? await writeMentionAssets(opts.mentionUsers)
+        : null;
+
     for (const l of savedListeners) stdin.off("data", l);
+    inputDetached = true;
     if (wasRaw) stdin.setRawMode(false);
     stdin.pause();
-    stdout.write("\x1b[?1049h\x1b[?25h");
+    stdout.write("\x1b[?25h\x1b[2J\x1b[H");
 
     // `--cmd` runs before user init (defines our functions); `-c` runs
     // after (so our buffer-local setup wins over any markdown autocmd the
@@ -78,8 +84,8 @@ export async function editInNeovim(
     // doubling — display names etc. are in the JSON file, not the args.
     const args: string[] = [];
     if (assets) {
-      args.push("--cmd", `source ${assets.scriptPath}`);
-      args.push("-c", `call IfhjMentionSetup('${assets.usersPath.replaceAll("'", "''")}')`);
+      args.push("--cmd", `execute 'source ' . fnameescape(${vimString(assets.scriptPath)})`);
+      args.push("-c", `call IfhjMentionSetup(${vimString(assets.usersPath)})`);
     }
     args.push(path);
 
@@ -87,20 +93,42 @@ export async function editInNeovim(
       stdio: ["inherit", "inherit", "inherit"],
     });
     await proc.exited;
+    if (proc.exitCode !== 0) throw new Error(`${editor.label} exited with status ${proc.exitCode}`);
 
-    let text = initial;
     try {
-      text = await Bun.file(path).text();
+      text = await readFile(path, "utf8");
     } catch {}
-    try {
-      await Bun.file(path).unlink();
-    } catch {}
-    return text;
+  } catch (error) {
+    failure = error;
   } finally {
-    stdout.write("\x1b[?1049l");
-    if (wasRaw) stdin.setRawMode(true);
-    stdin.resume();
-    for (const l of savedListeners) stdin.on("data", l);
-    if (assets) await assets.cleanup();
+    let restoreError: unknown;
+    const restore = (fn: () => void) => {
+      try {
+        fn();
+      } catch (error) {
+        restoreError ??= error;
+      }
+    };
+    try {
+      if (inputDetached) {
+        restore(() => stdout.write("\x1b[2J\x1b[H\x1b[?25l"));
+        if (wasRaw) restore(() => stdin.setRawMode(true));
+        restore(() => stdin.resume());
+        for (const l of savedListeners) restore(() => stdin.on("data", l));
+      }
+    } finally {
+      try {
+        if (assets) await assets.cleanup();
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => {});
+      }
+    }
+    failure ??= restoreError;
   }
+  if (failure) throw failure;
+  return text;
+}
+
+function vimString(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
 }

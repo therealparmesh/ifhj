@@ -66,7 +66,7 @@ server: https://your-company.atlassian.net
 login: you@your-company.com
 ```
 
-Env vars win when both are set.
+Env vars win when both are set. `JIRA_EMAIL` is an alias for `JIRA_LOGIN`. If the first YAML path is absent, ifhj also checks `~/.config/jira/.config.yml`.
 
 ### Settings
 
@@ -93,6 +93,8 @@ ifhj
 ```
 
 Pick a board. Everything's keyboard from there.
+
+Press `?` for help. Scroll with ↑/↓ or Page Up/Page Down; Home/End jumps to either end.
 
 ## Keybindings
 
@@ -137,7 +139,7 @@ Pick a board. Everything's keyboard from there.
 | `g` / `G`       | top / bottom                    |
 | `PgUp` / `PgDn` | page scroll                     |
 | `Enter`         | edit field or open comment      |
-| `x`             | clear field                     |
+| `x`             | clear optional field            |
 | `[ ]`           | prev / next comment             |
 | `c`             | add comment (editor)            |
 | `C`             | create subtask                  |
@@ -155,13 +157,25 @@ Pick a board. Everything's keyboard from there.
 
 Moves are optimistic. The card jumps to its destination immediately, dimmed with a `◴` while the transition POSTs in the background, then settles when Jira confirms — or snaps back with an error if it's rejected. Different cards move at once; a card mid-move is locked until it lands.
 
+If the workflow requires fields, fill them in before the move. Unsupported required fields must be completed in Jira's web UI.
+
+### Creating issues
+
+`c` opens the create form. Choose an issue type, enter a title and any required description, then press `s`. Jira's extra required fields open in a separate field screen. Server defaults are kept. Unsupported required fields need Jira's web UI.
+
+`a` uses the first standard issue type and asks for a title. If that type needs more fields, it opens the full form instead. After a quick add, ifhj tries to move the new issue to the selected column. A failed move or relationship reports the created issue key; the issue is still created.
+
+From a loaded issue, `C` creates a subtask in that issue's project. Boards without a project location support browsing and issue actions, but board-level creation needs a project. Parent relationships are checked against available Jira hierarchy metadata.
+
 ### Swimlanes
 
 When a board defines swimlanes, `s` groups it into horizontal lanes. Custom (JQL) lanes come from the board's own config, evaluated server-side; assignee, epic, issue-type, and parent lanes are grouped locally. Cards render one per line so several lanes fit on screen at once.
 
 ### Quick open
 
-`R` opens a finder. Empty query lists recently-touched cards — anything you view or successfully act on (move, rerank, assign, edit, create). Recents persist per board across sessions at `~/.cache/ifhj/`. Type to search all issues in the project.
+`R` opens a finder. Empty query lists recently-touched cards — anything you view or successfully act on (move, rerank, assign, edit, create). Recents persist per board and credential set across sessions at `~/.cache/ifhj/`. Type to search all visible issues, across projects.
+
+`J` opens the JQL view. Type a query and press Enter to search. Use ↑/↓ to select a result, then Enter to open it. Editing the query clears the old results. Esc closes the view.
 
 ### Card order
 
@@ -169,15 +183,19 @@ Within a column, cards keep Jira's rank order — except finished-work columns (
 
 ### Editable fields
 
-Assignee, priority, parent, story points, labels, components, fix versions, due date. Tab to the fields pane, Enter to edit, `x` to clear. Array fields (labels, components, fix versions) give you add/remove/clear options.
+Jira's field metadata controls which fields can be edited. Supported fields include assignee, reporter, priority, story points, labels, components, fix versions, and due date. Tab to the fields pane, Enter to edit, `x` to clear an optional field. List fields let you add or remove selected values. Required fields cannot be cleared.
+
+Parent fields with unsupported schemas stay read-only in detail view. Set the parent during issue creation instead.
 
 ### Custom fields
 
-Project-specific custom fields (team-managed or classic) show up read-only in the side panel — whatever your project exposes via `editmeta`, rendered as display text. Editing them well would mean covering Jira's whole type surface (user pickers, cascades, rich-text ADF, etc.) and the partial story is worse than honest read-only. Flip to the web UI for changes.
+Project-specific custom fields from Jira's `editmeta` appear in the side panel. Supported option, user, text, number, date, and list fields are editable. Other types, including datetime and rich-text custom fields, remain read-only.
 
 ### Markdown
 
 Descriptions and comments round-trip as Markdown. Write Markdown in the editor, it gets converted to Jira's ADF format on save. ADF from Jira gets converted back to Markdown for display.
+
+Detail view loads the newest 100 comments, displayed in chronological order.
 
 ### @mentions
 
@@ -189,18 +207,22 @@ The completion source is injected via `--cmd` / `-c` and is buffer-local, so it 
 
 ### Stats
 
-Each column header shows the card count, the sum of story points when non-zero, and — if the board config sets a WIP limit — `count/max`, red when over. The board header rolls up the visible-issue point total.
+Each column header shows the card count, the sum of estimates when non-zero, and — if the board config sets a WIP limit — `count/max`, red when over. Estimates use the board's configured numeric estimation field, with story-point discovery as a fallback. Original Time Estimate is shown in hours, minutes, and seconds; point estimates use `p`. The board header rolls up the visible-issue total.
 
 ### Caching
 
-Board state is cached at `~/.cache/ifhj/` and painted instantly on open, whatever its age. Fresh data always loads in the background and replaces it within a second or two, so you never wait on a blank spinner for a board you've opened before.
+Board state is cached at `~/.cache/ifhj/` and painted instantly on open, whatever its age. Cache files are separate for each server and credential set. Their names contain short hashes, never raw credentials. Fresh data loads in the background and replaces the cache when Jira responds. Failed refreshes keep the last loaded board visible.
 
 ## Development
 
 ```sh
 bun install
 bun run dev            # hot reload
-bun run lint           # oxfmt + oxlint + tsc
+bun test               # tests
+bun run check          # formatting + lint + types + tests
+bun run format:check   # formatting check
+bun run format         # apply formatting
+bun run lint           # oxlint + tsc
 bun run compile        # native binary
 ```
 
@@ -210,7 +232,7 @@ bun run compile        # native binary
 ./scripts/release.ts patch  # or: minor | major | 1.2.3
 ```
 
-Bumps version, commits, tags, pushes. GitHub Actions cross-compiles for darwin/linux x amd64/arm64.
+Requires a clean worktree and a new version. Installs locked dependencies, checks formatting, lint, types, tests, and compilation, then bumps the version, commits, tags, and pushes the branch and tag together. GitHub Actions checks the tag/version match and cross-compiles for darwin/linux x amd64/arm64.
 
 ## Author
 

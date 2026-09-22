@@ -11,6 +11,7 @@ import {
   type EditableField,
   type EditableFieldValue,
   type IssueDetail,
+  type IssueSearchResult,
   type JiraUser,
   addComment,
   fetchCurrentUser,
@@ -129,11 +130,11 @@ export function IssueDetailModal({
   issueKey: string;
   /** Warmed assignable-users provider (shared with the board so `@`-mention
    *  completion is fetched once per board, not per surface). */
-  ensureUsers: () => Promise<JiraUser[]>;
+  ensureUsers: (projectKey: string) => Promise<JiraUser[]>;
   onClose: () => void;
-  onMove: () => void;
-  onTransition: () => void;
-  onCreateSubtask: (parentKey: string) => void;
+  onMove: (issue: IssueDetail) => void;
+  onTransition: (projectKey: string) => void;
+  onCreateSubtask: (parent: IssueSearchResult) => void;
   onRefresh: () => void;
 }) {
   const { cols: termCols, rows: termRows } = useDimensions();
@@ -157,22 +158,69 @@ export function IssueDetailModal({
 
   const [myAccountId, setMyAccountId] = useState<string | null>(null);
 
+  const lifetimeRef = useRef({
+    server: cfg.server,
+    authHeader: cfg.authHeader,
+    projectKey,
+    issueKey,
+  });
+  const priorLifetime = lifetimeRef.current;
+  if (
+    priorLifetime.server !== cfg.server ||
+    priorLifetime.authHeader !== cfg.authHeader ||
+    priorLifetime.projectKey !== projectKey ||
+    priorLifetime.issueKey !== issueKey
+  ) {
+    lifetimeRef.current = { server: cfg.server, authHeader: cfg.authHeader, projectKey, issueKey };
+  }
+  const lifetime = lifetimeRef.current;
+  const activeRef = useRef(false);
+  const dispose = useCallback(() => {
+    activeRef.current = false;
+    fetchSeq.current++;
+  }, []);
+
   // First load is fatal (full-screen error); once the issue is loaded, a failed
   // refresh or post-save re-fetch just flashes a toast and keeps the view up —
   // same first-load-fatal / reload-toast split the board uses.
   const hasLoadedOnce = useRef(false);
+  const fetchSeq = useRef(0);
   const fetchDetail = useCallback(async () => {
+    if (!activeRef.current || lifetime !== lifetimeRef.current) return;
+    const seq = ++fetchSeq.current;
     try {
       const d = await track(getIssueDetail(cfg, issueKey));
+      if (!activeRef.current || lifetime !== lifetimeRef.current || seq !== fetchSeq.current)
+        return;
       setDetail(d);
       setLoadError(null);
       hasLoadedOnce.current = true;
     } catch (e) {
+      if (!activeRef.current || lifetime !== lifetimeRef.current || seq !== fetchSeq.current)
+        return;
       const msg = errorMessage(e);
       if (hasLoadedOnce.current) showFlash(msg, "err");
       else setLoadError(msg);
     }
-  }, [cfg, issueKey, track, showFlash]);
+  }, [cfg, issueKey, lifetime, track, showFlash]);
+
+  useEffect(() => {
+    activeRef.current = true;
+    return dispose;
+  }, [dispose]);
+
+  useEffect(() => {
+    hasLoadedOnce.current = false;
+    setDetail(null);
+    setLoadError(null);
+    setPane("body");
+    setBodyScroll(0);
+    setFieldIdx(0);
+    fieldScrollRef.current = 0;
+    setOverlay({ kind: "none" });
+    setSaving(false);
+    setMyAccountId(null);
+  }, [lifetime]);
 
   useEffect(() => {
     void fetchDetail();
@@ -180,13 +228,23 @@ export function IssueDetailModal({
 
   useEffect(() => {
     if (myAccountId) return;
+    let cancelled = false;
     fetchCurrentUser(cfg)
-      .then((u) => setMyAccountId(u.accountId))
+      .then((u) => {
+        if (!cancelled && activeRef.current && lifetime === lifetimeRef.current) {
+          setMyAccountId(u.accountId);
+        }
+        return undefined;
+      })
       .catch(() => {});
-  }, [cfg, myAccountId]);
+    return () => {
+      cancelled = true;
+    };
+  }, [cfg, lifetime, myAccountId]);
 
   const doSave = useCallback(
     async (fn: () => Promise<void>, successMsg: string) => {
+      if (!activeRef.current || lifetime !== lifetimeRef.current) return;
       // `saving` gates input during the write (you can't fire another edit
       // mid-save); the animated progress line is the only *visual* — the whole
       // save (mutation + the fetchDetail refresh) runs through `track` so the
@@ -194,16 +252,19 @@ export function IssueDetailModal({
       setSaving(true);
       try {
         await track(fn());
+        if (!activeRef.current || lifetime !== lifetimeRef.current) return;
         showFlash(successMsg, "ok");
         await fetchDetail();
+        if (!activeRef.current || lifetime !== lifetimeRef.current) return;
         onRefresh();
       } catch (e) {
-        showFlash(errorMessage(e), "err");
+        if (activeRef.current && lifetime === lifetimeRef.current)
+          showFlash(errorMessage(e), "err");
       } finally {
-        setSaving(false);
+        if (activeRef.current && lifetime === lifetimeRef.current) setSaving(false);
       }
     },
-    [fetchDetail, showFlash, onRefresh, track],
+    [fetchDetail, lifetime, showFlash, onRefresh, track],
   );
 
   // Layout. Fixed siblings inside the modal box: header row (1) + summary
@@ -226,6 +287,7 @@ export function IssueDetailModal({
     () => (detail ? renderDetailLines(detail, mainWidth) : []),
     [detail, mainWidth],
   );
+  const issueProjectKey = detail?.projectKey || projectKey || issueKey.split("-")[0] || "";
 
   const commentLineIndices = useMemo(() => {
     const indices: number[] = [];
@@ -264,10 +326,7 @@ export function IssueDetailModal({
     for (const cf of detail?.customFields ?? []) out.push({ kind: "custom", field: cf });
     return out;
   }, [detail]);
-  // Clamp before indexing — state can lag fieldRows.length when
-  // editmeta shrinks between a fetch and the invariant effect firing.
-  // Without this, currentRow is undefined and keypresses no-op.
-  const currentRow = fieldRows[clamp(fieldIdx, 0, Math.max(0, fieldRows.length - 1))];
+  const currentRow = fieldRows[clamp(fieldIdx, 0, fieldRows.length - 1)]!;
 
   /** Resolve the EditableField metadata for the current row, if editmeta
    *  says it's writable on this issue. Returns undefined for read-only. */
@@ -321,7 +380,6 @@ export function IssueDetailModal({
   const moveFieldCursor = useCallback(
     (delta: number) => {
       const length = fieldRows.length;
-      if (length === 0) return;
       setFieldIdx((i) => clamp(i + delta, 0, length - 1));
     },
     [fieldRows.length],
@@ -330,7 +388,6 @@ export function IssueDetailModal({
   const jumpFieldCursor = useCallback(
     (to: number) => {
       const length = fieldRows.length;
-      if (length === 0) return;
       setFieldIdx(clamp(to, 0, length - 1));
     },
     [fieldRows.length],
@@ -345,8 +402,10 @@ export function IssueDetailModal({
     if (!detail) return;
     setOverlay({ kind: "nvim" });
     try {
-      const mentionUsers = await ensureUsers();
+      const mentionUsers = await ensureUsers(issueProjectKey);
+      if (!activeRef.current || lifetime !== lifetimeRef.current) return;
       const raw = await editInNeovim(detail.description, `${detail.key}-desc.md`, { mentionUsers });
+      if (!activeRef.current || lifetime !== lifetimeRef.current) return;
       if (raw.trim() === detail.description.trim()) {
         showFlash("no change");
         setOverlay({ kind: "none" });
@@ -355,17 +414,20 @@ export function IssueDetailModal({
       setOverlay({ kind: "none" });
       await doSave(() => updateDescription(cfg, detail.key, raw), "description updated");
     } catch (e) {
+      if (!activeRef.current || lifetime !== lifetimeRef.current) return;
       showFlash(errorMessage(e), "err");
       setOverlay({ kind: "none" });
     }
-  }, [detail, cfg, showFlash, doSave, ensureUsers]);
+  }, [detail, cfg, issueProjectKey, lifetime, showFlash, doSave, ensureUsers]);
 
   const doAddComment = useCallback(async () => {
     if (!detail) return;
     setOverlay({ kind: "nvim" });
     try {
-      const mentionUsers = await ensureUsers();
+      const mentionUsers = await ensureUsers(issueProjectKey);
+      if (!activeRef.current || lifetime !== lifetimeRef.current) return;
       const raw = await editInNeovim("", `${detail.key}-comment.md`, { mentionUsers });
+      if (!activeRef.current || lifetime !== lifetimeRef.current) return;
       if (!raw.trim()) {
         showFlash("empty comment, not saved");
         setOverlay({ kind: "none" });
@@ -374,20 +436,23 @@ export function IssueDetailModal({
       setOverlay({ kind: "none" });
       await doSave(() => addComment(cfg, detail.key, raw), "comment added");
     } catch (e) {
+      if (!activeRef.current || lifetime !== lifetimeRef.current) return;
       showFlash(errorMessage(e), "err");
       setOverlay({ kind: "none" });
     }
-  }, [detail, cfg, showFlash, doSave, ensureUsers]);
+  }, [detail, cfg, issueProjectKey, lifetime, showFlash, doSave, ensureUsers]);
 
   const doEditComment = useCallback(
     async (comment: Comment) => {
       if (!detail) return;
       setOverlay({ kind: "nvim" });
       try {
-        const mentionUsers = await ensureUsers();
+        const mentionUsers = await ensureUsers(issueProjectKey);
+        if (!activeRef.current || lifetime !== lifetimeRef.current) return;
         const raw = await editInNeovim(comment.body, `${detail.key}-comment-${comment.id}.md`, {
           mentionUsers,
         });
+        if (!activeRef.current || lifetime !== lifetimeRef.current) return;
         if (raw.trim() === comment.body.trim()) {
           showFlash("no change");
           setOverlay({ kind: "none" });
@@ -396,11 +461,12 @@ export function IssueDetailModal({
         setOverlay({ kind: "none" });
         await doSave(() => updateComment(cfg, detail.key, comment.id, raw), "comment updated");
       } catch (e) {
+        if (!activeRef.current || lifetime !== lifetimeRef.current) return;
         showFlash(errorMessage(e), "err");
         setOverlay({ kind: "none" });
       }
     },
-    [detail, cfg, showFlash, doSave, ensureUsers],
+    [detail, cfg, issueProjectKey, lifetime, showFlash, doSave, ensureUsers],
   );
 
   /** Resolve the current value from rawFields for seeding FieldEditor.
@@ -454,6 +520,10 @@ export function IssueDetailModal({
       currentRow.kind === "custom" ? currentRow.field.id : JIRA_FIELD_KEY[currentRow.id];
     const label =
       currentRow.kind === "custom" ? currentRow.field.name : FIELD_LABELS[currentRow.id];
+    if (meta.required) {
+      showFlash(`${label} is required`);
+      return;
+    }
     // Array-typed fields clear with `[]`; Jira rejects `null` for them with
     // "Operation value must be an Array". Scalars clear with `null`. (This
     // mirrors FieldEditor's own clear path, which submits `[]` for lists.)
@@ -478,10 +548,42 @@ export function IssueDetailModal({
           .catch((e) => showFlash(errorMessage(e), "err"));
         return;
       }
-      if (input === "m") return onMove();
-      if (input === "t") return onTransition();
+      if (input === "m") {
+        if (!detail) {
+          showFlash("wait for issue details", "info");
+          return;
+        }
+        return onMove(detail);
+      }
+      if (input === "t") {
+        if (!detail) {
+          showFlash("wait for issue details", "info");
+          return;
+        }
+        return onTransition(issueProjectKey);
+      }
       if (input === "c") return void doAddComment();
-      if (input === "C") return onCreateSubtask(issueKey);
+      if (input === "C") {
+        if (!detail) {
+          showFlash("wait for issue details", "info");
+          return;
+        }
+        if (detail.subtask) {
+          showFlash("a subtask cannot be a parent", "err");
+          return;
+        }
+        return onCreateSubtask({
+          key: issueKey,
+          projectKey: issueProjectKey,
+          summary: detail.summary,
+          issueType: detail.issueType,
+          issueTypeId: detail.issueTypeId ?? String(detail.rawFields["issuetype"]?.id ?? ""),
+          subtask: Boolean(detail.subtask),
+          ...(detail.issueTypeHierarchyLevel !== undefined
+            ? { hierarchyLevel: detail.issueTypeHierarchyLevel }
+            : {}),
+        });
+      }
       if (input === "y") {
         copyToClipboard(issueKey)
           .then(() => showFlash(`copied ${issueKey}`, "ok"))
@@ -581,7 +683,7 @@ export function IssueDetailModal({
     return (
       <FieldEditor
         cfg={cfg}
-        projectKey={projectKey}
+        projectKey={issueProjectKey}
         field={overlay.meta}
         {...(overlay.current !== undefined ? { current: overlay.current } : {})}
         onCancel={() => setOverlay({ kind: "none" })}
@@ -666,7 +768,7 @@ export function IssueDetailModal({
    * hits an edge. No state, no effects, no race. Cursor and scroll
    * always agree because we compute scroll *from* cursor at render.
    */
-  const fieldCursor = clamp(fieldIdx, 0, Math.max(0, fieldRows.length - 1));
+  const fieldCursor = clamp(fieldIdx, 0, fieldRows.length - 1);
   const fieldScroll = stickyScroll(
     fieldRows.length,
     fieldWindow,
@@ -848,7 +950,7 @@ export function IssueDetailModal({
         </Box>
         <Text color={theme.muted}>
           {pane === "fields"
-            ? `${fieldRows.length === 0 ? 0 : fieldCursor + 1}/${fieldRows.length}`
+            ? `${fieldCursor + 1}/${fieldRows.length}`
             : `${clampedScroll + 1}-${Math.min(clampedScroll + bodyHeight, mainLines.length)}/${mainLines.length}`}
         </Text>
       </Box>

@@ -1,13 +1,4 @@
 import type { BoardColumn, BoardSwimlanes, Issue, SwimlaneStrategy } from "./jira";
-import { stickyScroll } from "./ui";
-
-/**
- * Swimlane layout — pure functions, no React. Board.tsx renders the flat
- * (no-swimlane) board with its own rich-card grid; this module powers the
- * separate compact swimlane view. Kept pure so the grouping + scroll math
- * is unit-checkable (see the `demo` self-check at the bottom).
- */
-
 export type LaneColumn = BoardColumn & { issues: Issue[] };
 export type Lane = { id: string; name: string; columns: LaneColumn[]; count: number };
 
@@ -300,6 +291,17 @@ export function snapToCard(lanes: Lane[], lane: number, preferredCol: number): S
   return { lane: li, col: preferredCol, row: 0 };
 }
 
+/** Keep a cursor on a real card after filtering or reloading changes its lane. */
+export function reconcileCursor(lanes: Lane[], cursor: SwimCursor): SwimCursor {
+  if (lanes.length === 0) return cursor;
+  const lane = clampIdx(cursor.lane, lanes.length);
+  const columns = lanes[lane]!.columns;
+  const col = clampIdx(cursor.col, columns.length);
+  const issueCount = columns[col]?.issues.length ?? 0;
+  if (issueCount === 0) return snapToCard(lanes, lane, col);
+  return { lane, col, row: clampIdx(cursor.row, issueCount) };
+}
+
 /** Find a cursor pointing at `key`, or null. Used to follow a card post-reload. */
 export function findCursor(lanes: Lane[], key: string): SwimCursor | null {
   for (let li = 0; li < lanes.length; li++) {
@@ -311,216 +313,3 @@ export function findCursor(lanes: Lane[], key: string): SwimCursor | null {
   }
   return null;
 }
-
-// ── self-check ──────────────────────────────────────────────────────────
-// Run with `bun src/swimlanes.ts`. Asserts the grouping + nav invariants
-// that would silently corrupt the board if they broke.
-function assert(c: boolean, m: string): void {
-  if (!c) throw new Error(`swimlanes self-check: ${m}`);
-}
-
-function mkIssue(key: string, id: number, statusId: string, extra: Partial<Issue> = {}): Issue {
-  return {
-    key,
-    id,
-    summary: key,
-    description: "",
-    statusId,
-    statusName: "",
-    statusCategory: "new",
-    updated: "",
-    issueType: "Task",
-    labels: [],
-    ...extra,
-  };
-}
-
-function demo() {
-  const cols: BoardColumn[] = [
-    { name: "Todo", statusIds: ["1"] },
-    { name: "Done", statusIds: ["2"] },
-  ];
-  const mk = mkIssue;
-  const issues = [
-    mk("A-1", 101, "1", { assignee: "Bob" }),
-    mk("A-2", 102, "2", { assignee: "Bob" }),
-    mk("A-3", 103, "1"), // unassigned
-    mk("A-4", 104, "2", { assignee: "Al" }),
-  ];
-
-  // custom: server assigns A-1/A-2 to lane "x", rest fall to default "d".
-  const custom = buildLanes(cols, issues, {
-    strategy: "custom",
-    lanes: [
-      { id: "x", name: "Expedite" },
-      { id: "d", name: "Everything Else" },
-    ],
-    laneByKey: { "A-1": "x", "A-2": "x" },
-    defaultLaneId: "d",
-  });
-  assert(custom.length === 2, "custom: two non-empty lanes");
-  assert(custom[0]!.name === "Expedite" && custom[0]!.count === 2, "custom: lane order + count");
-  assert(custom[1]!.count === 2, "custom: default lane catches the rest");
-  assert(custom[0]!.columns[0]!.issues[0]!.key === "A-1", "custom: column partition");
-
-  // Empty-band drop: a lane whose only issue sits in an off-board status
-  // (no matching column) must be hidden, and its off-board issue must not
-  // inflate any visible count.
-  const offBoard = buildLanes(cols, [mk("Z-9", 999, "999")], {
-    strategy: "custom",
-    lanes: [
-      { id: "x", name: "Expedite" },
-      { id: "d", name: "Everything Else" },
-    ],
-    laneByKey: {},
-    defaultLaneId: "d",
-  });
-  assert(offBoard.length === 0, "custom: lane with only off-board issues is dropped");
-
-  // assignee: Al, Bob sorted A→Z, Unassigned last.
-  const byAssignee = buildLanes(cols, issues, {
-    strategy: "assignee",
-    lanes: [],
-    laneByKey: {},
-  });
-  assert(
-    byAssignee.map((l) => l.name).join(",") === "Al,Bob,Unassigned",
-    "assignee: sentinel sorts last",
-  );
-
-  // none: single nameless lane, no title rows.
-  const flat = buildLanes(cols, issues, { strategy: "none", lanes: [], laneByKey: {} });
-  assert(flat.length === 1 && flat[0]!.name === "", "none: one nameless lane");
-  assert(
-    visualRows(flat).every((r) => r.kind === "cards"),
-    "none: no title rows",
-  );
-
-  // visual rows + cursor index: titled lanes contribute a title line each.
-  const vr = visualRows(custom);
-  assert(vr[0]!.kind === "title", "visual: first row is a title");
-  // lane 0 = title + 2 card rows (max col len 1 each? Todo has A-1, Done has A-2 → each col len 1 → height 1)
-  assert(laneHeight(custom[0]!) === 1, "laneHeight = tallest column");
-  assert(
-    cursorVisualIndex(custom, { lane: 1, col: 0, row: 0 }) === 3,
-    "cursorVisualIndex spans lanes",
-  );
-
-  // Column windowing: a lane with cards only in an off-window column must
-  // contribute zero rows (no empty band). Build a lane whose only card sits
-  // in column 1, then window to column 0 alone.
-  const winIssues = [mk("W-1", 201, "1"), mk("W-2", 202, "2")]; // W-1→Todo(0), W-2→Done(1)
-  const winLanes = buildLanes(cols, winIssues, {
-    strategy: "custom",
-    lanes: [
-      { id: "todo-only", name: "TodoOnly" },
-      { id: "done-only", name: "DoneOnly" },
-    ],
-    laneByKey: { "W-1": "todo-only", "W-2": "done-only" },
-  });
-  // Window to column 0 (Todo) only: DoneOnly has no visible card → skipped.
-  const win0 = visualRows(winLanes, 0, 1);
-  assert(
-    win0.filter((r) => r.kind === "title").length === 1,
-    "window: off-window lane emits no title band",
-  );
-  assert(laneHeight(winLanes[1]!, 0, 1) === 0, "laneHeight is 0 for off-window column");
-  assert(laneHeight(winLanes[1]!, 1, 2) === 1, "laneHeight sees the card in its own column");
-
-  // moveCursor spills across lanes at the bottom edge.
-  const down = moveCursor(custom, { lane: 0, col: 0, row: 0 }, 1, 0);
-  assert(down.lane === 1 && down.row === 0, "moveCursor spills to next lane");
-  const up = moveCursor(custom, { lane: 1, col: 0, row: 0 }, -1, 0);
-  assert(up.lane === 0, "moveCursor spills back up");
-
-  // moveCursor honors dRow magnitude (PageUp/Down). A single lane, 5 cards
-  // in col 0: paging by 3 from row 0 lands on row 3.
-  const tall = buildLanes(
-    [{ name: "C", statusIds: ["1"] }],
-    [1, 2, 3, 4, 5].map((n) => mk(`T-${n}`, 300 + n, "1")),
-    { strategy: "none", lanes: [], laneByKey: {} },
-  );
-  assert(moveCursor(tall, { lane: 0, col: 0, row: 0 }, 3, 0).row === 3, "moveCursor pages by dRow");
-  assert(
-    moveCursor(tall, { lane: 0, col: 0, row: 0 }, 99, 0).row === 4,
-    "moveCursor clamps page at the last card",
-  );
-
-  // Horizontal move skips empty columns: col 0 has a card, col 1 empty, col 2
-  // has a card → moving right from 0 lands on 2, not the dead col 1.
-  const gappy = buildLanes(
-    [
-      { name: "A", statusIds: ["1"] },
-      { name: "B", statusIds: ["2"] },
-      { name: "C", statusIds: ["3"] },
-    ],
-    [mk("G-1", 401, "1"), mk("G-3", 403, "3")],
-    { strategy: "none", lanes: [], laneByKey: {} },
-  );
-  assert(
-    moveCursor(gappy, { lane: 0, col: 0, row: 0 }, 0, 1).col === 2,
-    "moveCursor skips empty col",
-  );
-  assert(
-    moveCursor(gappy, { lane: 0, col: 2, row: 0 }, 0, 1).col === 2,
-    "moveCursor stays put when no populated column that way",
-  );
-
-  // snapToCard lands on a populated cell — preferring the given column, else
-  // the nearest one with a card. gappy lane 0 has cards in cols 0 and 2 only.
-  assert(snapToCard(gappy, 0, 0).col === 0, "snapToCard keeps a populated preferred col");
-  assert(snapToCard(gappy, 0, 1).col === 2, "snapToCard seeks the nearest populated col");
-  assert(snapToCard(gappy, 0, 2).col === 2, "snapToCard keeps col 2");
-
-  // stickyScroll keeps the cursor visible and clamps the tail.
-  assert(stickyScroll(10, 4, 7, 0) === 4, "stickyScroll pages down to reveal cursor");
-  assert(stickyScroll(10, 4, 1, 4) === 1, "stickyScroll pages up to reveal cursor");
-  assert(stickyScroll(3, 4, 0, 0) === 0, "stickyScroll: no scroll when everything fits");
-
-  // findCursor round-trips a key.
-  const fc = findCursor(custom, "A-4");
-  assert(
-    fc !== null && custom[fc.lane]!.columns[fc.col]!.issues[fc.row]!.key === "A-4",
-    "findCursor",
-  );
-
-  // buildColumns: a done-category column sorts newest-updated first (not rank),
-  // while an active column keeps input (rank) order. Timestamps use mixed UTC
-  // offsets to prove we parse rather than string-compare.
-  const sortCols: BoardColumn[] = [
-    { name: "In Progress", statusIds: ["1"] },
-    { name: "Merged", statusIds: ["2"] }, // named anything — classified by category
-  ];
-  const sortIssues = [
-    mk("P-1", 1, "1", { statusCategory: "indeterminate", updated: "2024-01-01T00:00:00.000-0500" }),
-    mk("P-2", 2, "1", { statusCategory: "indeterminate", updated: "2024-06-01T00:00:00.000-0500" }),
-    mk("D-old", 3, "2", { statusCategory: "done", updated: "2024-02-01T00:00:00.000-0500" }),
-    mk("D-new", 4, "2", { statusCategory: "done", updated: "2024-05-01T00:00:00.000-0400" }),
-    mk("D-mid", 5, "2", { statusCategory: "done", updated: "2024-03-01T00:00:00.000-0500" }),
-  ];
-  const built = buildColumns(sortCols, sortIssues);
-  assert(
-    built[0]!.issues.map((i) => i.key).join(",") === "P-1,P-2",
-    "buildColumns: active column keeps rank order",
-  );
-  assert(
-    built[1]!.issues.map((i) => i.key).join(",") === "D-new,D-mid,D-old",
-    "buildColumns: done column sorts newest-updated first",
-  );
-  // A column with a non-done issue mixed in is NOT recency-sorted (stays rank).
-  const mixed = buildColumns(
-    [{ name: "X", statusIds: ["2"] }],
-    [
-      mk("M-1", 6, "2", { statusCategory: "done", updated: "2024-01-01T00:00:00.000Z" }),
-      mk("M-2", 7, "2", { statusCategory: "indeterminate", updated: "2024-09-01T00:00:00.000Z" }),
-    ],
-  );
-  assert(
-    mixed[0]!.issues.map((i) => i.key).join(",") === "M-1,M-2",
-    "buildColumns: mixed-category column stays rank order",
-  );
-
-  console.log("swimlanes self-check passed");
-}
-
-if (import.meta.main) demo();

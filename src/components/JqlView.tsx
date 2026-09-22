@@ -1,5 +1,5 @@
-import { Box, Text, useInput } from "ink";
-import { useRef, useState } from "react";
+import { Box, Text } from "ink";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { JiraConfig } from "../config";
 import { useDimensions } from "../hooks";
@@ -23,16 +23,15 @@ export function JqlView({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [idx, setIdx] = useState(0);
-  // Sequence-guard for in-flight queries. If the user submits, cancels,
-  // and the old request resolves after, we ignore its result.
+  // Invalidated by every edit, newer submit, cancel, and unmount.
   const searchSeq = useRef(0);
+  const invalidateSearch = useCallback(() => {
+    searchSeq.current++;
+  }, []);
 
-  useInput((_input, key) => {
-    // Esc always cancels, even during a query — the user shouldn't be
-    // trapped by a hung network. The in-flight request's result is
-    // discarded via the seq guard.
-    if (key.escape) onCancel();
-  });
+  useEffect(() => invalidateSearch, [invalidateSearch]);
+
+  const cursor = clamp(idx, 0, Math.max(0, results.length - 1));
 
   return (
     <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.warning}>
@@ -45,16 +44,26 @@ export function JqlView({
           value={jql}
           placeholder="e.g. assignee = currentUser() AND sprint in openSprints()"
           onChange={(v) => {
+            invalidateSearch();
             setJql(v);
+            setLoading(false);
             setError(null);
+            setResults([]);
           }}
-          onSubmit={async () => {
-            if (!jql.trim()) return;
+          onSubmit={async (latestJql) => {
+            const query = latestJql.trim();
+            const selected = latestJql === jql ? results[cursor] : undefined;
+            if (selected && !loading) {
+              onPick(selected.key);
+              return;
+            }
+            if (!query) return;
             const seq = ++searchSeq.current;
             setLoading(true);
             setError(null);
+            setResults([]);
             try {
-              const r = await searchByJql(cfg, jql.trim());
+              const r = await searchByJql(cfg, query);
               if (seq !== searchSeq.current) return;
               setResults(r);
               setIdx(0);
@@ -66,7 +75,12 @@ export function JqlView({
               if (seq === searchSeq.current) setLoading(false);
             }
           }}
-          onCancel={onCancel}
+          onUpArrow={() => setIdx(clamp(cursor - 1, 0, Math.max(0, results.length - 1)))}
+          onDownArrow={() => setIdx(clamp(cursor + 1, 0, Math.max(0, results.length - 1)))}
+          onCancel={() => {
+            invalidateSearch();
+            onCancel();
+          }}
         />
       </Box>
       {error ? (
@@ -79,31 +93,21 @@ export function JqlView({
           <LoadingLine label="searching…" />
         </Box>
       ) : results.length > 0 ? (
-        <JqlResults results={results} idx={idx} setIdx={setIdx} onPick={onPick} />
+        <JqlResults results={results} idx={cursor} />
       ) : jql.trim() === "" ? (
         <Box marginTop={1}>
           <Text color={theme.muted}>type a JQL query and press ⏎</Text>
         </Box>
       ) : null}
       <Box marginTop={1}>
-        <Hint k="⏎" label="search" />
+        <Hint k="⏎" label={results.length > 0 ? "open" : "search"} />
         <Hint k="esc" label="close" />
       </Box>
     </Box>
   );
 }
 
-function JqlResults({
-  results,
-  idx,
-  setIdx,
-  onPick,
-}: {
-  results: IssueSearchResult[];
-  idx: number;
-  setIdx: (i: number) => void;
-  onPick: (key: string) => void;
-}) {
+function JqlResults({ results, idx }: { results: IssueSearchResult[]; idx: number }) {
   const { rows } = useDimensions();
   const maxVisible = Math.max(5, rows - 12);
   // Scroll is derived from the cursor every render via a ref anchor — no
@@ -112,14 +116,6 @@ function JqlResults({
 
   const cursor = clamp(idx, 0, Math.max(0, results.length - 1));
 
-  useInput((input, key) => {
-    if (key.upArrow || input === "k") setIdx(clamp(cursor - 1, 0, results.length - 1));
-    else if (key.downArrow || input === "j") setIdx(clamp(cursor + 1, 0, results.length - 1));
-    else if (key.return) {
-      const r = results[cursor];
-      if (r) onPick(r.key);
-    }
-  });
   const scroll = stickyScroll(results.length, maxVisible, cursor, scrollRef.current);
   scrollRef.current = scroll;
 

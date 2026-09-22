@@ -8,6 +8,17 @@ import { TextInput } from "./TextInput";
 
 type FilterItem = { id: string; label: string; hint?: string | undefined };
 
+function filterItems(items: FilterItem[], query: string): FilterItem[] {
+  const lower = query.toLowerCase().trim();
+  if (!lower) return items;
+  return items.filter(
+    (item) =>
+      item.label.toLowerCase().includes(lower) ||
+      (item.hint ?? "").toLowerCase().includes(lower) ||
+      item.id.toLowerCase().includes(lower),
+  );
+}
+
 // Keep the picker compact — beyond this the user should filter instead.
 const MAX_PICKER_ROWS = 15;
 
@@ -70,14 +81,7 @@ export function FilterPicker({
   // Async caller owns filtering — pass items through. Otherwise filter locally.
   const filtered = useMemo(() => {
     if (onQueryChange) return items;
-    const lower = q.toLowerCase().trim();
-    if (!lower) return items;
-    return items.filter(
-      (it) =>
-        it.label.toLowerCase().includes(lower) ||
-        (it.hint ?? "").toLowerCase().includes(lower) ||
-        it.id.toLowerCase().includes(lower),
-    );
+    return filterItems(items, q);
   }, [items, q, onQueryChange]);
 
   /**
@@ -126,10 +130,12 @@ export function FilterPicker({
           onChange={setQ}
           onUpArrow={() => setIdx(clamp(cursor - 1, 0, Math.max(0, filtered.length - 1)))}
           onDownArrow={() => setIdx(clamp(cursor + 1, 0, Math.max(0, filtered.length - 1)))}
-          onSubmit={() => {
-            // Visible items may be stale for the current query — don't submit.
-            if (loading) return;
-            const it = filtered[cursor];
+          onSubmit={(latestQuery) => {
+            // Remote items belong to the rendered query. Local items can be
+            // filtered synchronously when typing and Enter arrive together.
+            if (onQueryChange && (loading || latestQuery !== q)) return;
+            const submitted = onQueryChange ? filtered : filterItems(items, latestQuery);
+            const it = submitted[clamp(idx, 0, Math.max(0, submitted.length - 1))];
             if (it) onPick(it.id);
           }}
           onCancel={onCancel}

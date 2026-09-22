@@ -39,8 +39,19 @@ export function renderDetailLines(detail: IssueDetail, mainWidth: number): Detai
       push("", color, false, commentIdx);
       return;
     }
-    for (let i = 0; i < text.length; i += mainWidth)
-      push(text.slice(i, i + mainWidth), color, false, commentIdx);
+    let line = "";
+    let width = 0;
+    for (const { segment } of new Intl.Segmenter().segment(text)) {
+      const segmentWidth = Bun.stringWidth(segment);
+      if (line && width + segmentWidth > mainWidth) {
+        push(line, color, false, commentIdx);
+        line = "";
+        width = 0;
+      }
+      line += segment;
+      width += segmentWidth;
+    }
+    if (line) push(line, color, false, commentIdx);
   };
   const pushSection = (label: string) => {
     push("");
@@ -72,7 +83,6 @@ export function renderDetailLines(detail: IssueDetail, mainWidth: number): Detai
   pushSection(`comments (${detail.comments.length})`);
   if (detail.comments.length === 0) {
     push("no comments yet", theme.muted);
-    return out;
   }
   detail.comments.forEach((c, i) => {
     if (i > 0) push("·".repeat(Math.min(mainWidth, 20)), theme.divider, false, i);

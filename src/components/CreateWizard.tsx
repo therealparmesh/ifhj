@@ -9,8 +9,11 @@ import {
   type IssueSearchResult,
   type IssueType,
   type JiraUser,
+  type EditableField,
+  type EditableFieldValue,
   createIssue,
   createIssueLink,
+  getCreateFields,
   searchIssues,
 } from "../jira";
 import { errorMessage, fg, theme, truncate } from "../ui";
@@ -18,6 +21,7 @@ import { FilterPicker } from "./FilterPicker";
 import { Hint } from "./Hint";
 import { LoadingLine } from "./LoadingLine";
 import { NvimBanner } from "./NvimBanner";
+import { TransitionScreenModal } from "./TransitionScreenModal";
 
 /**
  * Parent linking (epic child, sub-task) uses the `parent` field at create
@@ -56,6 +60,7 @@ type Mode =
   | { kind: "pick-type" }
   | { kind: "pick-link" }
   | { kind: "pick-target" }
+  | { kind: "required-fields" }
   | { kind: "submitting" };
 
 const FIELD_LABELS: Record<FieldId, string> = {
@@ -77,11 +82,34 @@ const REQUIRED: Record<FieldId, boolean> = {
 };
 
 // The `target` row only shows once the user has picked a non-skip link.
-function visibleFields(form: FormState): FieldId[] {
-  const out: FieldId[] = ["title", "description", "type", "link"];
+function visibleFields(form: FormState, lockedParent: boolean): FieldId[] {
+  const out: FieldId[] = ["title", "description", "type"];
+  if (!lockedParent) out.push("link");
   if (form.link) out.push("target");
   out.push("submit");
   return out;
+}
+
+function parentValidationError(
+  type: IssueType | null,
+  link: LinkChoice | null,
+  target: IssueSearchResult | null,
+  projectKey: string,
+): string | null {
+  if (!type) return null;
+  if (type.subtask && link?.name !== PARENT_SENTINEL) return "a subtask requires a parent";
+  if (link?.name !== PARENT_SENTINEL) return null;
+  if (!target) return "parent required";
+  if (target.projectKey !== projectKey) return "parent must be in the same project";
+  if (target.subtask) return "a subtask cannot be a parent";
+  if (
+    type.hierarchyLevel !== undefined &&
+    target.hierarchyLevel !== undefined &&
+    target.hierarchyLevel !== type.hierarchyLevel + 1
+  ) {
+    return "parent must be one hierarchy level above the selected type";
+  }
+  return null;
 }
 
 export function CreateWizard({
@@ -89,6 +117,7 @@ export function CreateWizard({
   projectKey,
   types,
   linkTypes,
+  initialType,
   defaultParent,
   ensureUsers,
   onCancel,
@@ -99,39 +128,46 @@ export function CreateWizard({
   projectKey: string;
   types: IssueType[];
   linkTypes: IssueLinkType[];
-  defaultParent?: string | undefined;
+  initialType?: IssueType | undefined;
+  defaultParent?: IssueSearchResult | undefined;
   /** Supplied by the caller so Neovim's @-completion is fed the same
    *  user list the caller cached. Optional. */
-  ensureUsers?: () => Promise<JiraUser[]>;
+  ensureUsers?: (projectKey: string) => Promise<JiraUser[]>;
   onCancel: () => void;
-  onDone: (result: { key: string; title: string; linkSummary?: string }) => void;
+  onDone: (result: { key: string; title: string; linkSummary?: string; warning?: string }) => void;
   onError: (msg: string) => void;
 }) {
   const parentLink: LinkChoice | null = defaultParent
     ? { name: PARENT_SENTINEL, label: "is child of", direction: "outward" }
     : null;
-  const parentTarget: IssueSearchResult | null = defaultParent
-    ? { key: defaultParent, summary: "", issueType: "" }
-    : null;
+  const parentTarget: IssueSearchResult | null = defaultParent ? defaultParent : null;
   const [form, setForm] = useState<FormState>({
     title: "",
     description: "",
-    type: null,
+    type: initialType ?? null,
     link: parentLink,
     target: parentTarget,
   });
   const [mode, setMode] = useState<Mode>({ kind: "browse" });
   const [focused, setFocused] = useState<FieldId>("title");
+  const [createFields, setCreateFields] = useState<EditableField[] | null>(null);
+  const [metadataError, setMetadataError] = useState<string | null>(null);
+  const [metadataAttempt, setMetadataAttempt] = useState(0);
+  const [extraFields, setExtraFields] = useState<Record<string, EditableFieldValue>>({});
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [abandoned, setAbandoned] = useState(false);
+  const onErrorRef = useRef(onError);
+  useEffect(() => {
+    onErrorRef.current = onError;
+  }, [onError]);
 
   // Target-search state for the pick-target picker. Race-guarded via seq.
   const [searchResults, setSearchResults] = useState<IssueSearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const searchSeq = useRef(0);
 
-  // Set once the wizard is abandoned (esc during submit). We can't un-POST an
-  // in-flight createIssue, but we can stop its resolution from calling back
-  // into the parent — otherwise "esc to abandon" would still flash success and
-  // pop the detail view for the issue the user thought they cancelled.
+  // Set on explicit cancellation and unmount. We cannot undo an in-flight
+  // create, but no result or follow-up link may publish after abandonment.
   const cancelled = useRef(false);
   useEffect(() => {
     cancelled.current = false;
@@ -140,9 +176,99 @@ export function CreateWizard({
     };
   }, []);
 
-  const fields = visibleFields(form);
+  const metadataType = useRef<string | null>(null);
+  useEffect(() => {
+    if (cancelled.current) return;
+    const type = form.type;
+    if (!type) {
+      setCreateFields(null);
+      setMetadataError(null);
+      return;
+    }
+    if (metadataType.current !== type.id) {
+      metadataType.current = type.id;
+      setExtraFields({});
+    }
+    let obsolete = false;
+    setCreateFields(null);
+    setMetadataError(null);
+    setStatusError(null);
+    void (async () => {
+      try {
+        const next = await getCreateFields(cfg, projectKey, type.id);
+        if (obsolete || cancelled.current) return;
+        const supportsParent = next.some((field) => field.id === "parent");
+        if (defaultParent && (!type.subtask || !supportsParent)) {
+          const message = "selected type cannot be created as a subtask";
+          setMetadataError(message);
+          setStatusError(message);
+          onErrorRef.current(message);
+          return;
+        }
+        if (!supportsParent) {
+          setForm((current) =>
+            current.link?.name === PARENT_SENTINEL
+              ? { ...current, link: null, target: null }
+              : current,
+          );
+        }
+        setCreateFields(next);
+      } catch (error) {
+        if (obsolete || cancelled.current) return;
+        const message = errorMessage(error);
+        setMetadataError(message);
+        setStatusError(message);
+        onErrorRef.current(message);
+      }
+    })();
+    return () => {
+      obsolete = true;
+    };
+  }, [cfg, projectKey, form.type, defaultParent, metadataAttempt]);
+
+  const fields = visibleFields(form, Boolean(defaultParent));
+  const descriptionRequired =
+    createFields?.some(
+      (field) => field.id === "description" && field.required && !field.hasDefaultValue,
+    ) ?? false;
+  const parentRequired =
+    createFields?.some(
+      (field) => field.id === "parent" && field.required && !field.hasDefaultValue,
+    ) ?? false;
+  const requiredFields =
+    createFields?.filter(
+      (field) =>
+        field.required &&
+        !field.hasDefaultValue &&
+        !["project", "issuetype", "summary", "description", "parent"].includes(field.id),
+    ) ?? [];
+  const parentError = parentValidationError(form.type, form.link, form.target, projectKey);
   const canSubmit =
-    form.title.trim() !== "" && form.type !== null && (form.link === null || form.target !== null);
+    form.title.trim() !== "" &&
+    form.type !== null &&
+    createFields !== null &&
+    metadataError === null &&
+    (!descriptionRequired || form.description.trim() !== "") &&
+    (form.link === null || form.target !== null) &&
+    (!parentRequired || form.link?.name === PARENT_SENTINEL) &&
+    parentError === null;
+  const requestSubmit = () => {
+    if (parentError) {
+      setStatusError(parentError);
+      onErrorRef.current(parentError);
+      return;
+    }
+    if (!canSubmit) return;
+    setStatusError(null);
+    setMode({ kind: requiredFields.length > 0 ? "required-fields" : "submitting" });
+  };
+  const cancelWizard = () => {
+    if (cancelled.current) return;
+    cancelled.current = true;
+    searchSeq.current++;
+    setAbandoned(true);
+    onCancel();
+  };
 
   /**
    * Pick "no relationship" after a target is set → target row vanishes.
@@ -159,6 +285,7 @@ export function CreateWizard({
    */
   const modeFired = useRef<string>("");
   useEffect(() => {
+    if (cancelled.current) return;
     if (modeFired.current === mode.kind) return;
     modeFired.current = mode.kind;
 
@@ -166,65 +293,94 @@ export function CreateWizard({
       (async () => {
         try {
           const raw = await editInNeovim(form.title, "new-issue-title.md");
+          if (cancelled.current) return;
           const title = raw.split(/\n/, 1)[0]?.trim() ?? "";
           setForm((f) => ({ ...f, title }));
           setMode({ kind: "browse" });
         } catch (e) {
-          onError(errorMessage(e));
+          if (cancelled.current) return;
+          const message = errorMessage(e);
+          setStatusError(message);
+          onErrorRef.current(message);
+          setMode({ kind: "browse" });
         }
       })();
     } else if (mode.kind === "nvim-desc") {
       (async () => {
         try {
-          const mentionUsers = (await ensureUsers?.()) ?? [];
+          const mentionUsers = (await ensureUsers?.(projectKey)) ?? [];
+          if (cancelled.current) return;
           const raw = await editInNeovim(form.description, "new-issue-desc.md", { mentionUsers });
+          if (cancelled.current) return;
           setForm((f) => ({ ...f, description: raw.trim() }));
           setMode({ kind: "browse" });
         } catch (e) {
-          onError(errorMessage(e));
+          if (cancelled.current) return;
+          const message = errorMessage(e);
+          setStatusError(message);
+          onErrorRef.current(message);
+          setMode({ kind: "browse" });
         }
       })();
     } else if (mode.kind === "submitting") {
       const { title, description, type, link, target } = form;
       if (!type) {
-        onError("type required");
+        setStatusError("type required");
+        onErrorRef.current("type required");
         return;
       }
       (async () => {
+        let created: { key: string };
         try {
           const isParent = link?.name === PARENT_SENTINEL;
           const parentKey = isParent && target ? target.key : undefined;
-          const created = await createIssue(
+          created = await createIssue(
             cfg,
             projectKey,
-            type.name,
+            type.id,
             title,
             description,
             parentKey,
+            extraFields,
           );
-          if (target && link && !isParent) {
-            await createIssueLink(cfg, link.name, created.key, target.key, link.direction);
-          }
-          if (cancelled.current) return; // abandoned mid-submit — don't call back
-          const linkSummary = target && link ? `${link.label} ${target.key}` : undefined;
-          onDone({
-            key: created.key,
-            title,
-            ...(linkSummary ? { linkSummary } : {}),
-          });
         } catch (e) {
           if (cancelled.current) return;
-          onError(errorMessage(e));
+          const message = errorMessage(e);
+          setStatusError(message);
+          onErrorRef.current(message);
+          setMode({ kind: "browse" });
+          return;
         }
+        if (cancelled.current) return;
+        if (target && link && link.name !== PARENT_SENTINEL) {
+          try {
+            await createIssueLink(cfg, link.name, created.key, target.key, link.direction);
+          } catch (e) {
+            if (cancelled.current) return;
+            onDone({
+              key: created.key,
+              title,
+              warning: `relationship failed: ${errorMessage(e)}`,
+            });
+            return;
+          }
+        }
+        if (cancelled.current) return;
+        const linkSummary = target && link ? `${link.label} ${target.key}` : undefined;
+        onDone({
+          key: created.key,
+          title,
+          ...(linkSummary ? { linkSummary } : {}),
+        });
       })();
     }
-  }, [mode, form, cfg, projectKey, ensureUsers, onDone, onError]);
+  }, [mode, form, cfg, projectKey, ensureUsers, extraFields, onDone]);
 
   // Browse-mode keys — navigate, activate, submit.
   useInput(
     (input, key) => {
-      if (key.escape) return onCancel();
-      if (input === "s" && canSubmit) return setMode({ kind: "submitting" });
+      if (key.escape) return cancelWizard();
+      if (input === "s") return requestSubmit();
       if (key.upArrow || input === "k") {
         const i = fields.indexOf(focused);
         if (i > 0) setFocused(fields[i - 1]!);
@@ -240,17 +396,47 @@ export function CreateWizard({
         else if (focused === "description") setMode({ kind: "nvim-desc" });
         else if (focused === "type") setMode({ kind: "pick-type" });
         else if (focused === "link") setMode({ kind: "pick-link" });
-        else if (focused === "target") setMode({ kind: "pick-target" });
-        else if (focused === "submit" && canSubmit) setMode({ kind: "submitting" });
+        else if (focused === "target") {
+          if (defaultParent) return;
+          searchSeq.current++;
+          setSearchResults([]);
+          setSearchLoading(true);
+          setMode({ kind: "pick-target" });
+        } else if (focused === "submit") requestSubmit();
       }
     },
-    { isActive: mode.kind === "browse" },
+    { isActive: mode.kind === "browse" && !abandoned },
   );
 
   // Neovim banner — editor takes over the TTY while running.
   if (mode.kind === "nvim-title" || mode.kind === "nvim-desc") return <NvimBanner />;
 
-  if (mode.kind === "submitting") return <SubmittingBanner onEscape={onCancel} />;
+  if (mode.kind === "submitting") return <SubmittingBanner onEscape={cancelWizard} />;
+
+  if (mode.kind === "required-fields" && form.type) {
+    return (
+      <TransitionScreenModal
+        cfg={cfg}
+        projectKey={projectKey}
+        issueKey={projectKey}
+        transition={{
+          id: "create",
+          name: `Create ${form.type.name}`,
+          toStatusId: "",
+          requiredFields,
+        }}
+        initialValues={extraFields}
+        onCancel={(values) => {
+          if (values) setExtraFields(values);
+          setMode({ kind: "browse" });
+        }}
+        onSubmit={(values) => {
+          setExtraFields(values);
+          setMode({ kind: "submitting" });
+        }}
+      />
+    );
+  }
 
   if (mode.kind === "pick-type") {
     return (
@@ -260,7 +446,10 @@ export function CreateWizard({
         {...(form.type ? { currentId: form.type.id } : {})}
         onPick={(id) => {
           const t = types.find((x) => x.id === id);
-          if (t) setForm((f) => ({ ...f, type: t }));
+          if (t) {
+            setForm((f) => ({ ...f, type: t }));
+            setMetadataAttempt((attempt) => attempt + 1);
+          }
           setMode({ kind: "browse" });
         }}
         onCancel={() => setMode({ kind: "browse" })}
@@ -269,7 +458,10 @@ export function CreateWizard({
   }
 
   if (mode.kind === "pick-link") {
-    const choices = buildLinkChoices(linkTypes);
+    const choices = buildLinkChoices(
+      linkTypes,
+      createFields?.some((field) => field.id === "parent") ?? false,
+    );
     const currentId = findCurrentLinkId(choices, form.link);
     return (
       <FilterPicker
@@ -304,26 +496,40 @@ export function CreateWizard({
         }))}
         loading={searchLoading}
         placeholder="type summary or issue key…"
+        debounceMs={0}
         onQueryChange={(q) => {
           const seq = ++searchSeq.current;
+          setSearchResults([]);
           setSearchLoading(true);
           (async () => {
             try {
               const r = await searchIssues(cfg, q, { projectKey });
-              if (seq === searchSeq.current) setSearchResults(r);
+              if (!cancelled.current && seq === searchSeq.current) setSearchResults(r);
             } catch {
-              if (seq === searchSeq.current) setSearchResults([]);
+              if (!cancelled.current && seq === searchSeq.current) setSearchResults([]);
             } finally {
-              if (seq === searchSeq.current) setSearchLoading(false);
+              if (!cancelled.current && seq === searchSeq.current) setSearchLoading(false);
             }
           })();
         }}
         onPick={(id) => {
           const t = searchResults.find((r) => r.key === id);
-          if (t) setForm((f) => ({ ...f, target: t }));
+          if (t) {
+            if (form.link?.name === PARENT_SENTINEL && t.subtask) {
+              const message = "a subtask cannot be a parent";
+              setStatusError(message);
+              onErrorRef.current(message);
+              return;
+            }
+            setForm((f) => ({ ...f, target: t }));
+          }
           setMode({ kind: "browse" });
         }}
-        onCancel={() => setMode({ kind: "browse" })}
+        onCancel={() => {
+          searchSeq.current++;
+          setSearchLoading(false);
+          setMode({ kind: "browse" });
+        }}
       />
     );
   }
@@ -335,7 +541,12 @@ export function CreateWizard({
       fields={fields}
       focused={focused}
       canSubmit={canSubmit}
+      descriptionRequired={descriptionRequired}
       projectKey={projectKey}
+      metadataStatus={
+        form.type && createFields === null && !metadataError ? "loading create fields…" : null
+      }
+      statusError={statusError}
     />
   );
 }
@@ -345,13 +556,19 @@ function CreateForm({
   fields,
   focused,
   canSubmit,
+  descriptionRequired,
   projectKey,
+  metadataStatus,
+  statusError,
 }: {
   form: FormState;
   fields: FieldId[];
   focused: FieldId;
   canSubmit: boolean;
+  descriptionRequired: boolean;
   projectKey: string;
+  metadataStatus: string | null;
+  statusError: string | null;
 }) {
   const { cols: termCols, rows: termRows } = useDimensions();
   const innerHeight = Math.max(12, termRows - 4);
@@ -393,9 +610,14 @@ function CreateForm({
             focused={focused === f}
             form={form}
             canSubmit={canSubmit}
+            required={f === "description" ? descriptionRequired : REQUIRED[f]}
             width={innerWidth - 4}
           />
         ))}
+        {metadataStatus ? <Text color={theme.muted}>{metadataStatus}</Text> : null}
+        {statusError && statusError !== metadataStatus ? (
+          <Text color={theme.error}>{statusError}</Text>
+        ) : null}
       </Box>
 
       {/* Footer */}
@@ -417,12 +639,14 @@ function FormRow({
   focused,
   form,
   canSubmit,
+  required,
   width,
 }: {
   field: FieldId;
   focused: boolean;
   form: FormState;
   canSubmit: boolean;
+  required: boolean;
   width: number;
 }) {
   // Submit row is a single action line, colored by readiness.
@@ -457,7 +681,7 @@ function FormRow({
       <Text color={labelColor} bold={focused} inverse={focused}>
         {labelPadded}
       </Text>
-      <Text color={theme.error}>{REQUIRED[field] ? "* " : "  "}</Text>
+      <Text color={theme.error}>{required ? "* " : "  "}</Text>
       <Text {...fg(valueColor)} inverse={focused} wrap="truncate">
         {truncate(valueText, valueMax)}
       </Text>
@@ -487,16 +711,18 @@ type LinkChoiceOption = { id: string; choice: LinkChoice | null; label: string; 
  * "parent" (atomic `parent` field at create time) — then each link-type's
  * two directions.
  */
-function buildLinkChoices(linkTypes: IssueLinkType[]): LinkChoiceOption[] {
+function buildLinkChoices(linkTypes: IssueLinkType[], supportsParent: boolean): LinkChoiceOption[] {
   const out: LinkChoiceOption[] = [
     { id: "skip", choice: null, label: "(no relationship)", hint: "create standalone" },
-    {
+  ];
+  if (supportsParent) {
+    out.push({
       id: "parent",
       choice: { name: PARENT_SENTINEL, label: "is child of", direction: "outward" },
       label: "is child of",
-      hint: "parent field — epic / sub-task",
-    },
-  ];
+      hint: "parent field",
+    });
+  }
   for (const lt of linkTypes) {
     out.push({
       id: `${lt.id}-outward`,

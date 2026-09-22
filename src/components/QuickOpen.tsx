@@ -1,5 +1,5 @@
 import { Box, Text } from "ink";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { RecentIssue } from "../cache";
 import type { JiraConfig } from "../config";
@@ -24,6 +24,60 @@ type Row =
   | { kind: "sep"; label: string }
   | { kind: "issue"; key: string; summary: string; issueType?: string };
 
+type SearchState = {
+  query: string;
+  status: "idle" | "loading" | "done" | "error";
+  results: IssueSearchResult[];
+};
+
+function normalizeQuery(query: string): string {
+  return query.trim().toLowerCase();
+}
+
+function matchingRecents(recents: RecentIssue[], query: string): RecentIssue[] {
+  if (!query) return recents;
+  return recents.filter(
+    (recent) =>
+      recent.key.toLowerCase().includes(query) || recent.summary.toLowerCase().includes(query),
+  );
+}
+
+function buildRows(recents: RecentIssue[], query: string, search: SearchState): Row[] {
+  const matchedRecents = matchingRecents(recents, query);
+  const rows: Row[] = [];
+  if (matchedRecents.length > 0) {
+    rows.push({ kind: "sep", label: "recent" });
+    for (const recent of matchedRecents) {
+      rows.push({ kind: "issue", key: recent.key, summary: recent.summary });
+    }
+  }
+  if (!query) return rows;
+
+  const current = search.query === query;
+  const results = current ? search.results : [];
+  const recentKeys = new Set(matchedRecents.map((recent) => recent.key));
+  const globalResults = results.filter((result) => !recentKeys.has(result.key));
+  const status = current ? search.status : "loading";
+  const label =
+    status === "loading"
+      ? "all issues · searching…"
+      : status === "error"
+        ? "all issues · search failed"
+        : globalResults.length === 0
+          ? "all issues · no matches"
+          : "all issues";
+  rows.push({ kind: "sep", label });
+  for (const result of globalResults) {
+    rows.push({
+      kind: "issue",
+      key: result.key,
+      summary: result.summary,
+      issueType: result.issueType,
+    });
+  }
+  return rows;
+}
+
 export function QuickOpen({
   cfg,
   recents,
@@ -38,79 +92,49 @@ export function QuickOpen({
   const { rows: termRows } = useDimensions();
   const [q, setQ] = useState("");
   const [idx, setIdx] = useState(0);
-  const [results, setResults] = useState<IssueSearchResult[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [searchError, setSearchError] = useState(false);
+  const [search, setSearch] = useState<SearchState>({ query: "", status: "idle", results: [] });
   const scrollRef = useRef(0);
   // Sequence-guard so a slow global search that resolves after a newer
   // keystroke (or after cancel) can't overwrite fresher results.
   const searchSeq = useRef(0);
 
-  const query = q.trim().toLowerCase();
+  const query = normalizeQuery(q);
+  const invalidateSearch = useCallback((seq: number) => {
+    if (searchSeq.current === seq) searchSeq.current++;
+  }, []);
 
-  // Debounced global search — only once the user has typed. The callback is
-  // reached through refs so the timer depends only on `q`, not on every parent
-  // rerender (which would restart it and re-fire the same query).
+  // Each debounced request and its rendered results carry the same normalized
+  // query, so old results cannot become selectable under new input.
   useEffect(() => {
     if (!query) {
-      // Bump the seq so any in-flight search from a prior keystroke can't
-      // apply its result after the query was cleared.
       searchSeq.current++;
-      setResults([]);
-      setLoading(false);
+      setSearch({ query: "", status: "idle", results: [] });
       return;
     }
     const seq = ++searchSeq.current;
-    setLoading(true);
-    setSearchError(false);
+    setSearch({ query, status: "loading", results: [] });
     const t = setTimeout(async () => {
       try {
-        const r = await searchIssues(cfg, q.trim());
-        if (seq === searchSeq.current) setResults(r);
+        const results = await searchIssues(cfg, query);
+        if (seq === searchSeq.current) setSearch({ query, status: "done", results });
       } catch {
         // Surface failure in the section label rather than passing it off as
         // "no matches" — a network error and an empty result look different.
         if (seq === searchSeq.current) {
-          setResults([]);
-          setSearchError(true);
+          setSearch({ query, status: "error", results: [] });
         }
-      } finally {
-        if (seq === searchSeq.current) setLoading(false);
       }
     }, 200);
-    return () => clearTimeout(t);
-  }, [q, query, cfg]);
+    return () => {
+      clearTimeout(t);
+      invalidateSearch(seq);
+    };
+  }, [query, cfg, invalidateSearch]);
 
   // Build the flat row list: recents section (filtered by query when typing),
   // then — once typing — the global-search section with recents already shown
   // removed so nothing repeats.
-  const matchedRecents = query
-    ? recents.filter(
-        (r) => r.key.toLowerCase().includes(query) || r.summary.toLowerCase().includes(query),
-      )
-    : recents;
-
-  const rows: Row[] = [];
-  if (matchedRecents.length > 0) {
-    rows.push({ kind: "sep", label: "recent" });
-    for (const r of matchedRecents) rows.push({ kind: "issue", key: r.key, summary: r.summary });
-  }
-  if (query) {
-    const recentKeys = new Set(matchedRecents.map((r) => r.key));
-    const globalResults = results.filter((r) => !recentKeys.has(r.key));
-    // The separator carries the section's state (searching / empty / count) so
-    // a zero-result search reads clearly instead of showing a bare header.
-    const label = loading
-      ? "all issues · searching…"
-      : searchError
-        ? "all issues · search failed"
-        : globalResults.length === 0
-          ? "all issues · no matches"
-          : "all issues";
-    rows.push({ kind: "sep", label });
-    for (const r of globalResults)
-      rows.push({ kind: "issue", key: r.key, summary: r.summary, issueType: r.issueType });
-  }
+  const rows = buildRows(recents, query, search);
 
   // Selectable indices only (skip separators) — navigation snaps between them.
   const pickable = rows.flatMap((r, i) => (r.kind === "issue" ? [i] : []));
@@ -150,11 +174,23 @@ export function QuickOpen({
           }}
           onUpArrow={() => setIdx(clamp(sel - 1, 0, Math.max(0, pickable.length - 1)))}
           onDownArrow={() => setIdx(clamp(sel + 1, 0, Math.max(0, pickable.length - 1)))}
-          onSubmit={() => {
-            const row = rows[cursorRow];
+          onSubmit={(submittedValue) => {
+            const submittedQuery = normalizeQuery(submittedValue);
+            const submittedRows = buildRows(recents, submittedQuery, search);
+            const submittedPickable = submittedRows.filter(
+              (row): row is Extract<Row, { kind: "issue" }> => row.kind === "issue",
+            );
+            const submittedCursor =
+              submittedQuery === query
+                ? clamp(idx, 0, Math.max(0, submittedPickable.length - 1))
+                : 0;
+            const row = submittedPickable[submittedCursor];
             if (row?.kind === "issue") onPick(row.key);
           }}
-          onCancel={onCancel}
+          onCancel={() => {
+            searchSeq.current++;
+            onCancel();
+          }}
         />
       </Box>
 

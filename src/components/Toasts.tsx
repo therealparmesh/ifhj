@@ -14,8 +14,10 @@ export function useToasts() {
   const seq = useRef(0);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const timers = useRef(new Map<number, ReturnType<typeof setTimeout>>());
+  const mounted = useRef(true);
 
   const flash = useCallback((text: string, tone: Tone = "info") => {
+    if (!mounted.current) return;
     const id = ++seq.current;
     if (tone === "err") process.stderr.write("\x07");
     setToasts((prev) => [...prev.slice(-(MAX_TOASTS - 1)), { id, text, tone }]);
@@ -26,12 +28,15 @@ export function useToasts() {
     timers.current.set(id, timer);
   }, []);
 
-  useEffect(
-    () => () => {
-      for (const t of timers.current.values()) clearTimeout(t);
-    },
-    [],
-  );
+  useEffect(() => {
+    mounted.current = true;
+    const timerMap = timers.current;
+    return () => {
+      mounted.current = false;
+      for (const t of timerMap.values()) clearTimeout(t);
+      timerMap.clear();
+    };
+  }, []);
 
   return { toasts, flash };
 }
@@ -50,7 +55,7 @@ export function ToastStack({ toasts, maxWidth }: { toasts: Toast[]; maxWidth: nu
         const { color, glyph } = toneStyle(t.tone);
         return (
           <Text key={t.id} color={color} bold={t.tone === "err"}>
-            {glyph} {truncate(t.text, Math.max(10, maxWidth - 4))}
+            {glyph} {truncate(t.text, Math.max(0, maxWidth - 4))}
           </Text>
         );
       })}

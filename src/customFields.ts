@@ -1,12 +1,8 @@
 /**
- * Custom-field representation for the detail side panel. The heavy
- * normalization used to live in `jira.ts`; it's here because the
- * editmeta → display translation is shared between the board's
- * board-issue list and the per-issue detail view, and neither wants to
- * know about REST plumbing.
+ * Custom-field representation for the detail side panel. The editmeta to
+ * display translation lives here so the UI and REST code stay separate.
  *
- * Now also threads through the EditableField metadata from editmeta so
- * the side panel can reuse the shared FieldEditor component for edits.
+ * EditableField metadata lets the side panel reuse FieldEditor for edits.
  */
 
 import type { EditableField, EditableFieldValue } from "./jira";
@@ -114,7 +110,7 @@ export function coerceFieldValue(
 /**
  * Build a CustomField from an editmeta entry. Returns null for the epic-link
  * field (`epicLinkId`, rendered via `parent`, so it'd otherwise render twice)
- * and when the meta itself is malformed. `epicLinkId` is the tenant-resolved
+ * and fields without normalized edit metadata. `epicLinkId` is the tenant-resolved
  * id — passing it (rather than a hardcoded default) keeps the dedupe correct
  * on instances that remapped the epic-link field.
  */

@@ -1,11 +1,12 @@
 import { Box, Text, useInput } from "ink";
-import { useEffect, useState } from "react";
+import { useRef, useState } from "react";
 
+import { graphemes } from "../text";
 import { fg, theme } from "../ui";
 
 /**
- * Always used in controlled mode — the caller owns `value` and updates it
- * through `onChange`. The only local state is the cursor position.
+ * Always used in controlled mode. Refs advance the cursor and latest emitted
+ * value between Ink events that arrive before the parent rerenders.
  */
 type Props = {
   value: string;
@@ -32,6 +33,24 @@ function nextWordBoundary(s: string, from: number): number {
   return i;
 }
 
+function characterBoundaries(s: string): number[] {
+  const boundaries = Array.from(graphemes(s), ({ index }) => index);
+  boundaries.push(s.length);
+  return boundaries;
+}
+
+function prevCharacterBoundary(s: string, from: number): number {
+  return characterBoundaries(s).findLast((i) => i < from) ?? 0;
+}
+
+function nextCharacterBoundary(s: string, from: number): number {
+  return characterBoundaries(s).find((i) => i > from) ?? s.length;
+}
+
+function characterBoundaryAtOrBefore(s: string, from: number): number {
+  return characterBoundaries(s).findLast((i) => i <= from) ?? 0;
+}
+
 export function TextInput({
   value,
   placeholder,
@@ -42,26 +61,39 @@ export function TextInput({
   onDownArrow,
   isActive = true,
 }: Props) {
-  const [cursor, setCursor] = useState(value.length);
+  const cursor = useRef(value.length);
+  const currentValue = useRef(value);
+  const [, rerender] = useState(0);
+  currentValue.current = value;
+  cursor.current = characterBoundaryAtOrBefore(value, Math.min(cursor.current, value.length));
 
-  // Clamp the cursor if the controlled value shrinks below the cursor index.
-  useEffect(() => {
-    if (cursor > value.length) setCursor(value.length);
-  }, [value, cursor]);
+  const moveCursor = (next: number) => {
+    const safe = characterBoundaryAtOrBefore(
+      currentValue.current,
+      Math.max(0, Math.min(currentValue.current.length, next)),
+    );
+    if (safe === cursor.current) return;
+    cursor.current = safe;
+    rerender((version) => version + 1);
+  };
 
   const setValue = (v: string, nextCursor: number) => {
-    setCursor(Math.max(0, Math.min(v.length, nextCursor)));
+    currentValue.current = v;
+    cursor.current = characterBoundaryAtOrBefore(v, Math.max(0, Math.min(v.length, nextCursor)));
+    rerender((version) => version + 1);
     onChange(v);
   };
 
   useInput(
     (input, key) => {
+      const current = currentValue.current;
+      const safeCursor = cursor.current;
       if (key.escape) {
         onCancel?.();
         return;
       }
       if (key.return) {
-        onSubmit?.(value);
+        onSubmit?.(current);
         return;
       }
       if (key.upArrow) {
@@ -77,48 +109,60 @@ export function TextInput({
       const wordSkip = key.ctrl || key.meta;
 
       if (key.leftArrow) {
-        setCursor((c) => (wordSkip ? prevWordBoundary(value, c) : Math.max(0, c - 1)));
+        moveCursor(
+          wordSkip
+            ? prevWordBoundary(current, safeCursor)
+            : prevCharacterBoundary(current, safeCursor),
+        );
         return;
       }
       if (key.rightArrow) {
-        setCursor((c) => (wordSkip ? nextWordBoundary(value, c) : Math.min(value.length, c + 1)));
+        moveCursor(
+          wordSkip
+            ? nextWordBoundary(current, safeCursor)
+            : nextCharacterBoundary(current, safeCursor),
+        );
         return;
       }
 
       // Readline-style bindings
-      if (key.ctrl && input === "a") return setCursor(0);
-      if (key.ctrl && input === "e") return setCursor(value.length);
-      if (key.ctrl && input === "b") return setCursor((c) => Math.max(0, c - 1));
-      if (key.ctrl && input === "f") return setCursor((c) => Math.min(value.length, c + 1));
-      if (key.ctrl && input === "u") return setValue(value.slice(cursor), 0);
-      if (key.ctrl && input === "k") return setValue(value.slice(0, cursor), cursor);
+      if (key.ctrl && input === "a") return moveCursor(0);
+      if (key.ctrl && input === "e") return moveCursor(current.length);
+      if (key.ctrl && input === "b") return moveCursor(prevCharacterBoundary(current, safeCursor));
+      if (key.ctrl && input === "f") return moveCursor(nextCharacterBoundary(current, safeCursor));
+      if (key.ctrl && input === "u") return setValue(current.slice(safeCursor), 0);
+      if (key.ctrl && input === "k") return setValue(current.slice(0, safeCursor), safeCursor);
       if (key.ctrl && input === "w") {
-        const p = prevWordBoundary(value, cursor);
-        setValue(value.slice(0, p) + value.slice(cursor), p);
+        const p = prevWordBoundary(current, safeCursor);
+        setValue(current.slice(0, p) + current.slice(safeCursor), p);
         return;
       }
       // Alt+b / Alt+f — word skip via meta-letter (terminals often send ESC+letter)
-      if (key.meta && input === "b") return setCursor((c) => prevWordBoundary(value, c));
-      if (key.meta && input === "f") return setCursor((c) => nextWordBoundary(value, c));
+      if (key.meta && input === "b") return moveCursor(prevWordBoundary(current, safeCursor));
+      if (key.meta && input === "f") return moveCursor(nextWordBoundary(current, safeCursor));
       if (key.meta && (input === "\x7f" || key.backspace)) {
-        const p = prevWordBoundary(value, cursor);
-        setValue(value.slice(0, p) + value.slice(cursor), p);
+        const p = prevWordBoundary(current, safeCursor);
+        setValue(current.slice(0, p) + current.slice(safeCursor), p);
         return;
       }
       if (key.meta && input === "d") {
-        const n = nextWordBoundary(value, cursor);
-        setValue(value.slice(0, cursor) + value.slice(n), cursor);
+        const n = nextWordBoundary(current, safeCursor);
+        setValue(current.slice(0, safeCursor) + current.slice(n), safeCursor);
         return;
       }
 
       if (key.backspace) {
-        if (cursor === 0) return;
-        setValue(value.slice(0, cursor - 1) + value.slice(cursor), cursor - 1);
+        if (safeCursor === 0) return;
+        const previous = prevCharacterBoundary(current, safeCursor);
+        setValue(current.slice(0, previous) + current.slice(safeCursor), previous);
         return;
       }
       if (key.delete) {
-        if (cursor >= value.length) return;
-        setValue(value.slice(0, cursor) + value.slice(cursor + 1), cursor);
+        if (safeCursor >= current.length) return;
+        setValue(
+          current.slice(0, safeCursor) + current.slice(nextCharacterBoundary(current, safeCursor)),
+          safeCursor,
+        );
         return;
       }
 
@@ -129,8 +173,8 @@ export function TextInput({
         // oxlint-disable-next-line no-control-regex
         const cleaned = input.replaceAll(/[\x00-\x1f\x7f]/g, "");
         if (cleaned) {
-          const next = value.slice(0, cursor) + cleaned + value.slice(cursor);
-          setValue(next, cursor + cleaned.length);
+          const next = current.slice(0, safeCursor) + cleaned + current.slice(safeCursor);
+          setValue(next, safeCursor + cleaned.length);
         }
       }
     },
@@ -149,9 +193,10 @@ export function TextInput({
   }
 
   // Render with an inline cursor by inverting the char at `cursor`.
-  const before = value.slice(0, cursor);
-  const at = value.slice(cursor, cursor + 1);
-  const after = value.slice(cursor + 1);
+  const before = value.slice(0, cursor.current);
+  const nextCursor = nextCharacterBoundary(value, cursor.current);
+  const at = value.slice(cursor.current, nextCursor);
+  const after = value.slice(nextCursor);
 
   return (
     <Box>

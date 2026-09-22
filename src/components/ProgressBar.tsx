@@ -24,19 +24,17 @@ export function ProgressBar({ width, active }: { width: number; active: boolean 
 
   // A chunk of `span` cells bounces across the track. Triangle-wave position so
   // it sweeps out and back without a jump at the wrap.
-  const span = Math.max(3, Math.floor(w / 6));
-  const travel = Math.max(1, w - span);
+  const span = Math.min(w, Math.max(3, Math.floor(w / 6)));
+  const travel = w - span;
   const cycle = travel * 2;
-  const t = phase % cycle;
+  const t = travel === 0 ? 0 : phase % cycle;
   const start = t <= travel ? t : cycle - t;
 
-  let bar = "";
-  for (let i = 0; i < w; i++) bar += i >= start && i < start + span ? "━" : "─";
   return (
     <Box>
-      <Text color={theme.divider}>{bar.slice(0, start)}</Text>
-      <Text color={theme.accent}>{bar.slice(start, start + span)}</Text>
-      <Text color={theme.divider}>{bar.slice(start + span)}</Text>
+      <Text color={theme.divider}>{"─".repeat(start)}</Text>
+      <Text color={theme.accent}>{"━".repeat(span)}</Text>
+      <Text color={theme.divider}>{"─".repeat(w - start - span)}</Text>
     </Box>
   );
 }

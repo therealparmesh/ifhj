@@ -3,9 +3,10 @@ import { Box, Text } from "ink";
 import type { BoardColumn, Issue } from "../jira";
 import {
   assigneeColor,
+  type EstimateDisplay,
   bg,
   fg,
-  formatPoints,
+  formatEstimate,
   initials,
   theme,
   truncate,
@@ -13,7 +14,7 @@ import {
   typeGlyph,
 } from "../ui";
 
-export type Column = BoardColumn & { issues: Issue[] };
+type Column = BoardColumn & { issues: Issue[] };
 
 /**
  * Single kanban column: header (name + count + optional WIP + optional
@@ -31,6 +32,7 @@ export function ColumnView({
   matchSet,
   busyKeys,
   colIdx,
+  estimateDisplay,
 }: {
   column: Column;
   width: number;
@@ -43,11 +45,12 @@ export function ColumnView({
   /** Keys with a board-repositioning write in flight — rendered as loading. */
   busyKeys: ReadonlySet<string>;
   colIdx: number;
+  estimateDisplay: EstimateDisplay;
 }) {
   const visible = column.issues.slice(scroll, scroll + cardsVisible);
   const hiddenAbove = scroll;
   const hiddenBelow = Math.max(0, column.issues.length - (scroll + cardsVisible));
-  const pointSum = column.issues.reduce((a, i) => a + (i.storyPoints ?? 0), 0);
+  const estimateSum = column.issues.reduce((sum, issue) => sum + (issue.storyPoints ?? 0), 0);
   const overWip = column.max !== undefined && column.issues.length > column.max;
   const countText =
     column.max !== undefined
@@ -67,7 +70,9 @@ export function ColumnView({
           {truncate(column.name.toUpperCase(), Math.max(4, width - 14))}
         </Text>
         <Box>
-          {pointSum > 0 ? <Text color={theme.muted}>{formatPoints(pointSum)}p · </Text> : null}
+          {estimateSum > 0 ? (
+            <Text color={theme.muted}>{formatEstimate(estimateSum, estimateDisplay)} · </Text>
+          ) : null}
           <Text color={countColor} bold={overWip}>
             {countText}
           </Text>

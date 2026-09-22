@@ -53,7 +53,16 @@ export function Footer({
           <Text color={typeColor(currentIssue.issueType)}>{currentIssue.issueType}</Text>
           <Text color={theme.muted}> · </Text>
           <Text {...fg(theme.fg)}>
-            {truncate(currentIssue.summary, Math.max(10, termCols - currentIssue.key.length - 20))}
+            {truncate(
+              currentIssue.summary,
+              Math.max(
+                0,
+                termCols -
+                  Bun.stringWidth(currentIssue.key) -
+                  Bun.stringWidth(currentIssue.issueType) -
+                  8,
+              ),
+            )}
           </Text>
         </Box>
       ) : (
@@ -62,7 +71,7 @@ export function Footer({
 
       {mode === "search" ? (
         <Box flexDirection="column">
-          <Box marginTop={0}>
+          <Box>
             <Text color={theme.warning} bold>
               /{" "}
             </Text>

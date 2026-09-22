@@ -1,7 +1,9 @@
 import { Box, Text, useInput } from "ink";
+import { useState } from "react";
 
 import { editorLabel } from "../editor";
-import { theme } from "../ui";
+import { useDimensions } from "../hooks";
+import { clamp, theme } from "../ui";
 
 // Resolved editor name ("Neovim" / "Vim") interpolated into the edit hints so
 // help matches whatever's actually on $PATH.
@@ -41,7 +43,7 @@ const DETAIL_BINDINGS: { keys: string; desc: string }[] = [
   { keys: "g / G", desc: "top / bottom" },
   { keys: "PgUp PgDn", desc: "page scroll" },
   { keys: "⏎", desc: "edit focused field or open comment" },
-  { keys: "x", desc: "clear focused field" },
+  { keys: "x", desc: "clear optional field" },
   { keys: "[ ]", desc: "prev / next comment" },
   { keys: "c", desc: `add comment (${ED})` },
   { keys: "C", desc: "create subtask" },
@@ -56,45 +58,120 @@ const DETAIL_BINDINGS: { keys: string; desc: string }[] = [
   { keys: "esc / q", desc: "close" },
 ];
 
+const BINDINGS = [
+  ...BOARD_BINDINGS.map((binding) => ({ ...binding, section: "board" as const })),
+  ...DETAIL_BINDINGS.map((binding) => ({ ...binding, section: "detail view" as const })),
+];
+
+const KEY_COL_WIDTH = Math.max(...BINDINGS.map((binding) => Bun.stringWidth(binding.keys)));
+
 export function HelpModal({ onClose }: { onClose: () => void }) {
-  /**
-   * Specific close keys only — "any key closes" turns accidental ↑/↓/tab
-   * presses into a dismissal.
-   */
+  const { cols, rows } = useDimensions();
+  const [scroll, setScroll] = useState(0);
+  const innerWidth = Math.max(1, cols - 4);
+  const descriptionWidth = Math.max(1, innerWidth - KEY_COL_WIDTH - 1);
+  const displayRows = buildDisplayRows(descriptionWidth);
+  // Border, sticky section header, and two footer lines consume five rows.
+  const windowHeight = Math.max(1, rows - 5);
+  const maxScroll = Math.max(0, displayRows.length - windowHeight);
+  const offset = clamp(scroll, 0, maxScroll);
+  const moveScroll = (delta: number) =>
+    setScroll((current) => clamp(clamp(current, 0, maxScroll) + delta, 0, maxScroll));
+
   useInput((input, key) => {
-    if (key.escape || key.return || input === "q" || input === "?") onClose();
+    if (key.escape || key.return || input === "q" || input === "?") return onClose();
+    if (key.home) return setScroll(0);
+    if (key.end) return setScroll(maxScroll);
+    if (key.pageUp) return moveScroll(-windowHeight);
+    if (key.pageDown) return moveScroll(windowHeight);
+    if (key.upArrow || input === "k") return moveScroll(-1);
+    if (key.downArrow || input === "j") moveScroll(1);
   });
-  const allBindings = [...BOARD_BINDINGS, ...DETAIL_BINDINGS];
-  const keyColWidth = Math.max(...allBindings.map((b) => b.keys.length));
+
+  const visible = displayRows.slice(offset, offset + windowHeight);
+  const currentSection = visible[0]?.section ?? "board";
+
   return (
-    <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.accent}>
-      <Text color={theme.accent} bold>
-        board
-      </Text>
-      <Box marginTop={1} flexDirection="column">
-        {BOARD_BINDINGS.map((b) => (
-          <Box key={b.keys}>
-            <Text color={theme.accent}>{b.keys.padEnd(keyColWidth)}</Text>
-            <Text color={theme.muted}> {b.desc}</Text>
-          </Box>
-        ))}
-      </Box>
-      <Box marginTop={1}>
-        <Text color={theme.accent} bold>
-          detail view
+    <Box
+      flexDirection="column"
+      width={cols}
+      height={rows}
+      paddingX={1}
+      borderStyle="round"
+      borderColor={theme.accent}
+    >
+      <Box justifyContent="space-between">
+        <Text color={theme.accent} bold wrap="truncate">
+          help · {currentSection}
+        </Text>
+        <Text color={theme.muted}>
+          {offset + 1}-{Math.min(offset + windowHeight, displayRows.length)}/{displayRows.length}
         </Text>
       </Box>
-      <Box marginTop={1} flexDirection="column">
-        {DETAIL_BINDINGS.map((b) => (
-          <Box key={b.keys}>
-            <Text color={theme.accent}>{b.keys.padEnd(keyColWidth)}</Text>
-            <Text color={theme.muted}> {b.desc}</Text>
-          </Box>
-        ))}
+      <Box flexDirection="column" height={windowHeight}>
+        {visible.map((row, index) =>
+          row.kind === "section" ? (
+            <Text key={`${offset + index}-section`} color={theme.accent} bold>
+              {row.section}
+            </Text>
+          ) : (
+            <Box key={`${offset + index}-binding`}>
+              <Text color={theme.fgDim}>
+                {row.keys}
+                {" ".repeat(Math.max(0, KEY_COL_WIDTH - Bun.stringWidth(row.keys)))}
+              </Text>
+              <Text color={theme.muted}> {row.text}</Text>
+            </Box>
+          ),
+        )}
       </Box>
-      <Box marginTop={1}>
-        <Text color={theme.muted}>esc / q / ? / ⏎ to close</Text>
+      <Box flexDirection="column">
+        <Text color={theme.muted} wrap="truncate">
+          ↑↓/jk nav · PgUp/PgDn page
+        </Text>
+        <Text color={theme.muted} wrap="truncate">
+          Home/End jump · esc/q/?/⏎ close
+        </Text>
       </Box>
     </Box>
   );
+}
+
+type DisplayRow =
+  | { kind: "section"; section: "detail view" }
+  | { kind: "binding"; section: "board" | "detail view"; keys: string; text: string };
+
+function buildDisplayRows(descriptionWidth: number): DisplayRow[] {
+  const rows: DisplayRow[] = [];
+  for (const binding of BINDINGS) {
+    if (binding.section === "detail view" && rows.at(-1)?.section === "board") {
+      rows.push({ kind: "section", section: "detail view" });
+    }
+    const lines = wrapText(binding.desc, descriptionWidth);
+    lines.forEach((text, index) => {
+      rows.push({
+        kind: "binding",
+        section: binding.section,
+        keys: index === 0 ? binding.keys : "",
+        text,
+      });
+    });
+  }
+  return rows;
+}
+
+function wrapText(text: string, width: number): string[] {
+  const lines: string[] = [];
+  let line = "";
+  for (const word of text.split(" ")) {
+    const next = line ? `${line} ${word}` : word;
+    if (Bun.stringWidth(next) <= width) {
+      line = next;
+    } else {
+      if (line) lines.push(line);
+      line = word;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
 }

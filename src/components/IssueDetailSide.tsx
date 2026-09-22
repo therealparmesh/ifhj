@@ -37,7 +37,7 @@ export function InlineFieldInput({
           value={value}
           placeholder={placeholder}
           onChange={setValue}
-          onSubmit={() => onSubmit(value)}
+          onSubmit={onSubmit}
           onCancel={onCancel}
         />
       </Box>

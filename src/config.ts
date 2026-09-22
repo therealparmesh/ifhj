@@ -17,15 +17,13 @@ export type Settings = {
   maxColumns: number;
 };
 
-const SETTINGS_PATH = join(homedir(), ".config", "ifhj", "settings.json");
-
 function parseTheme(v: unknown): ThemeName | undefined {
   return v === "synthwave" || v === "terminal" ? v : undefined;
 }
 
 function parseMaxColumns(v: unknown): number | undefined {
-  const n = typeof v === "number" ? v : typeof v === "string" ? Number.parseInt(v, 10) : NaN;
-  return Number.isFinite(n) && n >= 1 ? n : undefined;
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() ? Number(v) : NaN;
+  return Number.isSafeInteger(n) && n >= 1 ? n : undefined;
 }
 
 // Read an env override, running it through the same parser as the file. An
@@ -48,29 +46,20 @@ function strictEnv<T>(name: string, parse: (v: unknown) => T | undefined): T | u
 export async function loadSettings(): Promise<Settings> {
   let raw: Record<string, unknown> = {};
   try {
-    const f = Bun.file(SETTINGS_PATH);
-    if (await f.exists()) {
-      const parsed: unknown = await f.json();
-      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-        raw = parsed as Record<string, unknown>;
-      }
+    const parsed: unknown = await Bun.file(
+      join(homedir(), ".config", "ifhj", "settings.json"),
+    ).json();
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      raw = parsed as Record<string, unknown>;
     }
   } catch {
-    // malformed JSON — fall through to defaults
+    // Missing or malformed settings fall through to defaults.
   }
   return {
     theme: strictEnv("IFHJ_THEME", parseTheme) ?? parseTheme(raw["theme"]) ?? "synthwave",
     maxColumns:
       strictEnv("IFHJ_MAX_COLUMNS", parseMaxColumns) ?? parseMaxColumns(raw["maxColumns"]) ?? 4,
   };
-}
-
-// Strip matching single or double quotes around a YAML scalar.
-function unquote(s: string): string {
-  const t = s.trim();
-  if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))
-    return t.slice(1, -1);
-  return t;
 }
 
 async function readConfigYaml(): Promise<{ server?: string; login?: string }> {
@@ -81,12 +70,27 @@ async function readConfigYaml(): Promise<{ server?: string; login?: string }> {
   for (const p of paths) {
     const f = Bun.file(p);
     if (!(await f.exists())) continue;
-    const text = await f.text();
+    let parsed: unknown;
+    try {
+      parsed = Bun.YAML.parse(await f.text());
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Invalid Jira config ${p}: ${message}`, { cause: error });
+    }
+    if (parsed === null || parsed === undefined) return {};
+    if (typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`Invalid Jira config ${p}: expected a YAML mapping`);
+    }
+    const raw = parsed as Record<string, unknown>;
     const out: { server?: string; login?: string } = {};
-    const server = /^server:\s*(.+)$/m.exec(text)?.[1];
-    const login = /^login:\s*(.+)$/m.exec(text)?.[1];
-    if (server) out.server = unquote(server);
-    if (login) out.login = unquote(login);
+    for (const key of ["server", "login"] as const) {
+      const value = raw[key];
+      if (value === null || value === undefined) continue;
+      if (typeof value !== "string") {
+        throw new Error(`Invalid Jira config ${p}: ${key} must be a string`);
+      }
+      out[key] = value;
+    }
     return out;
   }
   return {};
@@ -94,15 +98,32 @@ async function readConfigYaml(): Promise<{ server?: string; login?: string }> {
 
 export async function loadConfig(): Promise<JiraConfig> {
   const env = Bun.env;
-  const yaml = await readConfigYaml();
-  const server = env["JIRA_SERVER"] || yaml.server;
-  const email = env["JIRA_LOGIN"] || env["JIRA_EMAIL"] || yaml.login;
-  const token = env["JIRA_API_TOKEN"];
-  if (!server)
+  const envServer = env["JIRA_SERVER"];
+  const envLogin = env["JIRA_LOGIN"] || env["JIRA_EMAIL"];
+  const yaml = envServer && envLogin ? {} : await readConfigYaml();
+  const serverValue = envServer || yaml.server;
+  const email = (envLogin || yaml.login)?.trim();
+  const token = env["JIRA_API_TOKEN"]?.trim();
+  if (!serverValue?.trim())
     throw new Error("Missing Jira server (set JIRA_SERVER or ~/.config/.jira/.config.yml)");
   if (!email)
     throw new Error("Missing Jira login email (set JIRA_LOGIN or ~/.config/.jira/.config.yml)");
   if (!token) throw new Error("Missing JIRA_API_TOKEN environment variable");
+
+  let url: URL;
+  try {
+    url = new URL(serverValue.trim());
+  } catch {
+    throw new Error(`Invalid Jira server URL "${serverValue}"`);
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error(`Invalid Jira server URL protocol "${url.protocol}"`);
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error("Jira server URL must not contain credentials, a query, or a fragment");
+  }
+  url.pathname = url.pathname.replace(/\/+$/, "");
+  const server = url.toString().replace(/\/$/, "");
   const authHeader = "Basic " + Buffer.from(`${email}:${token}`).toString("base64");
-  return { server: server.replace(/\/$/, ""), authHeader };
+  return { server, authHeader };
 }

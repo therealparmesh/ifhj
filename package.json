@@ -9,10 +9,14 @@
   },
   "type": "module",
   "scripts": {
+    "check": "bun run format:check && bun run lint && bun test",
     "compile": "DEV=false bun build --compile --minify ${TARGET:+--target=$TARGET} --outfile ifhj src/index.tsx",
     "dev": "bun --hot src/index.tsx",
-    "lint": "oxfmt && oxlint && tsc",
-    "start": "bun run src/index.tsx"
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint && tsc",
+    "start": "bun run src/index.tsx",
+    "test": "bun test"
   },
   "dependencies": {
     "github-markdown-adf": "^1.3.0",

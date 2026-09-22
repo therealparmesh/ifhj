@@ -51,6 +51,7 @@ export function TransitionScreenModal({
   projectKey,
   issueKey,
   transition,
+  initialValues = {},
   onCancel,
   onSubmit,
 }: {
@@ -58,10 +59,11 @@ export function TransitionScreenModal({
   projectKey: string;
   issueKey: string;
   transition: Transition;
-  onCancel: () => void;
+  initialValues?: Record<string, EditableFieldValue>;
+  onCancel: (values?: Record<string, EditableFieldValue>) => void;
   onSubmit: (fields: Record<string, EditableFieldValue>) => void;
 }) {
-  const [values, setValues] = useState<Record<string, EditableFieldValue>>({});
+  const [values, setValues] = useState<Record<string, EditableFieldValue>>(initialValues);
   const [idx, setIdx] = useState(0);
   const [editing, setEditing] = useState<EditableField | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
@@ -96,7 +98,7 @@ export function TransitionScreenModal({
 
   useInput(
     (input, key) => {
-      if (key.escape) return onCancel();
+      if (key.escape) return onCancel(values);
       if (key.downArrow || input === "j")
         setIdx((i) => clamp(i + 1, 0, Math.max(0, fields.length - 1)));
       else if (key.upArrow || input === "k")
@@ -105,7 +107,7 @@ export function TransitionScreenModal({
         const f = fields[clamp(idx, 0, fields.length - 1)];
         if (!f) return;
         if (f.kind === "unsupported") {
-          setStatusMsg(`${f.name}: ${f.schemaType} isn't editable from the TUI`);
+          setStatusMsg(`${f.name}: complete this required field in the browser`);
           return;
         }
         setStatusMsg(null);
@@ -171,7 +173,7 @@ export function TransitionScreenModal({
             !(Array.isArray(values[f.id]) && (values[f.id] as unknown[]).length === 0);
           const valueStr =
             f.kind === "unsupported"
-              ? `(${f.schemaType} — not editable)`
+              ? `(${f.schemaType} — complete in browser)`
               : displayValue(f, values[f.id]);
           const valueCell = truncate(valueStr, valueWidth).padEnd(valueWidth);
           const color =

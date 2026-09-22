@@ -1,6 +1,6 @@
 import { Box, Text } from "ink";
 
-import { formatPoints, theme } from "../ui";
+import { type EstimateDisplay, formatEstimate, theme } from "../ui";
 
 /**
  * Top-of-screen status line: board name, project, issue count, active
@@ -12,6 +12,7 @@ export function BoardHeader({
   visibleIssueCount,
   totalIssueCount,
   visiblePointSum,
+  estimateDisplay,
   colIndex,
   colCount,
   filterCount,
@@ -24,8 +25,9 @@ export function BoardHeader({
   projectKey: string;
   visibleIssueCount: number;
   totalIssueCount: number;
-  /** Sum of story points across currently-visible issues. Hidden when 0. */
+  /** Sum of configured estimates across currently-visible issues. Hidden when 0. */
   visiblePointSum: number;
+  estimateDisplay: EstimateDisplay;
   colIndex: number;
   colCount: number;
   filterCount: number;
@@ -36,20 +38,20 @@ export function BoardHeader({
   matches: number;
   matchIdx: number;
 }) {
-  const pointText = formatPoints(visiblePointSum);
+  const estimateText = formatEstimate(visiblePointSum, estimateDisplay);
   return (
     <Box paddingX={1} justifyContent="space-between">
       <Box>
         <Text color={theme.accent} bold>
           ▎{boardName}
         </Text>
-        <Text color={theme.muted}> · {projectKey}</Text>
+        {projectKey ? <Text color={theme.muted}> · {projectKey}</Text> : null}
         <Text color={theme.muted}>
           {" "}
           · {visibleIssueCount}
           {filterCount > 0 ? ` / ${totalIssueCount}` : ""} issues
         </Text>
-        {visiblePointSum > 0 ? <Text color={theme.muted}> · {pointText}p</Text> : null}
+        {visiblePointSum > 0 ? <Text color={theme.muted}> · {estimateText}</Text> : null}
         {colCount > 0 ? (
           <Text color={theme.muted}>
             {"  "}

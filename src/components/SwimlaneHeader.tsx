@@ -1,7 +1,7 @@
 import { Box, Text } from "ink";
 
 import type { LaneColumn } from "../swimlanes";
-import { theme, truncate } from "../ui";
+import { type EstimateDisplay, formatEstimate, theme, truncate } from "../ui";
 
 /**
  * Sticky column-header row for the swimlane view — the lane bands below don't
@@ -14,12 +14,14 @@ export function SwimlaneHeader({
   visibleColCount,
   activeCol,
   width,
+  estimateDisplay,
 }: {
   columns: LaneColumn[];
   colWindowStart: number;
   visibleColCount: number;
   activeCol: number;
   width: number;
+  estimateDisplay: EstimateDisplay;
 }) {
   const gap = 1;
   const colWidth = Math.max(
@@ -35,6 +37,8 @@ export function SwimlaneHeader({
         const overWip = col.max !== undefined && col.issues.length > col.max;
         const count =
           col.max !== undefined ? `${col.issues.length}/${col.max}` : String(col.issues.length);
+        const estimate = col.issues.reduce((sum, issue) => sum + (issue.storyPoints ?? 0), 0);
+        const stats = `${estimate > 0 ? `${formatEstimate(estimate, estimateDisplay)} · ` : ""}${count}`;
         return (
           <Box
             key={ci}
@@ -43,10 +47,10 @@ export function SwimlaneHeader({
             justifyContent="space-between"
           >
             <Text color={isActive ? theme.accent : theme.fgDim} bold>
-              {truncate(col.name.toUpperCase(), Math.max(4, colWidth - 6))}
+              {truncate(col.name.toUpperCase(), Math.max(4, colWidth - Bun.stringWidth(stats) - 1))}
             </Text>
             <Text color={overWip ? theme.error : theme.muted} bold={overWip}>
-              {count}
+              {stats}
             </Text>
           </Box>
         );

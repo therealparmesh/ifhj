@@ -1,6 +1,6 @@
 # cut a tag, get binaries. that's it.
 #
-# bun run release   # bumps version, pushes tag, this workflow does the rest
+# ./scripts/release.ts patch   # verifies, bumps, and pushes the tag
 
 name: release
 
@@ -12,7 +12,18 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: Verify tag version
+        run: test "$GITHUB_REF_NAME" = "v$(bun -e 'console.log(require("./package.json").version)')"
+      - run: bun run check
+
   build:
+    needs: verify
     strategy:
       fail-fast: false
       matrix:

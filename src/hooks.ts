@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 function readSize() {
   return {
@@ -28,9 +28,18 @@ export function useDimensions(): { cols: number; rows: number } {
  */
 export function useLoading(): { busy: boolean; track: <T>(p: Promise<T>) => Promise<T> } {
   const [count, setCount] = useState(0);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const track = useCallback(<T>(p: Promise<T>): Promise<T> => {
-    setCount((c) => c + 1);
-    return p.finally(() => setCount((c) => Math.max(0, c - 1)));
+    if (mounted.current) setCount((c) => c + 1);
+    return p.finally(() => {
+      if (mounted.current) setCount((c) => Math.max(0, c - 1));
+    });
   }, []);
   return { busy: count > 0, track };
 }

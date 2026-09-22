@@ -1,3 +1,4 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -7,7 +8,7 @@ import type { JiraUser } from "./jira";
  * Vimscript we inject into Neovim when we open a description or comment.
  *
  * Shape:
- *   - `IfhjMentionSetup(json_path)` reads a JSON array of {id,name} and
+ *   - `IfhjMentionSetup(json_path)` reads JSON mention candidates and
  *     stashes it on the buffer.
  *   - `IfhjMentionComplete(findstart, base)` is the completefunc. Returns
  *     the `@` index on the first call; filtered candidates on the second.
@@ -41,7 +42,7 @@ function! IfhjMentionComplete(findstart, base) abort
   for l:u in l:users
     if empty(l:query) || stridx(tolower(l:u.name), l:query) >= 0
       call add(l:out, {
-            \\ 'word': '[@' . l:u.name . '](jira-mention:' . l:u.id . ')',
+            \\ 'word': '[@' . l:u.markdownName . '](jira-mention:' . l:u.id . ')',
             \\ 'abbr': '@' . l:u.name,
             \\ 'menu': '[mention]',
             \\ })
@@ -74,35 +75,35 @@ type MentionAssets = {
   scriptPath: string;
   /** File containing JSON-encoded users — passed to IfhjMentionSetup. */
   usersPath: string;
-  /** Cleanup both files. Swallows IO errors — they're in /tmp. */
+  /** Cleanup the private asset directory. Swallows temporary-file IO errors. */
   cleanup: () => Promise<void>;
 };
 
 /**
- * Drop a private temp copy of the script + users JSON and return their
- * paths. PID + timestamp in the names so concurrent ifhj sessions don't
- * clobber each other.
+ * Drop a private temp copy of the script and users JSON and return their paths.
  */
 export async function writeMentionAssets(users: JiraUser[]): Promise<MentionAssets> {
-  const base = `ifhj-${process.pid}-${Date.now()}`;
-  const scriptPath = join(tmpdir(), `${base}-mention.vim`);
-  const usersPath = join(tmpdir(), `${base}-users.json`);
-  const payload = users.map((u) => ({ id: u.accountId, name: u.displayName }));
-  await Promise.all([
-    Bun.write(scriptPath, VIMSCRIPT),
-    Bun.write(usersPath, JSON.stringify(payload)),
-  ]);
+  const dir = await mkdtemp(join(tmpdir(), "ifhj-mention-"));
+  const scriptPath = join(dir, "mention.vim");
+  const usersPath = join(dir, "users.json");
+  try {
+    // CommonMark allows a backslash escape for every ASCII punctuation character.
+    const payload = users.map((u) => ({
+      id: u.accountId,
+      name: u.displayName,
+      markdownName: u.displayName.replaceAll(/[!-/:-@[-`{-~]/g, "\\$&"),
+    }));
+    await writeFile(scriptPath, VIMSCRIPT, { mode: 0o600 });
+    await writeFile(usersPath, JSON.stringify(payload), { mode: 0o600 });
+  } catch (error) {
+    await rm(dir, { recursive: true, force: true });
+    throw error;
+  }
   return {
     scriptPath,
     usersPath,
     cleanup: async () => {
-      await Promise.all(
-        [scriptPath, usersPath].map(async (p) => {
-          try {
-            await Bun.file(p).unlink();
-          } catch {}
-        }),
-      );
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
     },
   };
 }
