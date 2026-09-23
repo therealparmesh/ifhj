@@ -20,7 +20,7 @@ Assets are named `ifhj_<version>_<darwin|linux>_<amd64|arm64>.tar.gz`.
 
 ### From source
 
-Needs [bun](https://bun.sh) >= 1.3.
+Needs [bun](https://bun.sh) >= 1.3.5.
 
 ```sh
 git clone https://github.com/therealparmesh/ifhj
@@ -39,6 +39,8 @@ ifhj shells out to an editor for descriptions, comments, and the create form. It
 ```sh
 mise use -g neovim
 ```
+
+If the editor fails after launch, or if ifhj cannot read the saved draft or restore the terminal, ifhj keeps any remaining files in the private edit directory. The error gives the recovery file or directory path. If ifhj cannot inspect those paths, it gives both paths and the inspection error instead of reporting them as missing. If the draft is missing, check the directory for editor backup or swap files. Text from a failed edit is not submitted to Jira. Temporary mention-completion files are removed after every edit. Successful edits and failures before editor launch use best-effort cleanup of the edit directory.
 
 ### Jira API token
 
@@ -226,7 +228,9 @@ Project-specific custom fields from Jira's `editmeta` appear in the side panel. 
 
 ### Markdown
 
-Descriptions and comments round-trip as Markdown. Write Markdown in the editor, it gets converted to Jira's ADF format on save. ADF from Jira gets converted back to Markdown for display.
+New descriptions and comments use normal Markdown and are converted to Jira's ADF format on save. Existing text is prepared from its exact Jira document source. Supported Markdown, code bytes, mentions, and unchanged Jira nodes are preserved.
+
+Some Jira formatting has no safe editable Markdown form. Documents with such content, including multi-block or styled table cells, remain readable but read-only in the terminal. ifhj offers to open that specific issue in Jira instead of flattening or replacing the content.
 
 Detail view loads the newest 100 comments, displayed in chronological order.
 

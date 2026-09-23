@@ -176,6 +176,82 @@ test("notifies a stateful caller only when a field value changes", async () => {
   expect(terminal.output()).not.toContain("Estimate must be positive");
 });
 
+test("buffered navigation edits the same required field as serial navigation", async () => {
+  const transition: Transition = {
+    id: "done",
+    name: "Complete issue",
+    toStatusId: "2",
+    requiredFields: [
+      {
+        id: "first",
+        name: "First field",
+        kind: "text",
+        required: true,
+        hasDefaultValue: false,
+      },
+      {
+        id: "second",
+        name: "Second field",
+        kind: "text",
+        required: true,
+        hasDefaultValue: false,
+      },
+    ],
+  };
+
+  for (const mode of ["packet", "serial"] as const) {
+    const submissions: Record<string, unknown>[] = [];
+    const terminal = createTerminal(80, 24);
+    const app = render(
+      <TransitionScreenModal
+        cfg={{ server: "https://transition-packet.invalid", authHeader: "Basic test" }}
+        projectKey="TEST"
+        issueKey="TEST-1"
+        transition={transition}
+        initialValues={{ first: "alpha", second: "beta" }}
+        onCancel={() => {}}
+        onSubmit={(fields) => submissions.push(fields)}
+      />,
+      {
+        interactive: true,
+        stdin: terminal.stdin as unknown as typeof process.stdin,
+        stdout: terminal.stdout as unknown as typeof process.stdout,
+        stderr: new PassThrough() as unknown as typeof process.stderr,
+        exitOnCtrlC: false,
+        patchConsole: false,
+      },
+    );
+    apps.push(app);
+    await app.waitUntilRenderFlush();
+
+    if (mode === "packet") await sendInput(app, terminal.stdin, "\u001b[B\r");
+    else {
+      await sendInput(app, terminal.stdin, "\u001b[B");
+      await sendInput(app, terminal.stdin, "\r");
+    }
+    terminal.stdout.columns = 81;
+    setDimensions(81, 24);
+    process.stdout.emit("resize");
+    await nextTurn();
+    await app.waitUntilRenderFlush();
+    terminal.clearOutput();
+    terminal.stdout.columns = 80;
+    setDimensions(80, 24);
+    process.stdout.emit("resize");
+    await nextTurn();
+    await app.waitUntilRenderFlush();
+    const editorFrame = Bun.stripANSI(terminal.output());
+    expect(editorFrame).toMatch(/\n│\s+Second field\s+│/);
+    expect(editorFrame).toMatch(/› beta▍/);
+    await sendInput(app, terminal.stdin, "\u0015");
+    await sendInput(app, terminal.stdin, "replacement");
+    await sendInput(app, terminal.stdin, "\r");
+    await sendInput(app, terminal.stdin, "s");
+
+    expect(submissions).toEqual([{ first: "alpha", second: "replacement" }]);
+  }
+});
+
 test("busy transition copy does not advertise disabled actions", async () => {
   const busyTransition: Transition = {
     id: "close",

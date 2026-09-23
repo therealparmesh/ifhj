@@ -177,7 +177,15 @@ describe("Jira config validation", () => {
         delete process.env.JIRA_SERVER;
         process.env.JIRA_LOGIN = "env@example.test";
         const envLogin = await loadConfig();
-        console.log(JSON.stringify([firstFile, secondFile, envServer, envLogin].map((config) => ({
+        delete process.env.JIRA_LOGIN;
+        process.env.JIRA_SERVER = "https://override.example.test";
+        await writeFile(join(first, ".config.yml"), "server: 42\\nlogin: selected@example.test\\n");
+        const ignoredYamlServer = await loadConfig();
+        delete process.env.JIRA_SERVER;
+        process.env.JIRA_LOGIN = "override@example.test";
+        await writeFile(join(first, ".config.yml"), "server: https://selected.example.test\\nlogin: true\\n");
+        const ignoredYamlLogin = await loadConfig();
+        console.log(JSON.stringify([firstFile, secondFile, envServer, envLogin, ignoredYamlServer, ignoredYamlLogin].map((config) => ({
           server: config.server,
           credentials: Buffer.from(config.authHeader.slice(6), "base64").toString(),
         }))));
@@ -189,6 +197,14 @@ describe("Jira config validation", () => {
       { server: "https://second.example.test", credentials: "second@example.test:token" },
       { server: "https://env.example.test", credentials: "first@example.test:token" },
       { server: "https://first.example.test", credentials: "env@example.test:token" },
+      {
+        server: "https://override.example.test",
+        credentials: "selected@example.test:token",
+      },
+      {
+        server: "https://selected.example.test",
+        credentials: "override@example.test:token",
+      },
     ]);
   });
 

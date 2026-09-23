@@ -56,6 +56,7 @@ describe("renderDetailLines", () => {
         author: "Commenter",
         authorAccountId: "user-1",
         body: "Comment body",
+        sourceAdf: "Comment body",
         created: "2026-01-02T00:00:00.000Z",
       },
     ];

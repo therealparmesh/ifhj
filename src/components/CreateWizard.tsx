@@ -1,5 +1,5 @@
 import { Box, Text } from "ink";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { JiraConfig } from "../config";
 import { editInNeovim } from "../editor";
@@ -11,6 +11,7 @@ import {
   type IssueType,
   type EditableField,
   type EditableFieldValue,
+  CreateIssueResultUnknownError,
   createIssue,
   createIssueLink,
   getCreateFields,
@@ -19,6 +20,7 @@ import {
 import { errorMessage, fg, theme, truncate } from "../ui";
 import type { MentionUsersResult } from "./boardUsers";
 import { waitForMentionWarningDisplay } from "./boardUsers";
+import { CreateResultUnknown } from "./CreateResultUnknown";
 import { ErrorMessage } from "./ErrorMessage";
 import { FilterPicker } from "./FilterPicker";
 import { Hint } from "./Hint";
@@ -64,6 +66,7 @@ type Mode =
   | "pick-link"
   | "pick-target"
   | "required-fields"
+  | "accepted-unknown"
   | "submitting";
 
 const FIELD_LABELS: Record<FieldId, string> = {
@@ -152,6 +155,12 @@ export function CreateWizard({
   }));
   const [mode, setMode] = useState<Mode>("browse");
   const [focused, setFocused] = useState<FieldId>("title");
+  const focusedRef = useRef<FieldId>(focused);
+  focusedRef.current = focused;
+  const setCurrentFocus = useCallback((next: FieldId) => {
+    focusedRef.current = next;
+    setFocused(next);
+  }, []);
   const [createFields, setCreateFields] = useState<EditableField[] | null>(null);
   const [metadataError, setMetadataError] = useState<string | null>(null);
   const [metadataAttempt, setMetadataAttempt] = useState(0);
@@ -310,8 +319,8 @@ export function CreateWizard({
    * Re-anchor focus so we're not pointing at a gone row.
    */
   useEffect(() => {
-    if (!fields.includes(focused)) setFocused("submit");
-  }, [fields, focused]);
+    if (!fields.includes(focusedRef.current)) setCurrentFocus("submit");
+  }, [fields, setCurrentFocus]);
 
   /**
    * Each mode transition fires its side-effect (Neovim or network) exactly
@@ -396,6 +405,11 @@ export function CreateWizard({
           );
         } catch (e) {
           if (cancelled.current) return;
+          if (e instanceof CreateIssueResultUnknownError) {
+            setStatusError(null);
+            setMode("accepted-unknown");
+            return;
+          }
           const message = errorMessage(e);
           setStatusError(message);
           onErrorRef.current(message);
@@ -433,27 +447,28 @@ export function CreateWizard({
       if (key.escape) return cancelWizard();
       if (input === "s") return requestSubmit();
       if (key.upArrow || input === "k") {
-        const i = fields.indexOf(focused);
-        if (i > 0) setFocused(fields[i - 1]!);
+        const i = fields.indexOf(focusedRef.current);
+        if (i > 0) setCurrentFocus(fields[i - 1]!);
         return;
       }
       if (key.downArrow || input === "j") {
-        const i = fields.indexOf(focused);
-        if (i < fields.length - 1) setFocused(fields[i + 1]!);
+        const i = fields.indexOf(focusedRef.current);
+        if (i < fields.length - 1) setCurrentFocus(fields[i + 1]!);
         return;
       }
       if (key.return) {
-        if (focused === "title") setMode("nvim-title");
-        else if (focused === "description") setMode("nvim-desc");
-        else if (focused === "type") setMode("pick-type");
-        else if (focused === "link") setMode("pick-link");
-        else if (focused === "target") {
+        const current = focusedRef.current;
+        if (current === "title") setMode("nvim-title");
+        else if (current === "description") setMode("nvim-desc");
+        else if (current === "type") setMode("pick-type");
+        else if (current === "link") setMode("pick-link");
+        else if (current === "target") {
           if (defaultParent) return;
           searchSeq.current++;
           setSearchResults([]);
           setSearchLoading(true);
           setMode("pick-target");
-        } else if (focused === "submit") requestSubmit();
+        } else if (current === "submit") requestSubmit();
       }
     },
     { isActive: mode === "browse" && !abandoned },
@@ -464,6 +479,17 @@ export function CreateWizard({
     return <NvimBanner warning={editorWarning ?? undefined} />;
 
   if (mode === "submitting") return <SubmittingBanner onEscape={cancelWizard} />;
+
+  if (mode === "accepted-unknown") {
+    return (
+      <CreateResultUnknown
+        server={cfg.server}
+        projectKey={projectKey}
+        title={form.title}
+        onClose={cancelWizard}
+      />
+    );
+  }
 
   if (mode === "required-fields" && form.type) {
     return (

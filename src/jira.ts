@@ -1,4 +1,11 @@
-import { adfToText, textToAdf } from "./adf";
+import {
+  type AdfEditContext,
+  type PreparedAdfEdit,
+  adfToText,
+  editedTextToAdf,
+  prepareAdfEdit,
+  textToAdf,
+} from "./adf";
 import type { JiraConfig } from "./config";
 import { type CustomField, normalizeCustomField } from "./customFields";
 export type { CustomField } from "./customFields";
@@ -268,8 +275,59 @@ export type Comment = {
   author: string;
   authorAccountId: string;
   body: string;
+  sourceAdf: unknown;
   created: string;
 };
+
+const BOUND_CONTEXT_SECRET = {};
+
+export class BoundAdfEditContext {
+  readonly #edit: AdfEditContext;
+  readonly #server: string;
+  readonly #authHeader: string;
+  readonly #issueKey: string;
+  readonly #commentId: string | undefined;
+
+  constructor(
+    secret: object,
+    edit: AdfEditContext,
+    cfg: JiraConfig,
+    issueKey: string,
+    commentId?: string,
+  ) {
+    if (secret !== BOUND_CONTEXT_SECRET) {
+      throw new Error("Bound ADF edit contexts can only be prepared by ifhj");
+    }
+    this.#edit = edit;
+    this.#server = cfg.server;
+    this.#authHeader = cfg.authHeader;
+    this.#issueKey = issueKey;
+    this.#commentId = commentId;
+    Object.freeze(this);
+  }
+
+  convert(cfg: JiraConfig, issueKey: string, text: string, commentId?: string): any {
+    if (
+      this.#server !== cfg.server ||
+      this.#authHeader !== cfg.authHeader ||
+      this.#issueKey !== issueKey ||
+      this.#commentId !== commentId
+    ) {
+      throw new Error("ADF edit context does not match this Jira target; nothing was saved");
+    }
+    return editedTextToAdf(text, this.#edit);
+  }
+}
+
+type BoundPreparedAdfEdit = {
+  readonly text: string;
+  readonly context: BoundAdfEditContext;
+};
+
+/** Jira accepted create, but its response did not identify the new issue. */
+export class CreateIssueResultUnknownError extends Error {
+  override name = "CreateIssueResultUnknownError";
+}
 
 type IssueLink = {
   direction: string;
@@ -353,13 +411,19 @@ function normalizeHtml(value: string): string {
   );
 }
 
-async function throwJiraError(operation: string, res: Response): Promise<never> {
+async function throwJiraError(
+  operation: string,
+  res: Response,
+  signal?: AbortSignal | null,
+): Promise<never> {
   let raw: string;
   try {
     raw = await res.text();
-  } catch {
+  } catch (error) {
+    if (isAbortError(error, signal)) throw error;
     throw new Error(
       `${operation} failed (${res.status}): Jira returned an unreadable error response; retry the operation`,
+      { cause: error },
     );
   }
   const reasons: string[] = [];
@@ -416,22 +480,57 @@ async function jrequest(
   operation: string,
   init: RequestInit = {},
 ): Promise<Response> {
-  const res = await fetch(`${cfg.server}${path}`, {
-    ...init,
-    ...(init.signal || cfg.signal ? { signal: init.signal ?? cfg.signal } : {}),
-    headers: {
-      Authorization: cfg.authHeader,
-      Accept: "application/json",
-      "Content-Type": "application/json",
-    },
-  });
-  if (!res.ok) await throwJiraError(operation, res);
+  const signal = init.signal ?? cfg.signal;
+  let res: Response;
+  try {
+    res = await fetch(`${cfg.server}${path}`, {
+      ...init,
+      ...(signal ? { signal } : {}),
+      headers: {
+        Authorization: cfg.authHeader,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+    });
+  } catch (error) {
+    if (isAbortError(error, signal)) throw error;
+    const reason =
+      (error instanceof Error ? error.message : String(error)).trim() ||
+      "Jira request failed before a response was received";
+    throw new Error(`${operation} failed before Jira returned a response: ${reason}`, {
+      cause: error,
+    });
+  }
+  if (!res.ok) await throwJiraError(operation, res, signal);
   return res;
 }
 
 async function jget(cfg: JiraConfig, path: string, operation: string): Promise<any> {
   const res = await jrequest(cfg, path, operation);
-  return res.json();
+  return readJson(res, operation, cfg.signal);
+}
+
+function isAbortError(error: unknown, signal: AbortSignal | null | undefined): boolean {
+  return (
+    (signal?.aborted && (signal.reason === undefined || error === signal.reason)) ||
+    (error instanceof Error && error.name === "AbortError")
+  );
+}
+
+async function readJson(
+  res: Response,
+  operation: string,
+  signal?: AbortSignal | null,
+): Promise<any> {
+  try {
+    return await res.json();
+  } catch (error) {
+    if (isAbortError(error, signal)) throw error;
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`${operation} failed: Jira returned an unreadable JSON response: ${reason}`, {
+      cause: error,
+    });
+  }
 }
 
 function nextPageStart(
@@ -718,6 +817,7 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
       author: c.author?.displayName ?? "unknown",
       authorAccountId: c.author?.accountId ?? "",
       body: typeof c.body === "string" ? c.body : adfToText(c.body).trim(),
+      sourceAdf: c.body,
       created: c.created,
     }))
     .toReversed();
@@ -944,14 +1044,42 @@ export async function updateSummary(
   });
 }
 
+export function prepareDescriptionEdit(
+  cfg: JiraConfig,
+  issueKey: string,
+  sourceAdf: unknown,
+): BoundPreparedAdfEdit {
+  if (sourceAdf === undefined) {
+    throw new Error("Description source is unavailable; nothing was saved");
+  }
+  return bindAdfEdit(cfg, issueKey, prepareAdfEdit(sourceAdf));
+}
+
+export async function getDescriptionEdit(
+  cfg: JiraConfig,
+  issueKey: string,
+): Promise<BoundPreparedAdfEdit> {
+  const data = await jget(
+    cfg,
+    `/rest/api/3/issue/${issueKey}?fields=description`,
+    "Load description for editing",
+  );
+  if (!data?.fields || typeof data.fields !== "object" || !("description" in data.fields)) {
+    throw new Error("Load description for editing failed: Jira returned no description field");
+  }
+  return prepareDescriptionEdit(cfg, issueKey, data.fields.description);
+}
+
 export async function updateDescription(
   cfg: JiraConfig,
   issueKey: string,
   description: string,
+  context: BoundAdfEditContext,
 ): Promise<void> {
+  const body = convertBoundAdfEdit(cfg, issueKey, description, context);
   await jrequest(cfg, `/rest/api/3/issue/${issueKey}`, "Save description", {
     method: "PUT",
-    body: JSON.stringify({ fields: { description: textToAdf(description) } }),
+    body: JSON.stringify({ fields: { description: body } }),
   });
 }
 
@@ -1136,11 +1264,56 @@ export async function updateComment(
   issueKey: string,
   commentId: string,
   body: string,
+  context: BoundAdfEditContext,
 ): Promise<void> {
+  const converted = convertBoundAdfEdit(cfg, issueKey, body, context, commentId);
   await jrequest(cfg, `/rest/api/3/issue/${issueKey}/comment/${commentId}`, "Save comment", {
     method: "PUT",
-    body: JSON.stringify({ body: textToAdf(body) }),
+    body: JSON.stringify({ body: converted }),
   });
+}
+
+export function prepareCommentEdit(
+  cfg: JiraConfig,
+  issueKey: string,
+  commentId: string,
+  sourceAdf: unknown,
+): BoundPreparedAdfEdit {
+  if (sourceAdf === undefined) {
+    throw new Error("Comment source is unavailable; nothing was saved");
+  }
+  return bindAdfEdit(cfg, issueKey, prepareAdfEdit(sourceAdf), commentId);
+}
+
+function bindAdfEdit(
+  cfg: JiraConfig,
+  issueKey: string,
+  prepared: PreparedAdfEdit,
+  commentId?: string,
+): BoundPreparedAdfEdit {
+  return {
+    text: prepared.text,
+    context: new BoundAdfEditContext(
+      BOUND_CONTEXT_SECRET,
+      prepared.context,
+      cfg,
+      issueKey,
+      commentId,
+    ),
+  };
+}
+
+function convertBoundAdfEdit(
+  cfg: JiraConfig,
+  issueKey: string,
+  text: string,
+  context: BoundAdfEditContext,
+  commentId?: string,
+): any {
+  if (!(context instanceof BoundAdfEditContext)) {
+    throw new Error("ADF edit context does not match this Jira target; nothing was saved");
+  }
+  return context.convert(cfg, issueKey, text, commentId);
 }
 
 export async function fetchCurrentUser(
@@ -1189,7 +1362,7 @@ export async function searchByJql(
       method: "POST",
       body: JSON.stringify(body),
     });
-    const data = (await res.json()) as any;
+    const data = await readJson(res, "Search issues", cfg.signal);
     const issues: any[] = Array.isArray(data.issues) ? data.issues : [];
     for (const i of issues) {
       if (seenKeys.has(i.key)) continue;
@@ -1224,10 +1397,38 @@ export async function rankIssue(
     "before" in target
       ? { issues: [issueKey], rankBeforeIssue: target.before }
       : { issues: [issueKey], rankAfterIssue: target.after };
-  await jrequest(cfg, `/rest/agile/1.0/issue/rank`, "Rank issue", {
+  const res = await jrequest(cfg, `/rest/agile/1.0/issue/rank`, "Rank issue", {
     method: "PUT",
     body: JSON.stringify(body),
   });
+  if (res.status === 204) return;
+  if (res.status !== 207) {
+    throw new Error(`Rank issue failed: Jira returned unexpected status ${res.status}`);
+  }
+  const data = await readJson(res, "Rank issue", cfg.signal);
+  const entries: any[] = Array.isArray(data?.entries) ? data.entries : [];
+  const entry = entries.find(
+    (candidate) =>
+      String(candidate?.issueKey ?? "") === issueKey ||
+      String(candidate?.issueId ?? "") === issueKey,
+  );
+  const errors = entry?.errors;
+  const reasons = Array.isArray(errors)
+    ? errors
+    : errors && typeof errors === "object"
+      ? Object.values(errors)
+      : [];
+  const detail =
+    Number(entry?.status) >= 400
+      ? reasons
+          .filter((reason): reason is string => typeof reason === "string")
+          .map(normalizeText)
+          .filter(Boolean)
+          .join("; ")
+      : "";
+  throw new Error(
+    `Rank issue failed (207) for ${issueKey}: ${detail || "Jira could not confirm whether the requested issue was ranked"}`,
+  );
 }
 
 export async function assignIssueToMe(cfg: JiraConfig, issueKey: string): Promise<void> {
@@ -1266,5 +1467,20 @@ export async function createIssue(
     method: "POST",
     body: JSON.stringify({ fields }),
   });
-  return (await res.json()) as { key: string };
+  try {
+    const data: unknown = await res.json();
+    const key =
+      data && typeof data === "object" && !Array.isArray(data)
+        ? (data as Record<string, unknown>)["key"]
+        : undefined;
+    if (typeof key !== "string" || !/^[A-Za-z][A-Za-z0-9_]*-\d+$/.test(key)) {
+      throw new Error("response has no valid issue key");
+    }
+    return { key };
+  } catch (error) {
+    throw new CreateIssueResultUnknownError(
+      "Create issue was accepted by Jira, but the new issue key could not be read. Do not retry because the issue may already exist.",
+      { cause: error },
+    );
+  }
 }

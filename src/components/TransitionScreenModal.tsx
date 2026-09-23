@@ -5,6 +5,7 @@ import type { JiraConfig } from "../config";
 import { useDimensions } from "../hooks";
 import { useInput } from "../input";
 import type { EditableField, EditableFieldValue, Transition } from "../jira";
+import { useSelectionIndex } from "../selection";
 import { clamp, fg, stickyScroll, theme, truncate } from "../ui";
 import { ErrorMessage } from "./ErrorMessage";
 import { FieldEditor } from "./FieldEditor";
@@ -78,7 +79,7 @@ export function TransitionScreenModal({
 }) {
   const { cols: termCols, rows: termRows } = useDimensions();
   const [values, setValues] = useState<Record<string, EditableFieldValue>>(initialValues);
-  const [idx, setIdx] = useState(0);
+  const [idx, setIdx, getIdx] = useSelectionIndex();
   const scrollRef = useRef(0);
   const [editing, setEditing] = useState<EditableField | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
@@ -126,7 +127,7 @@ export function TransitionScreenModal({
       else if (key.upArrow || input === "k")
         setIdx((i) => clamp(i - 1, 0, Math.max(0, fields.length - 1)));
       else if (key.return) {
-        const f = fields[clamp(idx, 0, fields.length - 1)];
+        const f = fields[clamp(getIdx(), 0, fields.length - 1)];
         if (!f) return;
         if (f.kind === "unsupported") {
           setStatusMsg(

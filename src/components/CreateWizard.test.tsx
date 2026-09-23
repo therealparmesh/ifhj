@@ -6,6 +6,7 @@ import { render } from "ink";
 import * as editor from "../editor";
 import type { IssueSearchResult, IssueType } from "../jira";
 import { createTerminal, deferred, nextTurn, sendInput, waitFor } from "../test/utils";
+import * as ui from "../ui";
 import { CreateWizard } from "./CreateWizard";
 
 type RenderResult = ReturnType<typeof render>;
@@ -15,10 +16,13 @@ const apps: RenderResult[] = [];
 const inputApps = new WeakMap<PassThrough, RenderResult>();
 const inputReady = new WeakMap<PassThrough, Promise<void>>();
 let restoreEditor: (() => void) | null = null;
+let restoreBrowser: (() => void) | null = null;
 
 afterEach(() => {
   restoreEditor?.();
   restoreEditor = null;
+  restoreBrowser?.();
+  restoreBrowser = null;
   globalThis.fetch = originalFetch;
   for (const app of apps.splice(0)) app.unmount();
 });
@@ -28,6 +32,29 @@ async function send(stdin: PassThrough, input: string) {
   if (!app) throw new Error("input is not attached to a rendered wizard");
   await inputReady.get(stdin);
   await sendInput(app, stdin, input);
+}
+
+async function freshFrame(
+  stdin: PassThrough,
+  stdout: ReturnType<typeof createTerminal>["stdout"],
+  output: () => string,
+  clearOutput: () => void,
+): Promise<string> {
+  const app = inputApps.get(stdin);
+  if (!app) throw new Error("input is not attached to a rendered wizard");
+  const columns = stdout.columns;
+  Object.defineProperty(process.stdout, "columns", { configurable: true, value: columns + 1 });
+  stdout.columns = columns + 1;
+  process.stdout.emit("resize");
+  await nextTurn();
+  await app.waitUntilRenderFlush();
+  clearOutput();
+  Object.defineProperty(process.stdout, "columns", { configurable: true, value: columns });
+  stdout.columns = columns;
+  process.stdout.emit("resize");
+  await nextTurn();
+  await app.waitUntilRenderFlush();
+  return Bun.stripANSI(output());
 }
 
 const cfg = { server: "https://create-wizard.invalid", authHeader: "Basic test" };
@@ -77,7 +104,7 @@ function mount(
   apps.push(app);
   inputApps.set(stdin, app);
   inputReady.set(stdin, ready);
-  return { stdin, output, clearOutput };
+  return { stdin, stdout, output, clearOutput };
 }
 
 async function openTargetPicker(stdin: PassThrough) {
@@ -405,7 +432,7 @@ test("preserves entered fields and allows retry after a create API error", async
       creates++;
       summaries.push(JSON.parse(String(init?.body)).fields.summary);
       return creates === 1
-        ? new Response("temporary", { status: 503 })
+        ? new Response("correctable validation failure", { status: 400 })
         : Response.json({ key: "PROJ-13" }, { status: 201 });
     }
     throw new Error(`unexpected request: ${url}`);
@@ -427,6 +454,151 @@ test("preserves entered fields and allows retry after a create API error", async
 
   expect(summaries).toEqual(["Retry title", "Retry title"]);
   expect(completed).toEqual([{ key: "PROJ-13", title: "Retry title" }]);
+});
+
+test("buffered create navigation opens the same Issue type picker as serial input", async () => {
+  const editorMock = spyOn(editor, "editInNeovim").mockResolvedValue("must not open");
+  restoreEditor = () => editorMock.mockRestore();
+  globalThis.fetch = (async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.includes("/createmeta/PROJ/issuetypes/1")) {
+      return Response.json({
+        fields: [
+          { fieldId: "summary", name: "Summary", required: true, schema: { type: "string" } },
+        ],
+      });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+
+  for (const mode of ["packet", "serial"] as const) {
+    const { stdin, output } = mount({}, { initialType: types[0]! });
+    await waitFor(() => output().includes("Relationship"), `${mode} create form`);
+    if (mode === "packet") await send(stdin, "\u001b[B\u001b[B\r");
+    else {
+      await send(stdin, "\u001b[B");
+      await send(stdin, "\u001b[B");
+      await send(stdin, "\r");
+    }
+    await waitFor(() => output().includes("Task (active)"), `${mode} issue type picker`);
+  }
+
+  expect(editorMock).toHaveBeenCalledTimes(0);
+});
+
+test("buffered relationship changes keep Target focus and activation current", async () => {
+  const editorMock = spyOn(editor, "editInNeovim").mockResolvedValue("must not open");
+  restoreEditor = () => editorMock.mockRestore();
+  globalThis.fetch = (async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.includes("/createmeta/PROJ/issuetypes/1")) {
+      return Response.json({
+        fields: [
+          { fieldId: "summary", name: "Summary", required: true, schema: { type: "string" } },
+        ],
+      });
+    }
+    if (url.pathname === "/rest/api/3/search/jql") {
+      return Response.json({ issues: [], isLast: true });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  const { stdin, stdout, output, clearOutput } = mount({}, { initialType: types[0]! });
+  await waitFor(() => output().includes("Relationship"), "create form");
+
+  await send(stdin, "\u001b[B\u001b[B\u001b[B\r");
+  await waitFor(() => output().includes("create standalone"), "relationship picker");
+  await send(stdin, "\u001b[B\r");
+  await waitFor(() => output().includes("Target"), "target row added");
+  const added = await freshFrame(stdin, stdout, output, clearOutput);
+  expect(added).toMatch(/Relationship\s+blocks/);
+  expect(added).toContain("Target");
+
+  await send(stdin, "\r");
+  await waitFor(() => output().includes("create standalone"), "reopened relationship picker");
+  await send(stdin, "\u001b[A\r");
+  const removed = await freshFrame(stdin, stdout, output, clearOutput);
+  expect(removed).toMatch(/Relationship\s+\(no relationship\)/);
+  expect(removed).not.toMatch(/^.*Target/m);
+
+  await send(stdin, "\r");
+  await send(stdin, "\u001b[B\r");
+  await waitFor(() => output().includes("Target"), "target row restored");
+  await send(stdin, "\u001b[B\r");
+  await waitFor(() => output().includes("blocks which issue?"), "target picker activated");
+  const targetPicker = await freshFrame(stdin, stdout, output, clearOutput);
+  expect(targetPicker).toContain("blocks which issue?");
+  expect(editorMock).toHaveBeenCalledTimes(0);
+});
+
+test("accepted create with an unknown key cannot retry and offers safe project review", async () => {
+  const editorMock = spyOn(editor, "editInNeovim").mockResolvedValue("Accepted title\n");
+  restoreEditor = () => editorMock.mockRestore();
+  const browserMock = spyOn(ui, "openInBrowser").mockResolvedValue();
+  restoreBrowser = () => browserMock.mockRestore();
+  let creates = 0;
+  let links = 0;
+  let cancels = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname.includes("/createmeta/PROJ/issuetypes/1")) {
+      return Response.json({
+        fields: [
+          { fieldId: "summary", name: "Summary", required: true, schema: { type: "string" } },
+        ],
+      });
+    }
+    if (url.pathname === "/rest/api/3/issue") {
+      creates++;
+      return Response.json({}, { status: 201 });
+    }
+    if (url.pathname === "/rest/api/3/search/jql") {
+      return Response.json({
+        isLast: true,
+        issues: [
+          {
+            key: "PROJ-2",
+            fields: {
+              summary: "Relationship target",
+              project: { key: "PROJ" },
+              issuetype: { id: "1", name: "Task", subtask: false },
+            },
+          },
+        ],
+      });
+    }
+    if (url.pathname === "/rest/api/3/issueLink" && init?.method === "POST") {
+      links++;
+      return new Response(null, { status: 201 });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  const { stdin, output } = mount({ onCancel: () => cancels++ }, { initialType: types[0]! });
+
+  await waitFor(() => output().includes("Relationship"), "create form");
+  await send(stdin, "\r");
+  await waitFor(() => output().includes("Accepted title"), "retained title");
+  await send(stdin, "\u001b[B");
+  await send(stdin, "\u001b[B");
+  await send(stdin, "\u001b[B\r");
+  await send(stdin, "\u001b[B\r");
+  await send(stdin, "\u001b[B\r");
+  await waitFor(() => output().includes("PROJ-2"), "relationship target");
+  await send(stdin, "\r");
+  await send(stdin, "s");
+  await waitFor(() => output().includes("issue key is unavailable"), "accepted unknown result");
+  expect(output()).toContain("Project · PROJ");
+  expect(output()).toContain("Title · Accepted title");
+  await send(stdin, "s\r");
+  expect(creates).toBe(1);
+  expect(links).toBe(0);
+  await send(stdin, "o");
+  await waitFor(() => browserMock.mock.calls.length === 1, "project review browser");
+  expect(browserMock).toHaveBeenCalledWith(
+    "https://create-wizard.invalid/issues/?jql=project%20%3D%20%22PROJ%22%20ORDER%20BY%20created%20DESC",
+  );
+  await send(stdin, "\u001b");
+  expect(cancels).toBe(1);
 });
 
 test("reopens and corrects rejected required values without losing other fields", async () => {

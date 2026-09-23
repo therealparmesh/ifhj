@@ -9,6 +9,7 @@ import {
   useState,
 } from "react";
 
+import { UnsupportedAdfEditError } from "../adf";
 import {
   type RecentIssue,
   readBoardCache,
@@ -21,6 +22,7 @@ import { editInNeovim, editorLabel } from "../editor";
 import { useDimensions, useLoading } from "../hooks";
 import { InputScope, useInput } from "../input";
 import {
+  type BoundAdfEditContext,
   type BoardConfig,
   type BoardSwimlanes,
   type EditableField,
@@ -30,12 +32,14 @@ import {
   type IssueType,
   type Transition,
   type EditableFieldValue,
+  CreateIssueResultUnknownError,
   assignIssueToMe,
   createIssue,
   getAssignableUsers,
   getBoardConfig,
   getBoardSwimlanes,
   getCreateFields,
+  getDescriptionEdit,
   rankIssue,
   getBoardIssues,
   getIssueLinkTypes,
@@ -71,6 +75,7 @@ import {
 import { clamp, copyToClipboard, errorMessage, openInBrowser, stickyScroll, theme } from "../ui";
 import { BoardHeader } from "./BoardHeader";
 import { createBoardUsersLoader, waitForMentionWarningDisplay } from "./boardUsers";
+import { CreateResultUnknown } from "./CreateResultUnknown";
 import { CreateWizard } from "./CreateWizard";
 import { ErrorMessage } from "./ErrorMessage";
 import { FilterPicker } from "./FilterPicker";
@@ -93,6 +98,7 @@ import { Timeline } from "./Timeline";
 import { TitleEditModal } from "./TitleEditModal";
 import { ToastStack, toastRowCount, useToasts } from "./Toasts";
 import { TransitionScreenModal } from "./TransitionScreenModal";
+import { UnsupportedAdfEdit } from "./UnsupportedAdfEdit";
 
 type Board = { id: number; name: string };
 
@@ -120,6 +126,11 @@ type TransitionPickerReturn = {
   returnTo: DetailReturn;
   focusGeneration: number;
   drafts?: Record<string, Record<string, EditableFieldValue>> | undefined;
+};
+type DescriptionDraft = {
+  text: string;
+  original: string;
+  context: BoundAdfEditContext;
 };
 type Modal =
   | { kind: "none" }
@@ -163,6 +174,7 @@ type Modal =
       busy?: boolean | undefined;
       error?: string | undefined;
     }
+  | { kind: "create-unknown"; projectKey: string; title: string }
   | { kind: "detail"; issueKey: string }
   | {
       kind: "title-edit";
@@ -175,10 +187,11 @@ type Modal =
   | {
       kind: "description-save";
       issue: Issue;
-      draft: string;
+      draft: DescriptionDraft;
       busy: boolean;
       error?: string | undefined;
     }
+  | { kind: "unsupported-adf"; issueKey: string; message: string }
   | { kind: "nvim"; warning?: string | undefined }
   | { kind: "quick-open" }
   | { kind: "jql" };
@@ -424,7 +437,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   modalRef.current = modal;
   const modalLaunchSeq = useRef(0);
   const modalSubmitPending = useRef(false);
-  const descriptionDrafts = useRef(new Map<string, string>());
+  const descriptionDrafts = useRef(new Map<string, DescriptionDraft>());
   const descriptionWrites = useRef(new Set<string>());
   const [searchBuffer, setSearchBuffer] = useState("");
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
@@ -492,7 +505,22 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   // spinner and reject further actions until the write settles, so the user
   // can't stack conflicting moves or act on a card that's mid-flight.
   const [busyKeys, setBusyKeys] = useState<ReadonlySet<string>>(new Set());
-  const markBusy = useCallback((key: string, on: boolean) => {
+  type PendingReason = "lookup" | "write" | "move";
+  const pendingReasons = useRef(new Map<string, Map<PendingReason, symbol | true>>());
+  const setPendingReason = useCallback(
+    (key: string, reason: PendingReason, value: symbol | true | null) => {
+      const reasons = pendingReasons.current.get(key);
+      if (value !== null) {
+        if (reasons) reasons.set(reason, value);
+        else pendingReasons.current.set(key, new Map([[reason, value]]));
+        return;
+      }
+      reasons?.delete(reason);
+      if (reasons?.size === 0) pendingReasons.current.delete(key);
+    },
+    [],
+  );
+  const setBusyVisible = useCallback((key: string, on: boolean) => {
     setBusyKeys((prev) => {
       if (on === prev.has(key)) return prev;
       const next = new Set(prev);
@@ -501,6 +529,32 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       return next;
     });
   }, []);
+  const acquireBusy = useCallback(
+    (key: string, reason: "lookup" | "write"): symbol => {
+      const token = Symbol(key);
+      setPendingReason(key, reason, token);
+      setBusyVisible(key, true);
+      return token;
+    },
+    [setPendingReason, setBusyVisible],
+  );
+  const releaseBusy = useCallback(
+    (key: string, reason: "lookup" | "write", token: symbol) => {
+      const current = pendingReasons.current.get(key)?.get(reason);
+      if (current !== token) return;
+      setPendingReason(key, reason, null);
+      const remaining = pendingReasons.current.get(key);
+      setBusyVisible(key, Boolean(remaining?.has("lookup") || remaining?.has("write")));
+    },
+    [setPendingReason, setBusyVisible],
+  );
+  const cancelLookup = useCallback(
+    (key: string) => {
+      const token = pendingReasons.current.get(key)?.get("lookup");
+      if (typeof token === "symbol") releaseBusy(key, "lookup", token);
+    },
+    [releaseBusy],
+  );
 
   // Optimistic move overlay: key → { from, to } status ids. Applied at render
   // time (see `displayIssues`) so a card jumps to its target column the instant
@@ -511,23 +565,31 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   // than the predicted `to`.
   type PendingMove = { from: string; to: string };
   const [pendingMove, setPendingMove] = useState<ReadonlyMap<string, PendingMove>>(new Map());
-  const startPending = useCallback((key: string, from: string, to: string) => {
-    setPendingMove((prev) => {
-      const cur = prev.get(key);
-      if (cur && cur.from === from && cur.to === to) return prev;
-      const next = new Map(prev);
-      next.set(key, { from, to });
-      return next;
-    });
-  }, []);
-  const clearPending = useCallback((key: string) => {
-    setPendingMove((prev) => {
-      if (!prev.has(key)) return prev;
-      const next = new Map(prev);
-      next.delete(key);
-      return next;
-    });
-  }, []);
+  const startPending = useCallback(
+    (key: string, from: string, to: string) => {
+      setPendingReason(key, "move", true);
+      setPendingMove((prev) => {
+        const cur = prev.get(key);
+        if (cur && cur.from === from && cur.to === to) return prev;
+        const next = new Map(prev);
+        next.set(key, { from, to });
+        return next;
+      });
+    },
+    [setPendingReason],
+  );
+  const clearPending = useCallback(
+    (key: string) => {
+      setPendingReason(key, "move", null);
+      setPendingMove((prev) => {
+        if (!prev.has(key)) return prev;
+        const next = new Map(prev);
+        next.delete(key);
+        return next;
+      });
+    },
+    [setPendingReason],
+  );
 
   // A card is "pending" — rendered in the loading style and blocked from
   // further actions — if it has a write in flight (busyKeys: rerank, or a
@@ -542,11 +604,11 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   }, [busyKeys, pendingMove]);
   const rejectPending = useCallback(
     (issue: Issue): boolean => {
-      if (!pendingKeys.has(issue.key)) return false;
+      if (!pendingReasons.current.has(issue.key)) return false;
       flash(`${issue.key} is updating…`, "info");
       return true;
     },
-    [pendingKeys, flash],
+    [flash],
   );
 
   const setActiveColumn = useCallback((col: number) => {
@@ -691,19 +753,19 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   useEffect(() => {
     if (pendingMove.size === 0) return;
     const status = new Map(issues.map((i) => [i.key, i.statusId]));
+    const settled = new Set<string>();
+    for (const [key, pm] of pendingMove) {
+      const real = status.get(key);
+      if (real === undefined || real !== pm.from) settled.add(key);
+    }
+    if (settled.size === 0) return;
+    for (const key of settled) setPendingReason(key, "move", null);
     setPendingMove((prev) => {
-      let next: Map<string, PendingMove> | null = null;
-      for (const [key, pm] of prev) {
-        const real = status.get(key);
-        // Gone from the board, or moved off its origin status → move landed.
-        if (real === undefined || real !== pm.from) {
-          next ??= new Map(prev);
-          next.delete(key);
-        }
-      }
-      return next ?? prev;
+      const next = new Map(prev);
+      for (const key of settled) next.delete(key);
+      return next;
     });
-  }, [issues, pendingMove]);
+  }, [issues, pendingMove, setPendingReason]);
 
   const load = useCallback(async () => {
     if (!activeRef.current) return;
@@ -1171,13 +1233,12 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       );
       const optimistic =
         opts.targetColIdx !== undefined && from !== undefined && from !== transition.toStatusId;
+      const writeToken = acquireBusy(issueKey, "write");
       if (optimistic) {
         // The overlay lives until reconcile confirms the write — not until this
         // callback returns — so the pending style persists correctly even when
         // the reload was coalesced into another move's.
         startPending(issueKey, from, transition.toStatusId);
-      } else {
-        markBusy(issueKey, true);
       }
       // A lookup can finish after the user selects another issue. Keep the
       // write target, but do not move the visual cursor in that case.
@@ -1215,7 +1276,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         else flash(message, "err");
         return false;
       } finally {
-        if (!optimistic) markBusy(issueKey, false);
+        releaseBusy(issueKey, "write", writeToken);
       }
     },
     [
@@ -1224,7 +1285,8 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       issues,
       flash,
       coalescedReload,
-      markBusy,
+      acquireBusy,
+      releaseBusy,
       startPending,
       clearPending,
       touchRecent,
@@ -1257,10 +1319,10 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       // card or racing its focus snap.
       if (rejectPending(issue)) return;
       const focusGeneration = selectionGeneration.current;
-      // markBusy covers the transition-lookup phase, before the optimistic
+      // The busy reservation covers the transition-lookup phase, before the optimistic
       // overlay exists; commitTransition's startPending takes over as the
       // pending signal the moment we POST.
-      markBusy(issue.key, true);
+      const lookupToken = acquireBusy(issue.key, "lookup");
       const targetCol = conf.columns[targetColIdx]!;
       try {
         const trs = await getTransitions(cfg, issue.key);
@@ -1299,10 +1361,20 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         // the pending signal (dropped by reconcile); on the no-candidate,
         // required-fields-screen, or error paths this is the only flag to
         // clear, so the card doesn't stay stuck.
-        markBusy(issue.key, false);
+        releaseBusy(issue.key, "lookup", lookupToken);
       }
     },
-    [currentIssueNow, conf, cfg, flash, commitTransition, markBusy, projectForIssue, rejectPending],
+    [
+      currentIssueNow,
+      conf,
+      cfg,
+      flash,
+      commitTransition,
+      acquireBusy,
+      releaseBusy,
+      projectForIssue,
+      rejectPending,
+    ],
   );
 
   /**
@@ -1394,11 +1466,11 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   }, [conf, usersLoader]);
 
   const saveBoardDescription = useCallback(
-    async (issue: Issue, draft: string) => {
+    async (issue: Issue, draft: DescriptionDraft) => {
       if (descriptionWrites.current.has(issue.key)) return;
       descriptionWrites.current.add(issue.key);
       try {
-        await updateDescription(cfg, issue.key, draft);
+        await updateDescription(cfg, issue.key, draft.text, draft.context);
         descriptionDrafts.current.delete(issue.key);
         if (!activeRef.current) return;
         flash(`${issue.key} description updated.`, "ok");
@@ -1439,6 +1511,23 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       if (!issue) return;
       showModal({ kind: "nvim" });
       const launchSeq = modalLaunchSeq.current;
+      let prepared = descriptionDrafts.current.get(issue.key);
+      if (!prepared) {
+        try {
+          const loaded = await getDescriptionEdit(cfg, issue.key);
+          if (launchSeq !== modalLaunchSeq.current) return;
+          prepared = { text: loaded.text, original: loaded.text, context: loaded.context };
+        } catch (error) {
+          if (launchSeq !== modalLaunchSeq.current) return;
+          if (error instanceof UnsupportedAdfEditError) {
+            showModal({ kind: "unsupported-adf", issueKey: issue.key, message: error.message });
+          } else {
+            closeModal();
+            flash(`Could not load description for editing: ${errorMessage(error)}`, "err");
+          }
+          return;
+        }
+      }
       try {
         const mention = await usersLoader(issue.projectKey || projectForIssue(issue.key));
         if (launchSeq !== modalLaunchSeq.current) return;
@@ -1447,24 +1536,21 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           await waitForMentionWarningDisplay(mention);
           if (launchSeq !== modalLaunchSeq.current) return;
         }
-        const raw = await editInNeovim(
-          descriptionDrafts.current.get(issue.key) ?? issue.description,
-          `${issue.key}-desc.md`,
-          {
-            mentionUsers: mention.users,
-          },
-        );
+        const raw = await editInNeovim(prepared.text, `${issue.key}-desc.md`, {
+          mentionUsers: mention.users,
+        });
         if (launchSeq !== modalLaunchSeq.current) return;
         if (mention.warning) flash(mention.warning, "info");
-        if (raw.trim() === issue.description.trim()) {
+        if (raw === prepared.original) {
           descriptionDrafts.current.delete(issue.key);
           flash("No description change.", "info");
           closeModal();
           return;
         }
-        descriptionDrafts.current.set(issue.key, raw);
-        showModal({ kind: "description-save", issue, draft: raw, busy: true });
-        void saveBoardDescription(issue, raw);
+        const draft = { ...prepared, text: raw };
+        descriptionDrafts.current.set(issue.key, draft);
+        showModal({ kind: "description-save", issue, draft, busy: true });
+        void saveBoardDescription(issue, draft);
       } catch (error) {
         if (launchSeq !== modalLaunchSeq.current) return;
         closeModal();
@@ -1482,6 +1568,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       showModal,
       closeModal,
       saveBoardDescription,
+      cfg,
     ],
   );
 
@@ -1560,7 +1647,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       const neighbor = col.issues[targetRow]!;
       if (rejectPending(issue)) return;
       const focusGeneration = selectionGeneration.current;
-      markBusy(issue.key, true);
+      const busyToken = acquireBusy(issue.key, "write");
       try {
         await rankIssue(
           cfg,
@@ -1578,7 +1665,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       } catch (e) {
         flash(errorMessage(e), "err");
       } finally {
-        markBusy(issue.key, false);
+        releaseBusy(issue.key, "write", busyToken);
       }
     },
     [
@@ -1587,7 +1674,8 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       cfg,
       flash,
       coalescedReload,
-      markBusy,
+      acquireBusy,
+      releaseBusy,
       rejectPending,
       touchRecent,
       queuePendingFocus,
@@ -1763,17 +1851,21 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       try {
         created = await createIssue(cfg, conf.projectKey, type.id, trimmed, "");
       } catch (e) {
+        if (e instanceof CreateIssueResultUnknownError) {
+          showModal({ kind: "create-unknown", projectKey: conf.projectKey, title: trimmed });
+          return;
+        }
         const reason = errorMessage(e);
         setModal((current) =>
           current.kind === "quick-add"
             ? { ...current, busy: false, error: `Could not create issue: ${reason}` }
             : current,
         );
-        modalSubmitPending.current = false;
         return;
+      } finally {
+        modalSubmitPending.current = false;
       }
 
-      modalSubmitPending.current = false;
       closeModal();
       const followupSeq = modalLaunchSeq.current;
 
@@ -2451,7 +2543,10 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
             {...(picker.busy
               ? { busy: true, busyLabel: `Loading transitions for ${targetIssue.key}…` }
               : {})}
-            onCancel={() => restore(picker.returnTo)}
+            onCancel={() => {
+              cancelLookup(targetIssue.key);
+              restore(picker.returnTo);
+            }}
             onPick={(id) => {
               const targetIndex = Number(id);
               const column = conf.columns[targetIndex];
@@ -2518,6 +2613,16 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
 
   // Modal overlays. Each branch is a discrete, full-screen-ish component.
   if (modal.kind === "nvim") return <NvimBanner warning={modal.warning} />;
+  if (modal.kind === "unsupported-adf") {
+    return (
+      <UnsupportedAdfEdit
+        server={cfg.server}
+        issueKey={modal.issueKey}
+        message={modal.message}
+        onClose={closeModal}
+      />
+    );
+  }
   if (modal.kind === "description-save") {
     return (
       <DescriptionSaveModal
@@ -2579,6 +2684,16 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         onChange={(v) => setModal({ ...modal, value: v, error: undefined })}
         onSubmit={(val) => void submitQuickAdd(modal.colIdx, modal.type, val)}
         onCancel={closeModal}
+      />
+    );
+  }
+  if (modal.kind === "create-unknown") {
+    return (
+      <CreateResultUnknown
+        server={cfg.server}
+        projectKey={modal.projectKey}
+        title={modal.title}
+        onClose={closeModal}
       />
     );
   }

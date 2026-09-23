@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 
 import type { JiraConfig } from "./config";
 import {
+  CreateIssueResultUnknownError,
   ISSUE_SEARCH_LIMIT,
   JQL_SEARCH_LIMIT,
   createIssue,
@@ -10,13 +11,19 @@ import {
   getBoardConfig,
   getBoardIssues,
   getCreateFields,
+  getDescriptionEdit,
   getIssueDetail,
+  getIssueStatusId,
   getIssueTypes,
   getTransitions,
   listBoards,
+  prepareCommentEdit,
+  rankIssue,
   searchByJql,
   searchIssues,
   transitionIssue,
+  updateComment,
+  updateDescription,
   updateSummary,
 } from "./jira";
 import { deferred } from "./test/utils";
@@ -915,6 +922,7 @@ describe("Jira issue details", () => {
         author: "Synthetic User",
         authorAccountId: "synthetic-user",
         body: "Synthetic comment",
+        sourceAdf: "Synthetic comment",
         created: "2026-01-03T00:00:00.000Z",
       },
     ]);
@@ -957,7 +965,7 @@ describe("Jira issue details", () => {
     const detail = await getIssueDetail(cfg("detail-empty-editmeta-error"), "PROJ-3");
     expect(detail.summary).toBe("Issue PROJ-3");
     expect(detail.editmetaError).toBe(
-      "Load edit metadata failed: Jira request failed before a response was received",
+      "Load edit metadata failed before Jira returned a response: Jira request failed before a response was received",
     );
   });
 });
@@ -1145,6 +1153,211 @@ describe("Jira API errors", () => {
     await expect(listBoards(cfg("error-stream"))).rejects.toThrow(
       "Load boards failed (503): Jira returned an unreadable error response; retry the operation",
     );
+  });
+
+  test("adds operation context to transport and success JSON failures but preserves aborts", async () => {
+    globalThis.fetch = (async () => {
+      throw new Error("fixture disconnected");
+    }) as unknown as typeof fetch;
+    await expect(updateSummary(cfg("transport-context"), "PROJ-1", "Title")).rejects.toThrow(
+      "Save title failed before Jira returned a response: fixture disconnected",
+    );
+
+    globalThis.fetch = (async () => new Response("{", { status: 200 })) as unknown as typeof fetch;
+    await expect(getIssueStatusId(cfg("read-context"), "PROJ-1")).rejects.toThrow(
+      /Load issue status failed: Jira returned an unreadable JSON response/,
+    );
+    globalThis.fetch = (async () =>
+      new Response(
+        new ReadableStream({
+          start(stream) {
+            stream.error(new Error("fixture stream disconnected"));
+          },
+        }),
+        { status: 200 },
+      )) as unknown as typeof fetch;
+    await expect(getIssueStatusId(cfg("stream-context"), "PROJ-1")).rejects.toThrow(
+      /Load issue status.*fixture stream disconnected/,
+    );
+
+    const controller = new AbortController();
+    const reason = new Error("specific cancellation");
+    controller.abort(reason);
+    globalThis.fetch = (async () => {
+      throw reason;
+    }) as unknown as typeof fetch;
+    await expect(
+      updateSummary({ ...cfg("abort"), signal: controller.signal }, "PROJ-1", "Title"),
+    ).rejects.toBe(reason);
+
+    globalThis.fetch = (async () =>
+      new Response(
+        new ReadableStream({
+          start(stream) {
+            stream.error(reason);
+          },
+        }),
+        { status: 200 },
+      )) as unknown as typeof fetch;
+    await expect(
+      getIssueStatusId({ ...cfg("abort-read"), signal: controller.signal }, "PROJ-1"),
+    ).rejects.toBe(reason);
+
+    globalThis.fetch = (async () =>
+      new Response(
+        new ReadableStream({
+          start(stream) {
+            stream.error(reason);
+          },
+        }),
+        { status: 400 },
+      )) as unknown as typeof fetch;
+    await expect(
+      updateSummary({ ...cfg("abort-error-read"), signal: controller.signal }, "PROJ-1", "Title"),
+    ).rejects.toBe(reason);
+  });
+});
+
+describe("Jira mutation outcomes", () => {
+  test("binds existing ADF to its target and preserves it in description and comment PUTs", async () => {
+    const source = {
+      type: "doc",
+      version: 1,
+      content: [
+        {
+          type: "paragraph",
+          content: [
+            { type: "text", text: "a_b", marks: [{ type: "code" }] },
+            { type: "text", text: " &copy; " },
+            { type: "mention", attrs: { id: "id&one", text: "@A &copy; B" } },
+          ],
+        },
+        { type: "codeBlock", content: [{ type: "text", text: "\tbefore\r\n```\r\nafter" }] },
+      ],
+    };
+    const config = cfg("adf-write");
+    const writes: { path: string; body: any }[] = [];
+    let requests = 0;
+    globalThis.fetch = (async (input, init) => {
+      requests++;
+      const url = new URL(String(input));
+      if (!init?.method) return json({ fields: { description: source } });
+      writes.push({ path: url.pathname, body: JSON.parse(String(init.body)) });
+      return new Response(null, { status: 204 });
+    }) as typeof fetch;
+
+    const description = await getDescriptionEdit(config, "PROJ-1");
+    const edited = `${description.text}\n\nUnrelated edit.`;
+    await updateDescription(config, "PROJ-1", edited, description.context);
+    const comment = prepareCommentEdit(config, "PROJ-1", "7", source);
+    await updateComment(
+      config,
+      "PROJ-1",
+      "7",
+      `${comment.text}\n\nUnrelated edit.`,
+      comment.context,
+    );
+
+    expect(writes.map(({ path }) => path)).toEqual([
+      "/rest/api/3/issue/PROJ-1",
+      "/rest/api/3/issue/PROJ-1/comment/7",
+    ]);
+    expect(writes[0]?.body.fields.description.content.slice(0, 2)).toEqual(source.content);
+    expect(writes[1]?.body.body.content.slice(0, 2)).toEqual(source.content);
+
+    const beforeMismatch = requests;
+    await expect(updateDescription(config, "PROJ-2", edited, description.context)).rejects.toThrow(
+      "does not match this Jira target",
+    );
+    await expect(updateComment(config, "PROJ-1", "8", edited, comment.context)).rejects.toThrow(
+      "does not match this Jira target",
+    );
+    expect(requests).toBe(beforeMismatch);
+  });
+
+  test("accepts only a 204 rank and reports the requested issue from a 207 response", async () => {
+    const bodies: unknown[] = [];
+    let response = new Response(null, { status: 204 });
+    globalThis.fetch = (async (_input, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return response;
+    }) as typeof fetch;
+
+    await rankIssue(cfg("rank"), "PROJ-3", { before: "PROJ-4" });
+    expect(bodies[0]).toEqual({ issues: ["PROJ-3"], rankBeforeIssue: "PROJ-4" });
+
+    response = json(
+      {
+        entries: [
+          { issueKey: "PROJ-1", status: 200 },
+          { issueKey: "PROJ-3", status: 503, errors: ["Rank service unavailable"] },
+        ],
+      },
+      207,
+    );
+    await expect(rankIssue(cfg("rank"), "PROJ-3", { after: "PROJ-4" })).rejects.toThrow(
+      "Rank issue failed (207) for PROJ-3: Rank service unavailable",
+    );
+    expect(bodies[1]).toEqual({ issues: ["PROJ-3"], rankAfterIssue: "PROJ-4" });
+
+    response = json({ entries: [{ issueKey: "OTHER-1", status: 200 }] }, 207);
+    await expect(rankIssue(cfg("rank"), "PROJ-3", { before: "PROJ-4" })).rejects.toThrow(
+      "Jira could not confirm whether the requested issue was ranked",
+    );
+  });
+
+  test("distinguishes an accepted create with no usable result from an HTTP rejection", async () => {
+    const controller = new AbortController();
+    const reason = new Error("accepted body cancelled");
+    controller.abort(reason);
+    const accepted: [Response, JiraConfig?][] = [
+      [json({}, 201)],
+      [json({ key: "bad/key" }, 201)],
+      [new Response("{", { status: 201 })],
+      [
+        new Response(
+          new ReadableStream({
+            start(stream) {
+              stream.error(new Error("body disconnected"));
+            },
+          }),
+          { status: 201 },
+        ),
+      ],
+      [
+        new Response(
+          new ReadableStream({
+            start(stream) {
+              stream.error(reason);
+            },
+          }),
+          { status: 201 },
+        ),
+        { ...cfg("create-accepted-abort"), signal: controller.signal },
+      ],
+    ];
+    for (const [response, config = cfg("create-unknown")] of accepted) {
+      globalThis.fetch = (async () => response) as unknown as typeof fetch;
+      await expect(createIssue(config, "PROJ", "1", "Title", "")).rejects.toBeInstanceOf(
+        CreateIssueResultUnknownError,
+      );
+    }
+
+    globalThis.fetch = (async () => json({ key: "PROJ-42" }, 201)) as unknown as typeof fetch;
+    expect(await createIssue(cfg("create-ok"), "PROJ", "1", "Title", "")).toEqual({
+      key: "PROJ-42",
+    });
+
+    globalThis.fetch = (async () =>
+      json({ errors: { summary: "Summary is required" } }, 400)) as unknown as typeof fetch;
+    let rejection: unknown;
+    try {
+      await createIssue(cfg("create-rejected"), "PROJ", "1", "Title", "");
+    } catch (error) {
+      rejection = error;
+    }
+    expect(rejection).not.toBeInstanceOf(CreateIssueResultUnknownError);
+    expect((rejection as Error).message).toContain("summary: Summary is required");
   });
 });
 

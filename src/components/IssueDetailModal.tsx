@@ -1,6 +1,7 @@
 import { Box, Text } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { UnsupportedAdfEditError } from "../adf";
 import type { JiraConfig } from "../config";
 import { coerceFieldValue } from "../customFields";
 import { editInNeovim, editorLabel } from "../editor";
@@ -8,6 +9,7 @@ import { useDimensions, useLoading } from "../hooks";
 import { useInput } from "../input";
 import { InputScope } from "../input";
 import {
+  type BoundAdfEditContext,
   type Comment,
   type CustomField,
   type EditableField,
@@ -17,6 +19,8 @@ import {
   addComment,
   fetchCurrentUser,
   getIssueDetail,
+  prepareCommentEdit,
+  prepareDescriptionEdit,
   unwatchIssue,
   updateComment,
   updateDescription,
@@ -24,6 +28,7 @@ import {
   updateSummary,
   watchIssue,
 } from "../jira";
+import { useSelectionIndex } from "../selection";
 import {
   bg,
   clamp,
@@ -51,6 +56,7 @@ import { NvimBanner } from "./NvimBanner";
 import { ProgressBar } from "./ProgressBar";
 import { boundedToasts, ToastStack, toastRowCount, useToasts } from "./Toasts";
 import type { Toast } from "./Toasts";
+import { UnsupportedAdfEdit } from "./UnsupportedAdfEdit";
 
 type Pane = "body" | "fields";
 
@@ -124,7 +130,14 @@ type Overlay =
       current?: EditableFieldValue | null;
       error?: string | undefined;
     }
-  | { kind: "pick-comment-action"; comment: Comment };
+  | { kind: "pick-comment-action"; comment: Comment }
+  | { kind: "unsupported-adf"; issueKey: string; message: string };
+
+type ExistingAdfDraft = {
+  text: string;
+  original: string;
+  context: BoundAdfEditContext;
+};
 
 type SaveResult =
   | { status: "saved" }
@@ -178,19 +191,22 @@ export function IssueDetailModal({
   const { busy, track } = useLoading();
 
   const [pane, setPane] = useState<Pane>("body");
+  const paneRef = useRef<Pane>(pane);
+  paneRef.current = pane;
   const [bodyScroll, setBodyScroll] = useState(0);
   // The side pane has exactly one piece of state: the cursor row. Scroll
   // is derived at render time from the cursor + a sticky anchor in a ref,
   // so there's no way for cursor and scroll to disagree on a frame.
-  const [fieldIdx, setFieldIdx] = useState(0);
+  const [fieldIdx, setFieldIdx, getFieldIdx] = useSelectionIndex();
   const fieldScrollRef = useRef(0);
   const [overlay, setOverlay] = useState<Overlay>({ kind: "none" });
   const [saving, setSaving] = useState(false);
   const savePending = useRef(false);
   const saveToken = useRef(0);
-  const descriptionDraft = useRef<string | null>(null);
+  const descriptionDraft = useRef<ExistingAdfDraft | null>(null);
   const newCommentDraft = useRef("");
-  const commentDrafts = useRef(new Map<string, string>());
+  const commentDrafts = useRef(new Map<string, ExistingAdfDraft>());
+  const editorReservation = useRef<symbol | null>(null);
 
   const [myAccountId, setMyAccountId] = useState<string | null>(null);
 
@@ -250,6 +266,7 @@ export function IssueDetailModal({
     setDetail(null);
     setLoadError(null);
     setPane("body");
+    paneRef.current = "body";
     setBodyScroll(0);
     setFieldIdx(0);
     fieldScrollRef.current = 0;
@@ -261,7 +278,7 @@ export function IssueDetailModal({
     descriptionDraft.current = null;
     newCommentDraft.current = "";
     commentDrafts.current.clear();
-  }, [lifetime]);
+  }, [lifetime, setFieldIdx]);
 
   useEffect(() => {
     void fetchDetail();
@@ -380,7 +397,10 @@ export function IssueDetailModal({
     ],
     [detail],
   );
-  const currentRow = fieldRows[clamp(fieldIdx, 0, fieldRows.length - 1)]!;
+  const selectedFieldRow = useCallback(
+    () => fieldRows[clamp(getFieldIdx(), 0, fieldRows.length - 1)],
+    [fieldRows, getFieldIdx],
+  );
 
   /** Resolve the EditableField metadata for the current row, if editmeta
    *  says it's writable on this issue. Returns undefined for read-only. */
@@ -428,15 +448,16 @@ export function IssueDetailModal({
 
   /**
    * Move the cursor by `delta` rows with bound-clamping. Scroll is a
-   * pure derivation at render time — this just updates `fieldIdx` via
-   * the functional form so rapid key-repeat chains correctly.
+   * pure derivation at render time. Clamp the retained index first so
+   * metadata changes and buffered input use the displayed row.
    */
   const moveFieldCursor = useCallback(
     (delta: number) => {
       const length = fieldRows.length;
-      setFieldIdx((i) => clamp(i + delta, 0, length - 1));
+      const current = clamp(getFieldIdx(), 0, length - 1);
+      setFieldIdx(clamp(current + delta, 0, length - 1));
     },
-    [fieldRows.length],
+    [fieldRows.length, getFieldIdx, setFieldIdx],
   );
 
   const jumpFieldCursor = useCallback(
@@ -444,7 +465,7 @@ export function IssueDetailModal({
       const length = fieldRows.length;
       setFieldIdx(clamp(to, 0, length - 1));
     },
-    [fieldRows.length],
+    [fieldRows.length, setFieldIdx],
   );
 
   const doEditTitle = useCallback(() => {
@@ -465,46 +486,69 @@ export function IssueDetailModal({
   }, [ensureUsers, issueProjectKey, lifetime]);
 
   const doEditDesc = useCallback(async () => {
-    if (!detail) return;
-    onLocalAction?.();
-    setOverlay({ kind: "nvim" });
+    if (!detail || editorReservation.current) return;
+    const reservation = Symbol("description-editor");
+    editorReservation.current = reservation;
     try {
-      const mention = await prepareEditor();
-      if (!mention || !activeRef.current || lifetime !== lifetimeRef.current) return;
-      const raw = await editInNeovim(
-        descriptionDraft.current ?? detail.description,
-        `${detail.key}-desc.md`,
-        { mentionUsers: mention.users },
-      );
-      if (!activeRef.current || lifetime !== lifetimeRef.current) return;
-      if (raw.trim() === detail.description.trim()) {
-        descriptionDraft.current = null;
-        showFlash("No description change.");
-        setOverlay({ kind: "none" });
-        return;
+      onLocalAction?.();
+      setOverlay({ kind: "nvim" });
+      let prepared = descriptionDraft.current;
+      if (!prepared) {
+        try {
+          const source = prepareDescriptionEdit(cfg, detail.key, detail.rawFields["description"]);
+          prepared = { text: source.text, original: source.text, context: source.context };
+        } catch (error) {
+          if (!activeRef.current || lifetime !== lifetimeRef.current) return;
+          if (error instanceof UnsupportedAdfEditError) {
+            setOverlay({ kind: "unsupported-adf", issueKey: detail.key, message: error.message });
+          } else {
+            showFlash(errorMessage(error), "err");
+            setOverlay({ kind: "none" });
+          }
+          return;
+        }
       }
-      descriptionDraft.current = raw;
-      setOverlay({ kind: "none" });
-      if (mention.warning) showFlash(mention.warning, "info");
-      const result = await doSave(
-        () => updateDescription(cfg, detail.key, raw),
-        "Description updated.",
-      );
-      if (result.status === "saved") descriptionDraft.current = null;
-      else if (result.status === "failed")
-        showFlash(`Description not saved. Press E to edit your draft.`, "err");
-    } catch (e) {
-      if (!activeRef.current || lifetime !== lifetimeRef.current) return;
-      showFlash(errorMessage(e), "err");
-      setOverlay({ kind: "none" });
+      try {
+        const mention = await prepareEditor();
+        if (!mention || !activeRef.current || lifetime !== lifetimeRef.current) return;
+        const raw = await editInNeovim(prepared.text, `${detail.key}-desc.md`, {
+          mentionUsers: mention.users,
+        });
+        if (!activeRef.current || lifetime !== lifetimeRef.current) return;
+        if (raw === prepared.original) {
+          descriptionDraft.current = null;
+          showFlash("No description change.");
+          setOverlay({ kind: "none" });
+          return;
+        }
+        const draft = { ...prepared, text: raw };
+        descriptionDraft.current = draft;
+        setOverlay({ kind: "none" });
+        if (mention.warning) showFlash(mention.warning, "info");
+        const result = await doSave(
+          () => updateDescription(cfg, detail.key, raw, draft.context),
+          "Description updated.",
+        );
+        if (result.status === "saved") descriptionDraft.current = null;
+        else if (result.status === "failed")
+          showFlash(`Description not saved. Press E to edit your draft.`, "err");
+      } catch (e) {
+        if (!activeRef.current || lifetime !== lifetimeRef.current) return;
+        showFlash(errorMessage(e), "err");
+        setOverlay({ kind: "none" });
+      }
+    } finally {
+      if (editorReservation.current === reservation) editorReservation.current = null;
     }
   }, [detail, cfg, lifetime, showFlash, doSave, prepareEditor, onLocalAction]);
 
   const doAddComment = useCallback(async () => {
-    if (!detail) return;
-    onLocalAction?.();
-    setOverlay({ kind: "nvim" });
+    if (!detail || editorReservation.current) return;
+    const reservation = Symbol("new-comment-editor");
+    editorReservation.current = reservation;
     try {
+      onLocalAction?.();
+      setOverlay({ kind: "nvim" });
       const mention = await prepareEditor();
       if (!mention || !activeRef.current || lifetime !== lifetimeRef.current) return;
       const raw = await editInNeovim(newCommentDraft.current, `${detail.key}-comment.md`, {
@@ -528,44 +572,65 @@ export function IssueDetailModal({
       if (!activeRef.current || lifetime !== lifetimeRef.current) return;
       showFlash(errorMessage(e), "err");
       setOverlay({ kind: "none" });
+    } finally {
+      if (editorReservation.current === reservation) editorReservation.current = null;
     }
   }, [detail, cfg, lifetime, showFlash, doSave, prepareEditor, onLocalAction]);
 
   const doEditComment = useCallback(
     async (comment: Comment) => {
-      if (!detail) return;
-      setOverlay({ kind: "nvim" });
+      if (!detail || editorReservation.current) return;
+      const reservation = Symbol("existing-comment-editor");
+      editorReservation.current = reservation;
       try {
-        const mention = await prepareEditor();
-        if (!mention || !activeRef.current || lifetime !== lifetimeRef.current) return;
-        const raw = await editInNeovim(
-          commentDrafts.current.get(comment.id) ?? comment.body,
-          `${detail.key}-comment-${comment.id}.md`,
-          {
-            mentionUsers: mention.users,
-          },
-        );
-        if (!activeRef.current || lifetime !== lifetimeRef.current) return;
-        if (raw.trim() === comment.body.trim()) {
-          commentDrafts.current.delete(comment.id);
-          showFlash("No comment change.");
-          setOverlay({ kind: "none" });
-          return;
+        setOverlay({ kind: "nvim" });
+        let prepared = commentDrafts.current.get(comment.id);
+        if (!prepared) {
+          try {
+            const source = prepareCommentEdit(cfg, detail.key, comment.id, comment.sourceAdf);
+            prepared = { text: source.text, original: source.text, context: source.context };
+          } catch (error) {
+            if (!activeRef.current || lifetime !== lifetimeRef.current) return;
+            if (error instanceof UnsupportedAdfEditError) {
+              setOverlay({ kind: "unsupported-adf", issueKey: detail.key, message: error.message });
+            } else {
+              showFlash(errorMessage(error), "err");
+              setOverlay({ kind: "none" });
+            }
+            return;
+          }
         }
-        commentDrafts.current.set(comment.id, raw);
-        setOverlay({ kind: "none" });
-        if (mention.warning) showFlash(mention.warning, "info");
-        const result = await doSave(
-          () => updateComment(cfg, detail.key, comment.id, raw),
-          "Comment updated.",
-        );
-        if (result.status === "saved") commentDrafts.current.delete(comment.id);
-        else if (result.status === "failed")
-          showFlash(`Comment not saved. Reopen it to edit your draft.`, "err");
-      } catch (e) {
-        if (!activeRef.current || lifetime !== lifetimeRef.current) return;
-        showFlash(errorMessage(e), "err");
-        setOverlay({ kind: "none" });
+        try {
+          const mention = await prepareEditor();
+          if (!mention || !activeRef.current || lifetime !== lifetimeRef.current) return;
+          const raw = await editInNeovim(prepared.text, `${detail.key}-comment-${comment.id}.md`, {
+            mentionUsers: mention.users,
+          });
+          if (!activeRef.current || lifetime !== lifetimeRef.current) return;
+          if (raw === prepared.original) {
+            commentDrafts.current.delete(comment.id);
+            showFlash("No comment change.");
+            setOverlay({ kind: "none" });
+            return;
+          }
+          const draft = { ...prepared, text: raw };
+          commentDrafts.current.set(comment.id, draft);
+          setOverlay({ kind: "none" });
+          if (mention.warning) showFlash(mention.warning, "info");
+          const result = await doSave(
+            () => updateComment(cfg, detail.key, comment.id, raw, draft.context),
+            "Comment updated.",
+          );
+          if (result.status === "saved") commentDrafts.current.delete(comment.id);
+          else if (result.status === "failed")
+            showFlash(`Comment not saved. Reopen it to edit your draft.`, "err");
+        } catch (e) {
+          if (!activeRef.current || lifetime !== lifetimeRef.current) return;
+          showFlash(errorMessage(e), "err");
+          setOverlay({ kind: "none" });
+        }
+      } finally {
+        if (editorReservation.current === reservation) editorReservation.current = null;
       }
     },
     [detail, cfg, lifetime, showFlash, doSave, prepareEditor],
@@ -587,9 +652,10 @@ export function IssueDetailModal({
   );
 
   const openFieldEditor = useCallback(() => {
-    if (!detail || !currentRow) return;
+    const row = selectedFieldRow();
+    if (!detail || !row) return;
     onLocalAction?.();
-    const meta = resolveEditable(currentRow);
+    const meta = resolveEditable(row);
     if (!meta) {
       if (detail.editmetaError) {
         showFlash(
@@ -598,31 +664,31 @@ export function IssueDetailModal({
         );
         return;
       }
-      if (currentRow.kind === "baked" && SYSTEM_FIELDS.has(currentRow.id)) {
-        if (currentRow.id === "status") showFlash("Use t to choose a transition.");
-        else showFlash(`${FIELD_LABELS[currentRow.id]} is read-only`);
-      } else if (currentRow.kind === "custom" && currentRow.field.meta.kind === "unsupported") {
-        showFlash(`${currentRow.field.name}: not editable from TUI`);
+      if (row.kind === "baked" && SYSTEM_FIELDS.has(row.id)) {
+        if (row.id === "status") showFlash("Use t to choose a transition.");
+        else showFlash(`${FIELD_LABELS[row.id]} is read-only`);
+      } else if (row.kind === "custom" && row.field.meta.kind === "unsupported") {
+        showFlash(`${row.field.name}: not editable from TUI`);
       } else {
         showFlash("Not editable on this issue.");
       }
       return;
     }
-    const fieldId =
-      currentRow.kind === "custom" ? currentRow.field.id : JIRA_FIELD_KEY[currentRow.id];
-    const current = resolveCurrentValue(currentRow);
+    const fieldId = row.kind === "custom" ? row.field.id : JIRA_FIELD_KEY[row.id];
+    const current = resolveCurrentValue(row);
     setOverlay({
       kind: "field-edit",
       fieldId,
       meta,
       ...(current !== undefined ? { current } : {}),
     });
-  }, [detail, currentRow, resolveEditable, resolveCurrentValue, showFlash, onLocalAction]);
+  }, [detail, selectedFieldRow, resolveEditable, resolveCurrentValue, showFlash, onLocalAction]);
 
   const clearField = useCallback(async () => {
-    if (!detail || !currentRow) return;
+    const row = selectedFieldRow();
+    if (!detail || !row) return;
     onLocalAction?.();
-    const meta = resolveEditable(currentRow);
+    const meta = resolveEditable(row);
     if (!meta) {
       if (detail.editmetaError) {
         showFlash(
@@ -634,10 +700,8 @@ export function IssueDetailModal({
       showFlash("Not editable on this issue.");
       return;
     }
-    const fieldId =
-      currentRow.kind === "custom" ? currentRow.field.id : JIRA_FIELD_KEY[currentRow.id];
-    const label =
-      currentRow.kind === "custom" ? currentRow.field.name : FIELD_LABELS[currentRow.id];
+    const fieldId = row.kind === "custom" ? row.field.id : JIRA_FIELD_KEY[row.id];
+    const label = row.kind === "custom" ? row.field.name : FIELD_LABELS[row.id];
     if (meta.required) {
       showFlash(`${label} is required`);
       return;
@@ -652,7 +716,7 @@ export function IssueDetailModal({
       () => updateIssueField(cfg, detail.key, { [fieldId]: cleared }),
       `${label} cleared`,
     );
-  }, [detail, currentRow, resolveEditable, cfg, doSave, showFlash, onLocalAction]);
+  }, [detail, selectedFieldRow, resolveEditable, cfg, doSave, showFlash, onLocalAction]);
 
   // Main input handler
   useInput(
@@ -732,11 +796,13 @@ export function IssueDetailModal({
         return;
       }
       if (key.tab) {
-        setPane((p) => (p === "body" ? "fields" : "body"));
+        const next = paneRef.current === "body" ? "fields" : "body";
+        paneRef.current = next;
+        setPane(next);
         return;
       }
 
-      if (pane === "body") {
+      if (paneRef.current === "body") {
         if (key.downArrow || input === "j") setBodyScroll((s) => Math.min(s + 1, maxScroll));
         else if (key.upArrow || input === "k") setBodyScroll((s) => Math.max(0, s - 1));
         else if (key.pageDown) setBodyScroll((s) => Math.min(s + bodyHeight, maxScroll));
@@ -778,6 +844,16 @@ export function IssueDetailModal({
 
   // Overlays
   if (overlay.kind === "nvim") return <NvimBanner warning={overlay.warning} />;
+  if (overlay.kind === "unsupported-adf") {
+    return (
+      <UnsupportedAdfEdit
+        server={cfg.server}
+        issueKey={overlay.issueKey}
+        message={overlay.message}
+        onClose={() => setOverlay({ kind: "none" })}
+      />
+    );
+  }
 
   if (overlay.kind === "inline-input") {
     return (

@@ -57,6 +57,119 @@ function issue(key: string, summary: string, subtask = false) {
   };
 }
 
+test("buffered detail field actions follow the displayed selection across metadata changes", async () => {
+  setDimensions(120, 40);
+  const writes: unknown[] = [];
+  let metadataGets = 0;
+  let metadataShrunk = false;
+  const values: Record<string, string | null> = {
+    customfield_101: "alpha",
+    customfield_102: "beta",
+  };
+  globalThis.fetch = (async (input, init = {}) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/rest/api/3/field") return json([]);
+    if (url.pathname === "/rest/api/3/myself") return json({ accountId: "me" });
+    if (url.pathname.endsWith("/comment")) return json({ comments: [] });
+    if (url.pathname.endsWith("/editmeta")) {
+      metadataGets++;
+      return json({
+        fields: {
+          customfield_101: {
+            name: "Alpha note",
+            required: false,
+            schema: { type: "string" },
+          },
+          ...(metadataShrunk
+            ? {}
+            : {
+                customfield_102: {
+                  name: "Beta note",
+                  required: false,
+                  schema: { type: "string" },
+                },
+              }),
+        },
+      });
+    }
+    if (url.pathname === "/rest/api/3/issue/PROJ-1" && init.method === "PUT") {
+      const body = JSON.parse(String(init.body));
+      writes.push(body);
+      Object.assign(values, body.fields);
+      return new Response(null, { status: 204 });
+    }
+    if (url.pathname === "/rest/api/3/issue/PROJ-1") {
+      const detail = issue("PROJ-1", "Packet fields");
+      Object.assign(detail.fields, values);
+      return json(detail);
+    }
+    throw new Error(`unexpected request: ${init.method ?? "GET"} ${url}`);
+  }) as typeof fetch;
+  const terminal = createTerminal(120, 40);
+  const app = render(
+    <IssueDetailModal
+      cfg={{ server: "https://detail-packet.invalid", authHeader: "Basic test" }}
+      projectKey="PROJ"
+      issueKey="PROJ-1"
+      ensureUsers={async () => ({ users: [] })}
+      onClose={() => {}}
+      onMove={() => {}}
+      onTransition={() => {}}
+      onCreateSubtask={() => {}}
+      onRefresh={() => {}}
+    />,
+    {
+      interactive: true,
+      stdin: terminal.stdin as unknown as typeof process.stdin,
+      stdout: terminal.stdout as unknown as typeof process.stdout,
+      stderr: new PassThrough() as unknown as typeof process.stderr,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    },
+  );
+  apps.push(app);
+  await waitFor(() => terminal.output().toLowerCase().includes("beta note"), "custom fields");
+  const currentPaint = async () => {
+    setDimensions(121, 40);
+    terminal.stdout.columns = 121;
+    process.stdout.emit("resize");
+    await nextTurn();
+    await app.waitUntilRenderFlush();
+    terminal.clearOutput();
+    setDimensions(120, 40);
+    terminal.stdout.columns = 120;
+    process.stdout.emit("resize");
+    await nextTurn();
+    await app.waitUntilRenderFlush();
+    return Bun.stripANSI(terminal.output());
+  };
+
+  await sendInput(app, terminal.stdin, "\t");
+  await sendInput(app, terminal.stdin, "G");
+  await sendInput(app, terminal.stdin, "\u001b[Ax");
+  await waitFor(() => writes.length === 1, "field clear");
+  await waitFor(() => terminal.output().includes("Alpha note cleared"), "clear feedback");
+
+  expect(writes).toEqual([{ fields: { customfield_101: null } }]);
+  expect(terminal.output()).toMatch(/alpha note\s+—/i);
+  expect(terminal.output()).toMatch(/beta note\s+beta/i);
+
+  await sendInput(app, terminal.stdin, "G");
+  metadataShrunk = true;
+  await sendInput(app, terminal.stdin, "r");
+  await waitFor(() => metadataGets >= 3, "shrunk edit metadata");
+  const clamped = await currentPaint();
+  expect(clamped).toMatch(/> alpha note\s+—/i);
+  expect(clamped).not.toMatch(/beta note/i);
+
+  await sendInput(app, terminal.stdin, "\u001b[Ax");
+  await waitFor(() => terminal.output().includes("Not editable on this issue"), "read-only action");
+  const readOnly = await currentPaint();
+  expect(writes).toEqual([{ fields: { customfield_101: null } }]);
+  expect(readOnly).toMatch(/> updated\s+/i);
+  expect(readOnly).toContain("Not editable on this issue");
+});
+
 test("an older issue request cannot replace a newer issue", async () => {
   const first = deferred<Response>();
   const second = deferred<Response>();
@@ -558,6 +671,149 @@ test("an editor result after detail unmount cannot start a write", async () => {
 
   expect(updates).toBe(0);
   expect(refreshes).toBe(0);
+});
+
+test("one buffered input packet starts only one detail editor", async () => {
+  const pending = deferred<string>();
+  const editorMock = spyOn(editor, "editInNeovim").mockReturnValue(pending.promise);
+  restoreEditor = () => editorMock.mockRestore();
+  let puts = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/rest/api/3/field") return json([]);
+    if (url.pathname === "/rest/api/3/myself") return json({ accountId: "me" });
+    if (url.pathname.endsWith("/comment")) return json({ comments: [] });
+    if (url.pathname.endsWith("/editmeta")) return json({ fields: {} });
+    if (url.pathname === "/rest/api/3/issue/PROJ-1" && init?.method === "PUT") {
+      puts++;
+      return new Response(null, { status: 204 });
+    }
+    if (url.pathname === "/rest/api/3/issue/PROJ-1") {
+      const value = issue("PROJ-1", "Buffered editor input");
+      (value.fields as unknown as { description: string }).description = "Initial body";
+      return json(value);
+    }
+    throw new Error(`unexpected request: ${init?.method ?? "GET"} ${url}`);
+  }) as typeof fetch;
+  const terminal = createTerminal();
+  const app = render(
+    <IssueDetailModal
+      cfg={{ server: "https://buffered-editor.invalid", authHeader: "Basic test" }}
+      projectKey="PROJ"
+      issueKey="PROJ-1"
+      ensureUsers={async () => ({ users: [] })}
+      onClose={() => {}}
+      onMove={() => {}}
+      onTransition={() => {}}
+      onCreateSubtask={() => {}}
+      onRefresh={() => {}}
+    />,
+    {
+      interactive: true,
+      stdin: terminal.stdin as unknown as typeof process.stdin,
+      stdout: terminal.stdout as unknown as typeof process.stdout,
+      stderr: new PassThrough() as unknown as typeof process.stderr,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    },
+  );
+  apps.push(app);
+  try {
+    await waitFor(() => terminal.output().includes("Initial body"), "loaded description");
+    terminal.stdin.write("E\u001b[CE");
+    await waitFor(() => editorMock.mock.calls.length > 0, "first editor launch");
+    await app.waitUntilRenderFlush();
+    expect(editorMock).toHaveBeenCalledTimes(1);
+    expect(puts).toBe(0);
+  } finally {
+    pending.resolve("Initial body");
+  }
+});
+
+test("unsupported detail description returns without editor or PUT", async () => {
+  const editorMock = spyOn(editor, "editInNeovim").mockResolvedValue("must not open");
+  restoreEditor = () => editorMock.mockRestore();
+  let puts = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/rest/api/3/field") return json([]);
+    if (url.pathname === "/rest/api/3/myself") return json({ accountId: "me" });
+    if (url.pathname.endsWith("/comment")) return json({ comments: [] });
+    if (url.pathname.endsWith("/editmeta")) return json({ fields: {} });
+    if (url.pathname === "/rest/api/3/issue/PROJ-1" && init?.method === "PUT") {
+      puts++;
+      return new Response(null, { status: 204 });
+    }
+    if (url.pathname === "/rest/api/3/issue/PROJ-1") {
+      const value = issue("PROJ-1", "Unsupported description");
+      (value.fields as { description: unknown }).description = {
+        type: "doc",
+        version: 1,
+        content: [
+          {
+            type: "table",
+            content: [
+              {
+                type: "tableRow",
+                content: [
+                  {
+                    type: "tableHeader",
+                    attrs: {},
+                    content: [{ type: "paragraph", content: [{ type: "text", text: "Header" }] }],
+                  },
+                ],
+              },
+              {
+                type: "tableRow",
+                content: [
+                  {
+                    type: "tableCell",
+                    attrs: {},
+                    content: [
+                      { type: "paragraph", content: [{ type: "text", text: "first" }] },
+                      { type: "paragraph", content: [{ type: "text", text: "second" }] },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      };
+      return json(value);
+    }
+    throw new Error(`unexpected request: ${init?.method ?? "GET"} ${url}`);
+  }) as typeof fetch;
+  const terminal = createTerminal();
+  const app = render(
+    <IssueDetailModal
+      cfg={{ server: "https://unsupported-detail.invalid", authHeader: "Basic test" }}
+      projectKey="PROJ"
+      issueKey="PROJ-1"
+      ensureUsers={async () => ({ users: [] })}
+      onClose={() => {}}
+      onMove={() => {}}
+      onTransition={() => {}}
+      onCreateSubtask={() => {}}
+      onRefresh={() => {}}
+    />,
+    {
+      interactive: true,
+      stdin: terminal.stdin as unknown as typeof process.stdin,
+      stdout: terminal.stdout as unknown as typeof process.stdout,
+      stderr: new PassThrough() as unknown as typeof process.stderr,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    },
+  );
+  apps.push(app);
+  await waitFor(() => terminal.output().includes("Unsupported description"), "detail");
+  await sendInput(app, terminal.stdin, "E");
+  await waitFor(() => terminal.output().includes("Rich text needs Jira"), "unsupported notice");
+  expect(editorMock).toHaveBeenCalledTimes(0);
+  expect(puts).toBe(0);
+  await sendInput(app, terminal.stdin, "\u001b");
+  await waitFor(() => terminal.output().includes("Unsupported description"), "returned detail");
 });
 
 test("a failed description draft does not leak to a different issue", async () => {

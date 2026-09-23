@@ -26,11 +26,11 @@ test("actual completion payload preserves literal Markdown punctuation in mentio
       const { textToAdf } = await import(${JSON.stringify(adfUrl)});
       const names = ${JSON.stringify(names)};
       const assets = await writeMentionAssets(
-        names.map((displayName, index) => ({ accountId: "id-" + index, displayName })),
+        names.map((displayName, index) => ({ accountId: index === 0 ? "id&fixture" : "id-" + index, displayName })),
       );
       const payload = await Bun.file(assets.usersPath).json();
       const converted = payload.map((user) => {
-        const markdown = "[@" + user.markdownName + "](jira-mention:" + user.id + ")";
+        const markdown = "[@" + user.markdownName + "](jira-mention:" + user.markdownId + ")";
         return { markdown, content: textToAdf(markdown).content[0].content };
       });
       await assets.cleanup();
@@ -45,6 +45,7 @@ test("actual completion payload preserves literal Markdown punctuation in mentio
       }
       console.log(JSON.stringify({
         converted,
+        payloadHasRawId: payload.some((user) => "id" in user),
         setupError,
         remaining: await readdir(process.env.TMPDIR),
       }));
@@ -56,14 +57,19 @@ test("actual completion payload preserves literal Markdown punctuation in mentio
     expect(exitCode, stderr).toBe(0);
     const result = JSON.parse(stdout) as {
       converted: { markdown: string; content: unknown[] }[];
+      payloadHasRawId: boolean;
       setupError: string;
       remaining: string[];
     };
     expect(result.converted.map(({ content }) => content)).toEqual(
       names.map((name, index) => [
-        { type: "mention", attrs: { id: `id-${index}`, text: `@${name}` } },
+        {
+          type: "mention",
+          attrs: { id: index === 0 ? "id&fixture" : `id-${index}`, text: `@${name}` },
+        },
       ]),
     );
+    expect(result.payloadHasRawId).toBe(false);
     expect(result.setupError).toBe("bad user data");
     expect(result.remaining).toEqual([]);
   } finally {

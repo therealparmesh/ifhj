@@ -5,9 +5,11 @@ import { isolatedEnv, makeTempDir, runScript } from "../test/utils";
 
 const boardUrl = new URL("./Board.tsx", import.meta.url).href;
 const cacheUrl = new URL("../cache.ts", import.meta.url).href;
+const uiUrl = new URL("../ui.ts", import.meta.url).href;
+const editorUrl = new URL("../editor.ts", import.meta.url).href;
 const utilsUrl = new URL("../test/utils.ts", import.meta.url).href;
 
-async function runBoardCase(name: string, body: string): Promise<unknown> {
+async function runBoardCase(name: string, body: string, setup = ""): Promise<unknown> {
   const home = await makeTempDir(`board-${name}`);
   try {
     const { exitCode, stdout, stderr } = await runScript(
@@ -15,7 +17,9 @@ async function runBoardCase(name: string, body: string): Promise<unknown> {
           const { PassThrough } = await import("node:stream");
           const React = await import("react");
           const { render } = await import("ink");
+          const { spyOn } = await import("bun:test");
           const { createTerminal, deferred, nextTurn, sendInput, waitFor } = await import(${JSON.stringify(utilsUrl)});
+          ${setup}
           const { BoardView } = await import(${JSON.stringify(boardUrl)});
           const cache = await import(${JSON.stringify(cacheUrl)});
 
@@ -509,6 +513,7 @@ test("overlapping moves keep independent locks and later navigation owns focus",
       console.log(JSON.stringify({
         transitionGets,
         getsWhileLocked,
+        postKeys: [...posts.keys()].sort(),
         opened: detailKeys[0],
         boardIssueCalls,
         assignPuts,
@@ -519,6 +524,7 @@ test("overlapping moves keep independent locks and later navigation owns focus",
   expect(result).toEqual({
     transitionGets: 2,
     getsWhileLocked: 2,
+    postKeys: ["PROJ-1", "PROJ-2"],
     opened: "PROJ-2",
     boardIssueCalls: 3,
     assignPuts: 0,
@@ -564,6 +570,186 @@ test("single-packet Down and next-column transition target the new issue", async
     `,
   );
   expect(result).toEqual({ posts: ["PROBE-2"] });
+});
+
+test("one packet cannot acquire two transitions for the same issue", async () => {
+  const result = await runBoardCase(
+    "packet-transition-lock",
+    `
+      const lookups = [];
+      const posts = [];
+      let moved = false;
+      globalThis.fetch = async (input, init = {}) => {
+        const url = new URL(String(input));
+        const method = init.method ?? "GET";
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") {
+          return issuePage(issue("PROBE-1", "Only card", moved ? "2" : "1"));
+        }
+        if (url.pathname === "/rest/api/3/issue/PROBE-1/transitions" && method === "GET") {
+          const request = deferred();
+          lookups.push(request);
+          return request.promise;
+        }
+        if (url.pathname === "/rest/api/3/issue/PROBE-1/transitions" && method === "POST") {
+          posts.push({ key: "PROBE-1", body: JSON.parse(String(init.body)) });
+          moved = true;
+          return new Response(null, { status: 204 });
+        }
+        throw new Error("unexpected request: " + method + " " + url);
+      };
+
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Only card"), "board");
+      terminal.stdin.write(">\\u001b[D>");
+      await nextTurn();
+      await app.waitUntilRenderFlush();
+      const lookupCount = lookups.length;
+      for (const lookup of lookups) lookup.resolve(response({
+        transitions: [{ id: "done", name: "Done", to: { id: "2" }, fields: {} }],
+      }));
+      await waitFor(() => posts.length === 1, "one transition post");
+      app.unmount();
+      console.log(JSON.stringify({ lookupCount, posts }));
+    `,
+  );
+
+  expect(result).toEqual({
+    lookupCount: 1,
+    posts: [{ key: "PROBE-1", body: { transition: { id: "done" } } }],
+  });
+});
+
+test("a canceled lookup cannot release a newer lookup for the same issue", async () => {
+  const result = await runBoardCase(
+    "canceled-lookup-ownership",
+    `
+      const lookups = [];
+      const posts = [];
+      globalThis.fetch = async (input, init = {}) => {
+        const url = new URL(String(input));
+        const method = init.method ?? "GET";
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") {
+          return issuePage(issue("PROBE-1", "Cancelable card"));
+        }
+        if (url.pathname === "/rest/api/3/issue/PROBE-1/transitions" && method === "GET") {
+          const request = deferred();
+          lookups.push(request);
+          return request.promise;
+        }
+        if (url.pathname === "/rest/api/3/issue/PROBE-1/transitions" && method === "POST") {
+          posts.push({ key: "PROBE-1", body: JSON.parse(String(init.body)) });
+          return new Response(null, { status: 204 });
+        }
+        throw new Error("unexpected request: " + method + " " + url);
+      };
+
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Cancelable card"), "board");
+      await send(app, terminal, "m");
+      await send(app, terminal, "\\u001b[B");
+      await send(app, terminal, "\\r");
+      await waitFor(() => lookups.length === 1, "lookup A");
+      await send(app, terminal, "\\u001b");
+      await send(app, terminal, ">");
+      await waitFor(() => lookups.length === 2, "lookup B");
+      lookups[0].resolve(response({
+        transitions: [{ id: "done", name: "Done", to: { id: "2" }, fields: {} }],
+      }));
+      await nextTurn();
+      await nextTurn();
+      await app.waitUntilRenderFlush();
+      await send(app, terminal, ">");
+      const lookupsAfterLateA = lookups.length;
+      lookups[1].resolve(response({
+        transitions: [{ id: "done", name: "Done", to: { id: "2" }, fields: {} }],
+      }));
+      await waitFor(() => posts.length === 1, "only lookup B posts");
+      app.unmount();
+      console.log(JSON.stringify({ lookupCount: lookups.length, lookupsAfterLateA, posts }));
+    `,
+  );
+
+  expect(result).toEqual({
+    lookupCount: 2,
+    lookupsAfterLateA: 2,
+    posts: [{ key: "PROBE-1", body: { transition: { id: "done" } } }],
+  });
+});
+
+test("a confirming refresh cannot unlock an unresolved transition POST", async () => {
+  const result = await runBoardCase(
+    "pending-post-lifetime",
+    `
+      const post = deferred();
+      const writes = [];
+      let transitionGets = 0;
+      let boardReads = 0;
+      let moved = false;
+      globalThis.fetch = async (input, init = {}) => {
+        const url = new URL(String(input));
+        const method = init.method ?? "GET";
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") {
+          boardReads++;
+          return issuePage(issue("PROBE-1", "Pending post", moved ? "2" : "1"));
+        }
+        if (url.pathname === "/rest/api/3/issue/PROBE-1/transitions" && method === "GET") {
+          transitionGets++;
+          return response({ transitions: [{
+            id: moved ? "todo" : "done",
+            name: moved ? "To Do" : "Done",
+            to: { id: moved ? "1" : "2" },
+            fields: {},
+          }] });
+        }
+        if (url.pathname === "/rest/api/3/issue/PROBE-1/transitions" && method === "POST") {
+          writes.push({ key: "PROBE-1", body: JSON.parse(String(init.body)) });
+          moved = true;
+          return post.promise;
+        }
+        throw new Error("unexpected request: " + method + " " + url);
+      };
+
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Pending post"), "board");
+      await send(app, terminal, "t");
+      await waitFor(() => terminal.output().includes("Transition PROBE-1"), "transition picker");
+      await send(app, terminal, "\\r");
+      await waitFor(() => writes.length === 1, "pending transition POST");
+      await send(app, terminal, "r");
+      await waitFor(() => boardReads >= 2, "confirming refresh");
+      await nextTurn();
+      await app.waitUntilRenderFlush();
+      await send(app, terminal, "<");
+      const whilePending = { transitionGets, writes: [...writes] };
+      post.resolve(new Response(null, { status: 204 }));
+      await nextTurn();
+      await nextTurn();
+      app.unmount();
+      console.log(JSON.stringify({ whilePending }));
+    `,
+  );
+
+  expect(result).toEqual({
+    whilePending: {
+      transitionGets: 1,
+      writes: [{ key: "PROBE-1", body: { transition: { id: "done" } } }],
+    },
+  });
 });
 
 test("burst flat-to-swim toggle navigation transitions the swim issue", async () => {
@@ -931,6 +1117,94 @@ test("quick add keeps the created key when status lookup fails", async () => {
     keptKey: true,
     partial: true,
     fullReason: true,
+  });
+});
+
+test("quick add cannot retry after Jira accepted a create with no readable key", async () => {
+  const result = await runBoardCase(
+    "quick-accepted-unknown",
+    `
+      let creates = 0;
+      let followups = 0;
+      globalThis.fetch = async (input, init = {}) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") {
+          return issuePage(issue("PROJ-1", "Existing card"));
+        }
+        if (url.pathname === "/rest/api/3/issue/createmeta/PROJ/issuetypes") {
+          return response({ issueTypes: [{ id: "1", name: "Task", subtask: false }] });
+        }
+        if (url.pathname === "/rest/api/3/issue/createmeta/PROJ/issuetypes/1") {
+          return response({ fields: [
+            { fieldId: "summary", name: "Summary", required: true, schema: { type: "string" } },
+          ] });
+        }
+        if (url.pathname === "/rest/api/3/issueLinkType") return response({ issueLinkTypes: [] });
+        if (url.pathname === "/rest/api/3/issue" && init.method === "POST") {
+          creates++;
+          return response({}, 201);
+        }
+        if (url.pathname.includes("/transitions") || url.pathname === "/rest/api/3/issueLink" || url.pathname.startsWith("/rest/api/3/issue/")) {
+          followups++;
+          return response({});
+        }
+        throw new Error("unexpected request: " + (init.method ?? "GET") + " " + url);
+      };
+
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Existing card"), "initial board");
+      await send(app, terminal, "a");
+      await waitFor(() => terminal.output().includes("Quick add ·"), "quick add");
+      await send(app, terminal, "Accepted quick title");
+      await send(app, terminal, "\\r");
+      await waitFor(() => terminal.output().includes("issue key is unavailable"), "accepted unknown");
+      const accepted = await currentPaint(app, terminal);
+      await send(app, terminal, "\\r");
+      await send(app, terminal, "s");
+      const createsAfterRetryKeys = creates;
+      await send(app, terminal, "o");
+      await waitFor(() => globalThis.__opened.length === 1, "project review action");
+      await send(app, terminal, "\\u001b");
+      const returned = await currentPaint(app, terminal);
+      app.unmount();
+      console.log(JSON.stringify({
+        creates,
+        createsAfterRetryKeys,
+        followups,
+        opened: globalThis.__opened,
+        retainedProject: accepted.includes("Project · PROJ"),
+        retainedTitle: accepted.includes("Title · Accepted quick title"),
+        warnedNoRetry: accepted.includes("Do not submit it again"),
+        returnedToBoard: returned.includes("Existing card"),
+        noticeClosed: !returned.includes("issue key is unavailable"),
+      }));
+    `,
+    `
+      const ui = await import(${JSON.stringify(uiUrl)});
+      globalThis.__opened = [];
+      spyOn(ui, "openInBrowser").mockImplementation(async (url) => {
+        globalThis.__opened.push(url);
+      });
+    `,
+  );
+
+  expect(result).toEqual({
+    creates: 1,
+    createsAfterRetryKeys: 1,
+    followups: 0,
+    opened: [
+      "https://board.invalid/issues/?jql=project%20%3D%20%22PROJ%22%20ORDER%20BY%20created%20DESC",
+    ],
+    retainedProject: true,
+    retainedTitle: true,
+    warnedNoRetry: true,
+    returnedToBoard: true,
+    noticeClosed: true,
   });
 });
 
@@ -1759,18 +2033,11 @@ test("failed description draft survives a move child and cancellation", async ()
         if (url.pathname.endsWith("/editmeta")) return response({ fields: {} });
         throw new Error("unexpected request: " + (init.method ?? "GET") + " " + url);
       };
-      const originalWhich = Bun.which;
-      const originalSpawn = Bun.spawn;
-      const originalWrite = process.stdout.write;
-      Bun.which = () => "/mock/editor";
-      Bun.spawn = (args) => ({
-        exitCode: 0,
-        exited: Bun.file(args.at(-1)).text().then((seed) => {
-          seeds.push(seed);
-          return Bun.write(args.at(-1), "Retained description draft").then(() => 0);
-        }),
+      const editor = await import(${JSON.stringify(editorUrl)});
+      const editMock = spyOn(editor, "editInNeovim").mockImplementation(async (seed) => {
+        seeds.push(seed);
+        return "Retained description draft";
       });
-      process.stdout.write = () => true;
       const terminal = createTerminal();
       const app = mount(terminal);
       try {
@@ -1788,9 +2055,7 @@ test("failed description draft survives a move child and cancellation", async ()
         await waitFor(() => seeds.length === 2, "reopened editor");
       } finally {
         app.unmount();
-        Bun.which = originalWhich;
-        Bun.spawn = originalSpawn;
-        process.stdout.write = originalWrite;
+        editMock.mockRestore();
       }
       console.log(JSON.stringify({ first: seeds[0], second: seeds[1] }));
     `,
@@ -1805,6 +2070,7 @@ test("board description stays pending, blocks duplicates, and reopens its failed
       const save = deferred();
       const seeds = [];
       let puts = 0;
+      let sourceGets = 0;
       globalThis.fetch = async (input, init = {}) => {
         const url = new URL(String(input));
         if (url.pathname === "/rest/api/3/field") return response([]);
@@ -1816,20 +2082,17 @@ test("board description stays pending, blocks duplicates, and reopens its failed
           puts++;
           return save.promise;
         }
+        if (url.pathname === "/rest/api/3/issue/PROJ-1") {
+          sourceGets++;
+          return response({ fields: { description: null } });
+        }
         throw new Error("unexpected request: " + (init.method ?? "GET") + " " + url);
       };
-      const originalWhich = Bun.which;
-      const originalSpawn = Bun.spawn;
-      const originalWrite = process.stdout.write;
-      Bun.which = () => "/mock/editor";
-      Bun.spawn = (args) => ({
-        exitCode: 0,
-        exited: Bun.file(args.at(-1)).text().then((seed) => {
-          seeds.push(seed);
-          return Bun.write(args.at(-1), "Board description draft").then(() => 0);
-        }),
+      const editor = await import(${JSON.stringify(editorUrl)});
+      const editMock = spyOn(editor, "editInNeovim").mockImplementation(async (seed) => {
+        seeds.push(seed);
+        return "Board description draft";
       });
-      process.stdout.write = () => true;
       const terminal = createTerminal();
       const app = mount(terminal);
       try {
@@ -1844,19 +2107,137 @@ test("board description stays pending, blocks duplicates, and reopens its failed
         await waitFor(() => terminal.output().includes("Description not saved"), "description error");
         await send(app, terminal, "E");
         await waitFor(() => seeds.length === 2, "draft editor reopen");
-        app.unmount();
-        console.log(JSON.stringify({ putsWhilePending, seeds }));
+        console.log(JSON.stringify({ putsWhilePending, sourceGets, seeds }));
       } finally {
-        Bun.which = originalWhich;
-        Bun.spawn = originalSpawn;
-        process.stdout.write = originalWrite;
+        app.unmount();
+        editMock.mockRestore();
       }
     `,
   );
   expect(result).toEqual({
     putsWhilePending: 1,
+    sourceGets: 1,
     seeds: ["", "Board description draft"],
   });
+});
+
+test("unsupported board description opens the bound issue without editor or PUT", async () => {
+  const result = await runBoardCase(
+    "unsupported-board-description",
+    `
+      let puts = 0;
+      let editorStarts = 0;
+      globalThis.fetch = async (input, init = {}) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") return issuePage(issue("PROJ-1", "Card"));
+        if (url.pathname === "/rest/api/3/issue/PROJ-1" && init.method === "PUT") {
+          puts++;
+          return new Response(null, { status: 204 });
+        }
+        if (url.pathname === "/rest/api/3/issue/PROJ-1") return response({ fields: { description: {
+          type: "doc", version: 1, content: [{ type: "table", content: [
+            { type: "tableRow", content: [{ type: "tableHeader", attrs: {}, content: [{ type: "paragraph", content: [{ type: "text", text: "Header" }] }] }] },
+            { type: "tableRow", content: [{ type: "tableCell", attrs: {}, content: [
+              { type: "paragraph", content: [{ type: "text", text: "first" }] },
+              { type: "paragraph", content: [{ type: "text", text: "second" }] },
+            ] }] },
+          ] }],
+        } } });
+        throw new Error("unexpected request: " + (init.method ?? "GET") + " " + url);
+      };
+      const originalSpawn = Bun.spawn;
+      Bun.spawn = () => { editorStarts++; throw new Error("editor must not start"); };
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      try {
+        await waitFor(() => terminal.output().includes("Card"), "board");
+        await send(app, terminal, "E");
+        await waitFor(() => terminal.output().includes("Rich text needs Jira"), "unsupported notice");
+        await send(app, terminal, "\\r");
+        await waitFor(() => globalThis.__opened.length === 1, "bound issue browser action");
+        await send(app, terminal, "\\u001b");
+        await waitFor(() => terminal.output().includes("Card"), "return to board");
+      } finally {
+        app.unmount();
+        Bun.spawn = originalSpawn;
+      }
+      console.log(JSON.stringify({ puts, editorStarts, opened: globalThis.__opened }));
+    `,
+    `
+      const ui = await import(${JSON.stringify(uiUrl)});
+      globalThis.__opened = [];
+      spyOn(ui, "openInBrowser").mockImplementation(async (url) => {
+        globalThis.__opened.push(url);
+      });
+    `,
+  );
+  expect(result).toEqual({
+    puts: 0,
+    editorStarts: 0,
+    opened: ["https://board.invalid/browse/PROJ-1"],
+  });
+});
+
+test("board description source-load failure is distinct and retries before editor", async () => {
+  const result = await runBoardCase(
+    "description-source-retry",
+    `
+      let sourceGets = 0;
+      let editorStarts = 0;
+      let puts = 0;
+      globalThis.fetch = async (input, init = {}) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") return issuePage(issue("PROJ-1", "Card"));
+        if (url.pathname === "/rest/api/3/issue/PROJ-1" && init.method === "PUT") {
+          puts++;
+          return new Response(null, { status: 204 });
+        }
+        if (url.pathname === "/rest/api/3/issue/PROJ-1") {
+          sourceGets++;
+          return sourceGets === 1
+            ? new Response("temporary", { status: 503 })
+            : response({ fields: { description: null } });
+        }
+        throw new Error("unexpected request: " + (init.method ?? "GET") + " " + url);
+      };
+      const originalWhich = Bun.which;
+      const originalSpawn = Bun.spawn;
+      const originalWrite = process.stdout.write;
+      Bun.which = () => "/mock/editor";
+      Bun.spawn = (args) => ({
+        exitCode: 0,
+        exited: Bun.file(args.at(-1)).text().then(() => {
+          editorStarts++;
+          return Bun.write(args.at(-1), "retried draft").then(() => 0);
+        }),
+      });
+      process.stdout.write = () => true;
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      try {
+        await waitFor(() => terminal.output().includes("Card"), "board");
+        await send(app, terminal, "E");
+        await waitFor(() => terminal.output().includes("Could not load description for editing"), "source error");
+        await send(app, terminal, "E");
+        await waitFor(() => puts === 1, "retried description put");
+      } finally {
+        app.unmount();
+        Bun.which = originalWhich;
+        Bun.spawn = originalSpawn;
+        process.stdout.write = originalWrite;
+      }
+      console.log(JSON.stringify({ sourceGets, editorStarts, puts }));
+    `,
+  );
+  expect(result).toEqual({ sourceGets: 2, editorStarts: 1, puts: 1 });
 });
 
 test("cancelled detail cannot open a late subtask wizard", async () => {

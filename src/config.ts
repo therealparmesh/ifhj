@@ -72,7 +72,7 @@ export async function loadSettings(): Promise<Settings> {
   };
 }
 
-async function readConfigYaml(): Promise<{ server?: string; login?: string; path?: string }> {
+async function readConfigYaml(): Promise<{ server?: unknown; login?: unknown; path?: string }> {
   const paths = [
     join(homedir(), ".config", ".jira", ".config.yml"),
     join(homedir(), ".config", "jira", ".config.yml"),
@@ -91,16 +91,7 @@ async function readConfigYaml(): Promise<{ server?: string; login?: string; path
       throw new Error(`Invalid Jira config ${p}: expected a YAML mapping`);
     }
     const raw = parsed as Record<string, unknown>;
-    const out: { server?: string; login?: string; path: string } = { path: p };
-    for (const key of ["server", "login"] as const) {
-      const value = raw[key];
-      if (value === null || value === undefined) continue;
-      if (typeof value !== "string") {
-        throw new Error(`Invalid Jira config ${p}: ${key} must be a string`);
-      }
-      out[key] = value;
-    }
-    return out;
+    return { server: raw["server"], login: raw["login"], path: p };
   }
   return {};
 }
@@ -110,8 +101,16 @@ export async function loadConfig(): Promise<JiraConfig> {
   const envServer = env["JIRA_SERVER"];
   const envLogin = env["JIRA_LOGIN"] || env["JIRA_EMAIL"];
   const yaml = envServer && envLogin ? {} : await readConfigYaml();
-  const serverValue = envServer || yaml.server;
-  const email = (envLogin || yaml.login)?.trim();
+  const selectedYaml = (key: "server" | "login"): string | undefined => {
+    const value = yaml[key];
+    if (value === null || value === undefined) return undefined;
+    if (typeof value !== "string") {
+      throw new Error(`Invalid Jira config ${yaml.path}: ${key} must be a string`);
+    }
+    return value;
+  };
+  const serverValue = envServer || selectedYaml("server");
+  const email = (envLogin || selectedYaml("login"))?.trim();
   const token = env["JIRA_API_TOKEN"]?.trim();
   const configPath = yaml.path ?? join(homedir(), ".config", ".jira", ".config.yml");
   if (!serverValue?.trim()) {

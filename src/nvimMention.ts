@@ -42,7 +42,7 @@ function! IfhjMentionComplete(findstart, base) abort
   for l:u in l:users
     if empty(l:query) || stridx(tolower(l:u.name), l:query) >= 0
       call add(l:out, {
-            \\ 'word': '[@' . l:u.markdownName . '](jira-mention:' . l:u.id . ')',
+            \\ 'word': '[@' . l:u.markdownName . '](jira-mention:' . l:u.markdownId . ')',
             \\ 'abbr': '@' . l:u.name,
             \\ 'menu': '[mention]',
             \\ })
@@ -89,9 +89,11 @@ export async function writeMentionAssets(users: JiraUser[]): Promise<MentionAsse
   try {
     // CommonMark allows a backslash escape for every ASCII punctuation character.
     const payload = users.map((u) => ({
-      id: u.accountId,
       name: u.displayName,
-      markdownName: u.displayName.replaceAll(/[!-/:-@[-`{-~]/g, "\\$&"),
+      markdownId: encodeURIComponent(u.accountId),
+      markdownName: u.displayName.replaceAll(/[!-/:-@[-`{-~]/g, (char) =>
+        char === "&" ? "&amp;" : `\\${char}`,
+      ),
     }));
     await writeFile(scriptPath, VIMSCRIPT, { mode: 0o600 });
     await writeFile(usersPath, JSON.stringify(payload), { mode: 0o600 });
