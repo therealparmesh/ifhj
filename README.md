@@ -85,6 +85,7 @@ User preferences live in `~/.config/ifhj/settings.json`:
 | `maxColumns` | `4`           | `IFHJ_MAX_COLUMNS` | Max visible board columns before ←/→ paging |
 
 The `terminal` theme defers to your terminal's own color palette — readable on both light and dark backgrounds.
+The default `synthwave` theme assumes a dark terminal background.
 
 ## Usage
 
@@ -94,7 +95,7 @@ ifhj
 
 Pick a board. Everything's keyboard from there.
 
-Press `?` for help. Scroll with ↑/↓ or Page Up/Page Down; Home/End jumps to either end.
+Press `?` for help. Scroll with the Up/Down arrow keys or Page Up/Page Down; Home/End jumps to either end. ifhj needs at least an 80×24 terminal and keeps the current screen state while you resize.
 
 Pickers and required-field screens scroll to keep the selected row and controls visible on standard 80×24 terminals. Long picker queries scroll horizontally with the cursor.
 
@@ -112,16 +113,16 @@ Pickers and required-field screens scroll to keep the selected row and controls 
 | `v`             | view issue details                                 |
 | `e`             | edit title (inline)                                |
 | `E`             | edit description (editor)                          |
-| `t`             | transition to any status                           |
+| `t`             | choose an available workflow transition            |
 | `m`             | move to any column                                 |
 | `< >`           | transition to prev / next column                   |
 | `[ ]`           | rerank card up / down within column                |
 | `i`             | assign to me                                       |
-| `y` / `Y`       | yank issue key / URL                               |
+| `y` / `Y`       | copy issue key / URL                               |
 | `o` / `O`       | open card / board in browser                       |
 | `c`             | create issue                                       |
 | `a`             | quick add to current column                        |
-| `/`             | search                                             |
+| `/`             | highlight loaded cards by key, title, or assignee  |
 | `n` / `N`       | next / prev search match                           |
 | `f`             | filter menu (assignee, type, sprint, label, epic)  |
 | `s`             | toggle swimlane view (grouped lanes)               |
@@ -129,6 +130,7 @@ Pickers and required-field screens scroll to keep the selected row and controls 
 | `R`             | quick open — recents, or type to search all issues |
 | `J`             | JQL query view                                     |
 | `r`             | refresh                                            |
+| `Ctrl+G`        | dismiss notifications                              |
 | `?`             | help                                               |
 | `q`             | back to board picker                               |
 
@@ -150,9 +152,10 @@ Pickers and required-field screens scroll to keep the selected row and controls 
 | `t`             | transition to status            |
 | `m`             | move to column                  |
 | `w`             | toggle watch / unwatch          |
-| `y` / `Y`       | yank issue key / URL            |
+| `y` / `Y`       | copy issue key / URL            |
 | `o`             | open in browser                 |
 | `r`             | refresh                         |
+| `Ctrl+G`        | dismiss notifications           |
 | `Esc` / `q`     | close                           |
 
 ### Moving cards
@@ -175,9 +178,9 @@ When a board defines swimlanes, `s` groups it into horizontal lanes. Custom (JQL
 
 ### Quick open
 
-`R` opens a finder. Empty query lists recently-touched cards — anything you view or successfully act on (move, rerank, assign, edit, create). Recents persist per board and credential set across sessions at `~/.cache/ifhj/`. Type to search all visible issues, across projects.
+`R` opens a finder. Empty query lists recently-touched cards — anything you view or successfully act on (move, rerank, assign, edit, create). Recents persist per board and credential set across sessions at `~/.cache/ifhj/`. Type to search issue titles and exact keys across projects, up to 25 server results.
 
-`J` opens the JQL view. Type a query and press Enter to search. Use ↑/↓ to select a result, then Enter to open it. Editing the query clears the old results. Esc closes the view.
+`J` opens the JQL view. Type a query and press Enter to search, up to 50 results. Use the Up/Down arrow keys to select a result, then Enter to open it. Editing the query clears the old results. Esc closes the view.
 
 ### Card order
 

@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+let externalScreenActive = false;
+
+/** Prevent Ink redraws while an external editor owns the terminal. */
+export function setExternalScreenActive(active: boolean): void {
+  externalScreenActive = active;
+  if (!active) process.stdout.emit("resize");
+}
+
 function readSize() {
   return {
     cols: process.stdout.columns || 120,
@@ -10,7 +18,9 @@ function readSize() {
 export function useDimensions(): { cols: number; rows: number } {
   const [d, setD] = useState(readSize);
   useEffect(() => {
-    const on = () => setD(readSize());
+    const on = () => {
+      if (!externalScreenActive) setD(readSize());
+    };
     process.stdout.on("resize", on);
     return () => {
       process.stdout.off("resize", on);

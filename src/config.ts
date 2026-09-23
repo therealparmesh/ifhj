@@ -6,6 +6,7 @@ import type { ThemeName } from "./ui";
 export type JiraConfig = {
   server: string;
   authHeader: string;
+  signal?: AbortSignal;
 };
 
 /**
@@ -29,11 +30,15 @@ function parseMaxColumns(v: unknown): number | undefined {
 // Read an env override, running it through the same parser as the file. An
 // invalid value throws so the user notices the typo instead of getting a
 // silent fallback. Absent → undefined so the caller can fall through.
-function strictEnv<T>(name: string, parse: (v: unknown) => T | undefined): T | undefined {
+function strictEnv<T>(
+  name: string,
+  parse: (v: unknown) => T | undefined,
+  expected: string,
+): T | undefined {
   const v = Bun.env[name];
   if (v === undefined) return undefined;
   const parsed = parse(v);
-  if (parsed === undefined) throw new Error(`Invalid ${name} "${v}"`);
+  if (parsed === undefined) throw new Error(`Invalid ${name}. ${expected}`);
   return parsed;
 }
 
@@ -56,13 +61,18 @@ export async function loadSettings(): Promise<Settings> {
     // Missing or malformed settings fall through to defaults.
   }
   return {
-    theme: strictEnv("IFHJ_THEME", parseTheme) ?? parseTheme(raw["theme"]) ?? "synthwave",
+    theme:
+      strictEnv("IFHJ_THEME", parseTheme, 'Use "synthwave" or "terminal".') ??
+      parseTheme(raw["theme"]) ??
+      "synthwave",
     maxColumns:
-      strictEnv("IFHJ_MAX_COLUMNS", parseMaxColumns) ?? parseMaxColumns(raw["maxColumns"]) ?? 4,
+      strictEnv("IFHJ_MAX_COLUMNS", parseMaxColumns, "Use a positive whole integer.") ??
+      parseMaxColumns(raw["maxColumns"]) ??
+      4,
   };
 }
 
-async function readConfigYaml(): Promise<{ server?: string; login?: string }> {
+async function readConfigYaml(): Promise<{ server?: string; login?: string; path?: string }> {
   const paths = [
     join(homedir(), ".config", ".jira", ".config.yml"),
     join(homedir(), ".config", "jira", ".config.yml"),
@@ -73,16 +83,15 @@ async function readConfigYaml(): Promise<{ server?: string; login?: string }> {
     let parsed: unknown;
     try {
       parsed = Bun.YAML.parse(await f.text());
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`Invalid Jira config ${p}: ${message}`, { cause: error });
+    } catch {
+      throw new Error(`Invalid Jira config ${p}: YAML could not be parsed`);
     }
-    if (parsed === null || parsed === undefined) return {};
+    if (parsed === null || parsed === undefined) return { path: p };
     if (typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error(`Invalid Jira config ${p}: expected a YAML mapping`);
     }
     const raw = parsed as Record<string, unknown>;
-    const out: { server?: string; login?: string } = {};
+    const out: { server?: string; login?: string; path: string } = { path: p };
     for (const key of ["server", "login"] as const) {
       const value = raw[key];
       if (value === null || value === undefined) continue;
@@ -104,17 +113,23 @@ export async function loadConfig(): Promise<JiraConfig> {
   const serverValue = envServer || yaml.server;
   const email = (envLogin || yaml.login)?.trim();
   const token = env["JIRA_API_TOKEN"]?.trim();
-  if (!serverValue?.trim())
-    throw new Error("Missing Jira server (set JIRA_SERVER or ~/.config/.jira/.config.yml)");
-  if (!email)
-    throw new Error("Missing Jira login email (set JIRA_LOGIN or ~/.config/.jira/.config.yml)");
+  const configPath = yaml.path ?? join(homedir(), ".config", ".jira", ".config.yml");
+  if (!serverValue?.trim()) {
+    throw new Error(`Missing Jira server: set JIRA_SERVER or add "server" to ${configPath}`);
+  }
+  if (!email) {
+    throw new Error(
+      `Missing Jira login: set JIRA_LOGIN or JIRA_EMAIL, or add "login" to ${configPath}`,
+    );
+  }
   if (!token) throw new Error("Missing JIRA_API_TOKEN environment variable");
 
+  const serverSource = envServer ? "JIRA_SERVER" : `"server" in ${configPath}`;
   let url: URL;
   try {
     url = new URL(serverValue.trim());
   } catch {
-    throw new Error(`Invalid Jira server URL "${serverValue}"`);
+    throw new Error(`Invalid Jira server URL from ${serverSource}`);
   }
   if (url.protocol !== "https:" && url.protocol !== "http:") {
     throw new Error(`Invalid Jira server URL protocol "${url.protocol}"`);

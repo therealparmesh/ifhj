@@ -1,7 +1,9 @@
-import { Box, Text, useInput } from "ink";
-import { useEffect, useState } from "react";
+import { Box, Text } from "ink";
+import { type ReactNode, useEffect, useState } from "react";
 
 import type { JiraConfig } from "../config";
+import { useDimensions } from "../hooks";
+import { InputScope, useInput } from "../input";
 import {
   type EditableField,
   type EditableFieldValue,
@@ -9,7 +11,9 @@ import {
   getAssignableUsers,
 } from "../jira";
 import { errorMessage, theme } from "../ui";
+import { ErrorMessage } from "./ErrorMessage";
 import { FilterPicker } from "./FilterPicker";
+import { Hint } from "./Hint";
 import { InlineFieldInput } from "./IssueDetailSide";
 import { LoadingLine } from "./LoadingLine";
 
@@ -30,6 +34,12 @@ export function FieldEditor({
   current,
   onSubmit,
   onCancel,
+  submitLabel = "use value",
+  error,
+  onEdit,
+  busy = false,
+  busyLabel = "Saving field…",
+  onRetry,
 }: {
   cfg: JiraConfig;
   projectKey: string;
@@ -38,12 +48,53 @@ export function FieldEditor({
   current?: EditableFieldValue;
   onSubmit: (value: EditableFieldValue | null) => void;
   onCancel: () => void;
+  submitLabel?: string;
+  error?: string | undefined;
+  onEdit?: () => void;
+  busy?: boolean;
+  busyLabel?: string;
+  onRetry?: () => void;
 }) {
   // User-typed fields need an async user-list fetch. Run it once per open.
   const [users, setUsers] = useState<JiraUser[] | null>(
     field.kind === "user" || field.kind === "user-list" ? null : [],
   );
   const [loadError, setLoadError] = useState<string | null>(null);
+  const { cols } = useDimensions();
+  const usesErrorScreen =
+    field.kind === "option" ||
+    field.kind === "option-list" ||
+    field.kind === "user" ||
+    field.kind === "user-list";
+  const pickerProps = { submitLabel, busy, busyLabel, onCancel };
+  const withError = (child: ReactNode) => (
+    <>
+      <InputScope enabled={!error && !busy}>
+        <Box display={error || busy ? "none" : "flex"}>{child}</Box>
+      </InputScope>
+      {busy ? (
+        <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.accent}>
+          <Text color={theme.accent} bold>
+            {field.name}
+          </Text>
+          <LoadingLine label={busyLabel} />
+          <Text color={theme.muted}>Please wait for the save to finish.</Text>
+        </Box>
+      ) : error ? (
+        <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.error}>
+          <Text color={theme.error} bold>
+            {field.name} was not saved
+          </Text>
+          <ErrorMessage message={error} width={Math.max(1, cols - 6)} rows={3} />
+          <Box marginTop={1}>
+            {onRetry ? <Hint k="⏎" label="retry save" /> : null}
+            <Hint k="e" label="edit value" />
+            <Hint k="esc" label="cancel" />
+          </Box>
+        </Box>
+      ) : null}
+    </>
+  );
 
   useEffect(() => {
     setLoadError(null);
@@ -78,6 +129,14 @@ export function FieldEditor({
   useInput((_input, key) => {
     if (inTransientScreen && key.escape) onCancel();
   });
+  useInput(
+    (input, key) => {
+      if (key.escape) onCancel();
+      else if (key.return) onRetry?.();
+      else if (!key.ctrl && !key.meta && input === "e") onEdit?.();
+    },
+    { isActive: usesErrorScreen && !inTransientScreen && Boolean(error) && !busy },
+  );
 
   if (loadError) {
     return (
@@ -86,7 +145,7 @@ export function FieldEditor({
           {field.name}
         </Text>
         <Box marginTop={1}>
-          <Text color={theme.error}>{loadError}</Text>
+          <ErrorMessage message={loadError} width={Math.max(1, cols - 6)} rows={3} />
         </Box>
         <Box marginTop={1}>
           <Text color={theme.muted}>press esc to cancel</Text>
@@ -102,7 +161,7 @@ export function FieldEditor({
           {field.name}
         </Text>
         <Box marginTop={1}>
-          <LoadingLine label="loading users…" />
+          <LoadingLine label="Loading users…" />
         </Box>
       </Box>
     );
@@ -110,22 +169,25 @@ export function FieldEditor({
 
   if (field.kind === "option") {
     const currentId = (current as { id: string } | undefined)?.id;
-    return (
+    return withError(
       <FilterPicker
         title={field.name}
         items={field.allowedValues.map((v) => ({ id: v.id, label: v.name }))}
         {...(currentId ? { currentId } : {})}
-        onPick={(id) => onSubmit({ id })}
+        {...pickerProps}
+        onPick={(id) => {
+          onEdit?.();
+          onSubmit({ id });
+        }}
         {...(!field.required ? { onClear: () => onSubmit(null) } : {})}
-        onCancel={onCancel}
-      />
+      />,
     );
   }
 
   if (field.kind === "option-list") {
     const existing = (current as { id: string }[] | undefined) ?? [];
     const existingIds = new Set(existing.map((e) => e.id));
-    return (
+    return withError(
       <FilterPicker
         title={`${field.name} (${existing.length} selected)`}
         items={field.allowedValues.map((v) => ({
@@ -141,38 +203,37 @@ export function FieldEditor({
             : {}),
         }))}
         onPick={(id) => {
-          if (existingIds.has(id)) {
-            if (!field.required || existing.length > 1) {
-              onSubmit(existing.filter((value) => value.id !== id));
-            }
-          } else {
-            onSubmit([...existing, { id }]);
-          }
+          onEdit?.();
+          const next = toggleListValue(existing, { id }, (value) => value.id, field.required);
+          if (next) onSubmit(next);
         }}
+        {...pickerProps}
         {...(!field.required ? { onClear: () => onSubmit([]) } : {})}
-        onCancel={onCancel}
-      />
+      />,
     );
   }
 
   if (field.kind === "user" && users) {
     const currentId = (current as { accountId: string } | undefined)?.accountId;
-    return (
+    return withError(
       <FilterPicker
         title={field.name}
         items={users.map((u) => ({ id: u.accountId, label: u.displayName }))}
         {...(currentId ? { currentId } : {})}
-        onPick={(accountId) => onSubmit({ accountId })}
+        {...pickerProps}
+        onPick={(accountId) => {
+          onEdit?.();
+          onSubmit({ accountId });
+        }}
         {...(!field.required ? { onClear: () => onSubmit(null) } : {})}
-        onCancel={onCancel}
-      />
+      />,
     );
   }
 
   if (field.kind === "user-list" && users) {
     const existing = (current as { accountId: string }[] | undefined) ?? [];
     const existingIds = new Set(existing.map((e) => e.accountId));
-    return (
+    return withError(
       <FilterPicker
         title={`${field.name} (${existing.length} selected)`}
         items={users.map((u) => ({
@@ -188,104 +249,104 @@ export function FieldEditor({
             : {}),
         }))}
         onPick={(accountId) => {
-          if (existingIds.has(accountId)) {
-            if (!field.required || existing.length > 1) {
-              onSubmit(existing.filter((value) => value.accountId !== accountId));
-            }
-          } else {
-            onSubmit([...existing, { accountId }]);
-          }
+          onEdit?.();
+          const next = toggleListValue(
+            existing,
+            { accountId },
+            (value) => value.accountId,
+            field.required,
+          );
+          if (next) onSubmit(next);
         }}
+        {...pickerProps}
         {...(!field.required ? { onClear: () => onSubmit([]) } : {})}
-        onCancel={onCancel}
-      />
+      />,
     );
   }
 
-  if (field.kind === "number") {
-    const initial = typeof current === "number" ? String(current) : "";
-    return (
-      <InlineFieldInput
-        field={field.name}
-        initial={initial}
-        placeholder={field.required ? "number" : "number (empty to clear)"}
-        onSubmit={(raw) => {
-          const trimmed = raw.trim();
-          if (trimmed === "") {
-            if (!field.required) onSubmit(null);
-            return;
-          }
-          const n = Number(trimmed);
-          // Non-numeric: no-op. The input stays mounted with the user's
-          // text so they can correct it; the placeholder names the format.
-          if (!Number.isFinite(n)) return;
-          onSubmit(n);
-        }}
-        onCancel={onCancel}
-      />
-    );
-  }
-
-  if (field.kind === "date") {
-    const initial = typeof current === "string" ? current : "";
-    return (
-      <InlineFieldInput
-        field={field.name}
-        initial={initial}
-        placeholder={field.required ? "YYYY-MM-DD" : "YYYY-MM-DD (empty to clear)"}
-        onSubmit={(raw) => {
-          const trimmed = raw.trim();
-          if (trimmed === "") {
-            if (!field.required) onSubmit(null);
-            return;
-          }
-          // Reject both malformed and impossible dates (e.g. 2026-13-45)
-          // before they POST — a round-trip parse catches calendar overflow
-          // that the shape regex alone would pass.
-          if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return;
-          const d = new Date(`${trimmed}T00:00:00Z`);
-          if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== trimmed) return;
-          onSubmit(trimmed);
-        }}
-        onCancel={onCancel}
-      />
-    );
-  }
-
-  if (field.kind === "string-list") {
-    // Labels-shaped: comma-separated tokens, trimmed, empties dropped.
-    const initial = Array.isArray(current) ? (current as string[]).join(", ") : "";
-    return (
-      <InlineFieldInput
-        field={field.name}
-        initial={initial}
-        placeholder={field.required ? "comma-separated" : "comma-separated (empty to clear)"}
-        onSubmit={(raw) => {
-          const tokens = raw
-            .split(",")
-            .map((s) => s.trim())
-            .filter((s) => s.length > 0);
-          if (tokens.length > 0 || !field.required) onSubmit(tokens);
-        }}
-        onCancel={onCancel}
-      />
-    );
-  }
-
-  // `text` and anything that falls through (shouldn't happen — unsupported
-  // is filtered by the caller).
-  const initial = typeof current === "string" ? current : "";
+  const inputKind = field.kind;
+  const initial =
+    inputKind === "number"
+      ? typeof current === "number"
+        ? String(current)
+        : ""
+      : inputKind === "string-list"
+        ? Array.isArray(current)
+          ? (current as string[]).join(", ")
+          : ""
+        : typeof current === "string"
+          ? current
+          : "";
+  const placeholder =
+    inputKind === "number"
+      ? "number"
+      : inputKind === "date"
+        ? "YYYY-MM-DD"
+        : inputKind === "string-list"
+          ? "comma-separated"
+          : "text";
   return (
     <InlineFieldInput
       field={field.name}
       initial={initial}
-      placeholder={field.required ? "text" : "text (empty to clear)"}
+      placeholder={field.required ? placeholder : `${placeholder} (empty to clear)`}
+      submitLabel={submitLabel}
+      error={error}
+      onChange={onEdit}
+      busy={busy}
+      busyLabel={busyLabel}
+      validate={(raw) => {
+        const trimmed = raw.trim();
+        if (inputKind === "string-list") {
+          return field.required && !raw.split(",").some((value) => value.trim())
+            ? "Enter at least one value."
+            : null;
+        }
+        if (!trimmed) return field.required ? `${field.name} is required.` : null;
+        if (inputKind === "number") {
+          return Number.isFinite(Number(trimmed)) ? null : "Enter a finite number.";
+        }
+        if (inputKind === "date") {
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return "Enter a date as YYYY-MM-DD.";
+          const date = new Date(`${trimmed}T00:00:00Z`);
+          return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === trimmed
+            ? null
+            : "Enter a valid calendar date.";
+        }
+        return null;
+      }}
       onSubmit={(raw) => {
         const trimmed = raw.trim();
-        if (trimmed !== "") onSubmit(raw);
-        else if (!field.required) onSubmit(null);
+        if (inputKind === "string-list") {
+          onSubmit(
+            raw
+              .split(",")
+              .map((value) => value.trim())
+              .filter(Boolean),
+          );
+        } else if (!trimmed) {
+          if (!field.required) onSubmit(null);
+        } else if (inputKind === "number") {
+          onSubmit(Number(trimmed));
+        } else if (inputKind === "date") {
+          onSubmit(trimmed);
+        } else {
+          onSubmit(raw);
+        }
       }}
       onCancel={onCancel}
     />
   );
+}
+
+function toggleListValue<T>(
+  values: T[],
+  selected: T,
+  getId: (value: T) => string,
+  required: boolean,
+): T[] | undefined {
+  const id = getId(selected);
+  if (!values.some((value) => getId(value) === id)) return [...values, selected];
+  if (required && values.length === 1) return undefined;
+  return values.filter((value) => getId(value) !== id);
 }

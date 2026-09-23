@@ -4,8 +4,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { RecentIssue } from "../cache";
 import type { JiraConfig } from "../config";
 import { useDimensions } from "../hooks";
-import { type IssueSearchResult, searchIssues } from "../jira";
-import { clamp, fg, stickyScroll, theme, truncate } from "../ui";
+import { ISSUE_SEARCH_LIMIT, type IssueSearchResult, searchIssues } from "../jira";
+import { useSelectionIndex } from "../selection";
+import { clamp, errorMessage, fg, stickyScroll, theme, truncate } from "../ui";
+import { ErrorMessage, errorMessageHeight } from "./ErrorMessage";
 import { Hint } from "./Hint";
 import { TextInput } from "./TextInput";
 
@@ -22,12 +24,14 @@ import { TextInput } from "./TextInput";
 // a single list the cursor walks. `sep` rows are skipped by navigation.
 type Row =
   | { kind: "sep"; label: string }
-  | { kind: "issue"; key: string; summary: string; issueType?: string };
+  | { kind: "issue"; key: string; summary: string; issueType?: string }
+  | { kind: "retry" };
 
 type SearchState = {
   query: string;
   status: "idle" | "loading" | "done" | "error";
   results: IssueSearchResult[];
+  error?: string;
 };
 
 function normalizeQuery(query: string): string {
@@ -46,7 +50,7 @@ function buildRows(recents: RecentIssue[], query: string, search: SearchState): 
   const matchedRecents = matchingRecents(recents, query);
   const rows: Row[] = [];
   if (matchedRecents.length > 0) {
-    rows.push({ kind: "sep", label: "recent" });
+    rows.push({ kind: "sep", label: "Recent" });
     for (const recent of matchedRecents) {
       rows.push({ kind: "issue", key: recent.key, summary: recent.summary });
     }
@@ -60,13 +64,14 @@ function buildRows(recents: RecentIssue[], query: string, search: SearchState): 
   const status = current ? search.status : "loading";
   const label =
     status === "loading"
-      ? "all issues · searching…"
+      ? "All issues · Searching…"
       : status === "error"
-        ? "all issues · search failed"
+        ? "All issues · Search failed"
         : globalResults.length === 0
-          ? "all issues · no matches"
-          : "all issues";
+          ? "All issues · No matches"
+          : "All issues";
   rows.push({ kind: "sep", label });
+  if (status === "error") rows.push({ kind: "retry" });
   for (const result of globalResults) {
     rows.push({
       kind: "issue",
@@ -83,22 +88,48 @@ export function QuickOpen({
   recents,
   onPick,
   onCancel,
+  dimensions,
 }: {
   cfg: JiraConfig;
   recents: RecentIssue[];
   onPick: (key: string) => void;
   onCancel: () => void;
+  dimensions?: { cols: number; rows: number };
 }) {
-  const { rows: termRows } = useDimensions();
+  const measured = useDimensions();
+  const { cols: termCols, rows: termRows } = dimensions ?? measured;
   const [q, setQ] = useState("");
-  const [idx, setIdx] = useState(0);
+  const [, setIdx, getIdx] = useSelectionIndex();
+  const queryRef = useRef("");
+  const selectionQueryRef = useRef("");
+  const [retryAttempt, setRetryAttempt] = useState(0);
   const [search, setSearch] = useState<SearchState>({ query: "", status: "idle", results: [] });
+  const searchRef = useRef(search);
+  searchRef.current = search;
+  const updateSearch = useCallback((next: SearchState) => {
+    searchRef.current = next;
+    setSearch(next);
+  }, []);
   const scrollRef = useRef(0);
   // Sequence-guard so a slow global search that resolves after a newer
   // keystroke (or after cancel) can't overwrite fresher results.
   const searchSeq = useRef(0);
 
   const query = normalizeQuery(q);
+  const changeQuery = (value: string) => {
+    const normalized = normalizeQuery(value);
+    queryRef.current = normalized;
+    selectionQueryRef.current = normalized;
+    setIdx(0);
+    scrollRef.current = 0;
+    setQ(value);
+  };
+  const moveSelection = (delta: number) => {
+    const currentRows = buildRows(recents, queryRef.current, searchRef.current);
+    const selectable = currentRows.filter((row) => row.kind !== "sep");
+    selectionQueryRef.current = queryRef.current;
+    setIdx(clamp(getIdx() + delta, 0, Math.max(0, selectable.length - 1)));
+  };
   const invalidateSearch = useCallback((seq: number) => {
     if (searchSeq.current === seq) searchSeq.current++;
   }, []);
@@ -108,20 +139,20 @@ export function QuickOpen({
   useEffect(() => {
     if (!query) {
       searchSeq.current++;
-      setSearch({ query: "", status: "idle", results: [] });
+      updateSearch({ query: "", status: "idle", results: [] });
       return;
     }
     const seq = ++searchSeq.current;
-    setSearch({ query, status: "loading", results: [] });
+    updateSearch({ query, status: "loading", results: [] });
     const t = setTimeout(async () => {
       try {
         const results = await searchIssues(cfg, query);
-        if (seq === searchSeq.current) setSearch({ query, status: "done", results });
-      } catch {
+        if (seq === searchSeq.current) updateSearch({ query, status: "done", results });
+      } catch (error) {
         // Surface failure in the section label rather than passing it off as
         // "no matches" — a network error and an empty result look different.
         if (seq === searchSeq.current) {
-          setSearch({ query, status: "error", results: [] });
+          updateSearch({ query, status: "error", results: [], error: errorMessage(error) });
         }
       }
     }, 200);
@@ -129,7 +160,7 @@ export function QuickOpen({
       clearTimeout(t);
       invalidateSearch(seq);
     };
-  }, [query, cfg, invalidateSearch]);
+  }, [query, cfg, invalidateSearch, retryAttempt, updateSearch]);
 
   // Build the flat row list: recents section (filtered by query when typing),
   // then — once typing — the global-search section with recents already shown
@@ -137,12 +168,20 @@ export function QuickOpen({
   const rows = buildRows(recents, query, search);
 
   // Selectable indices only (skip separators) — navigation snaps between them.
-  const pickable = rows.flatMap((r, i) => (r.kind === "issue" ? [i] : []));
+  const pickable = rows.flatMap((row, index) => (row.kind === "sep" ? [] : [index]));
   // `idx` is an index into `pickable`; clamp it as the list changes under us.
-  const sel = clamp(idx, 0, Math.max(0, pickable.length - 1));
+  const sel = clamp(getIdx(), 0, Math.max(0, pickable.length - 1));
   const cursorRow = pickable[sel] ?? -1;
 
-  const maxVisible = Math.max(5, termRows - 9);
+  const innerHeight = Math.max(1, termRows - 6);
+  // Title (1), input with top margin (2), list top margin (1), footer with
+  // top margin (2), and both possible list indicators (2).
+  const errorRows =
+    search.status === "error" && search.error
+      ? 1 + errorMessageHeight(search.error, Math.max(1, termCols - 6), 2)
+      : 0;
+  const listHeight = Math.max(1, innerHeight - 6 - errorRows);
+  const maxVisible = Math.max(1, listHeight - 2);
   const scroll = stickyScroll(
     rows.length,
     maxVisible,
@@ -159,33 +198,38 @@ export function QuickOpen({
   const hiddenBelow = rows.length - Math.min(rows.length, scroll + maxVisible);
 
   return (
-    <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.accent}>
+    <Box
+      flexDirection="column"
+      width={termCols}
+      height={termRows}
+      padding={2}
+      borderStyle="round"
+      borderColor={theme.accent}
+    >
       <Text color={theme.accent} bold>
-        quick open
+        Quick open
       </Text>
       <Box marginTop={1}>
         <Text color={theme.muted}>› </Text>
         <TextInput
           value={q}
-          placeholder="issue key or summary — recent issues shown by default…"
-          onChange={(v) => {
-            setQ(v);
-            setIdx(0);
-          }}
-          onUpArrow={() => setIdx(clamp(sel - 1, 0, Math.max(0, pickable.length - 1)))}
-          onDownArrow={() => setIdx(clamp(sel + 1, 0, Math.max(0, pickable.length - 1)))}
+          placeholder="issue key or title — recent issues shown by default…"
+          width={Math.max(1, termCols - 8)}
+          onChange={changeQuery}
+          onUpArrow={() => moveSelection(-1)}
+          onDownArrow={() => moveSelection(1)}
           onSubmit={(submittedValue) => {
             const submittedQuery = normalizeQuery(submittedValue);
-            const submittedRows = buildRows(recents, submittedQuery, search);
-            const submittedPickable = submittedRows.filter(
-              (row): row is Extract<Row, { kind: "issue" }> => row.kind === "issue",
-            );
+            const submittedRows = buildRows(recents, submittedQuery, searchRef.current);
+            const submittedPickable = submittedRows.filter((row) => row.kind !== "sep");
             const submittedCursor =
-              submittedQuery === query
-                ? clamp(idx, 0, Math.max(0, submittedPickable.length - 1))
+              selectionQueryRef.current === submittedQuery
+                ? clamp(getIdx(), 0, Math.max(0, submittedPickable.length - 1))
                 : 0;
             const row = submittedPickable[submittedCursor];
             if (row?.kind === "issue") onPick(row.key);
+            else if (row?.kind === "retry" && submittedQuery === queryRef.current)
+              setRetryAttempt((attempt) => attempt + 1);
           }}
           onCancel={() => {
             searchSeq.current++;
@@ -194,12 +238,12 @@ export function QuickOpen({
         />
       </Box>
 
-      <Box marginTop={1} flexDirection="column">
+      <Box marginTop={1} flexDirection="column" height={listHeight} overflow="hidden">
         {/* rows is only empty with no query (no recents) — a typed query always
             has at least the "all issues" separator, whose label carries the
             no-matches state. */}
         {rows.length === 0 ? (
-          <Text color={theme.muted}>no recent issues — type to search</Text>
+          <Text color={theme.muted}>No recent issues. Type to search.</Text>
         ) : (
           <>
             {scroll > 0 ? <Text color={theme.muted}> ^ {scroll} more</Text> : null}
@@ -208,13 +252,27 @@ export function QuickOpen({
               if (row.kind === "sep") {
                 return (
                   <Text key={`sep-${abs}`} color={theme.accentAlt} bold>
-                    {row.label}
+                    {truncate(row.label, Math.max(1, termCols - 6))}
                   </Text>
                 );
               }
               const selected = abs === cursorRow;
+              if (row.kind === "retry") {
+                return (
+                  <Box key={`retry-${abs}`}>
+                    <Text color={selected ? theme.accent : theme.muted} bold={selected}>
+                      {selected ? "> " : "  "}Retry server search
+                    </Text>
+                  </Box>
+                );
+              }
+              const typeWidth = row.issueType ? Bun.stringWidth(row.issueType) + 1 : 0;
+              const titleWidth = Math.max(
+                1,
+                termCols - 6 - 2 - Bun.stringWidth(row.key) - 3 - typeWidth,
+              );
               return (
-                <Box key={row.key}>
+                <Box key={row.key} width={Math.max(1, termCols - 6)} height={1} overflow="hidden">
                   <Text color={selected ? theme.accent : theme.muted}>
                     {selected ? "> " : "  "}
                   </Text>
@@ -223,7 +281,7 @@ export function QuickOpen({
                   </Text>
                   <Text color={theme.muted}> · </Text>
                   <Text {...fg(selected ? theme.fg : theme.fgDim)}>
-                    {truncate(row.summary, 60)}
+                    {truncate(row.summary, titleWidth)}
                   </Text>
                   {row.issueType ? <Text color={theme.muted}> {row.issueType}</Text> : null}
                 </Box>
@@ -234,10 +292,17 @@ export function QuickOpen({
         )}
       </Box>
 
+      {search.status === "error" && search.error ? (
+        <Box marginTop={1} width={Math.max(1, termCols - 6)}>
+          <ErrorMessage message={search.error} width={Math.max(1, termCols - 6)} rows={2} />
+        </Box>
+      ) : null}
+
       <Box marginTop={1}>
         <Hint k="↑↓" label="nav" />
-        <Hint k="⏎" label="open" />
+        <Hint k="⏎" label={rows[cursorRow]?.kind === "retry" ? "retry" : "open"} />
         <Hint k="esc" label="cancel" />
+        <Text color={theme.muted}> up to {ISSUE_SEARCH_LIMIT} server results</Text>
       </Box>
     </Box>
   );

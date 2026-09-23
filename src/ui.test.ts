@@ -7,9 +7,6 @@ describe("terminal-width text", () => {
     expect(truncate("界界a", 4)).toBe("界…");
     expect(truncate("e\u0301clair", 2)).toBe("e\u0301…");
     expect(Bun.stringWidth(truncate("🙂🙂", 3))).toBe(3);
-  });
-
-  test("uses the full budget when no truncation is needed", () => {
     expect(truncate("界a", 3)).toBe("界a");
     expect(truncate("anything", 0)).toBe("");
   });

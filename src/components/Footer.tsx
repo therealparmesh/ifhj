@@ -21,7 +21,72 @@ type FooterProps = {
   onSearchChange: (v: string) => void;
   onSearchSubmit: (v: string) => void;
   onSearchCancel: () => void;
+  emptyMessage?: string | undefined;
 };
+
+type FooterHintState = Pick<
+  FooterProps,
+  "filterCount" | "hasSwimlanes" | "swimActive" | "query" | "matches" | "matchIdx"
+> & { hasIssue: boolean };
+
+function normalHints(state: FooterHintState): { k: string; label: string }[] {
+  return [
+    { k: "↑↓←→/hjkl", label: "nav" },
+    ...(state.hasIssue
+      ? [
+          { k: "⏎", label: "actions" },
+          { k: "v", label: "view" },
+          { k: "t", label: "transition" },
+          { k: "< >", label: "move col" },
+          { k: "[ ]", label: "rank" },
+          { k: "m", label: "move" },
+          { k: "i", label: "assign me" },
+          { k: "y", label: "copy key" },
+        ]
+      : []),
+    { k: "c", label: "create" },
+    { k: "a", label: "quick add" },
+    { k: "/", label: "highlight" },
+    ...(state.query
+      ? [
+          {
+            k: "n N",
+            label:
+              state.matches === 0 ? "no matches" : `match ${state.matchIdx + 1}/${state.matches}`,
+          },
+        ]
+      : []),
+    { k: "f", label: "filter" },
+    ...(state.filterCount > 0 ? [{ k: "F", label: "clear filters" }] : []),
+    ...(state.hasSwimlanes
+      ? [{ k: "s", label: state.swimActive ? "flat view" : "swimlanes" }]
+      : []),
+    { k: "R", label: "quick open" },
+    { k: "r", label: "refresh" },
+    { k: "?", label: "help" },
+    { k: "q", label: "boards" },
+  ];
+}
+
+export function footerRowCount(
+  termCols: number,
+  mode: FooterProps["mode"],
+  state: FooterHintState,
+): number {
+  if (mode === "search") return 4;
+  const width = Math.max(1, termCols - 2);
+  let lines = 1;
+  let used = 0;
+  for (const hint of normalHints(state)) {
+    const itemWidth = Bun.stringWidth(hint.k) + Bun.stringWidth(hint.label) + 3;
+    if (used > 0 && used + itemWidth > width) {
+      lines++;
+      used = 0;
+    }
+    used += itemWidth;
+  }
+  return 2 + lines;
+}
 
 export function Footer({
   currentIssue,
@@ -37,6 +102,7 @@ export function Footer({
   onSearchChange,
   onSearchSubmit,
   onSearchCancel,
+  emptyMessage,
 }: FooterProps) {
   return (
     <Box flexDirection="column" paddingX={1}>
@@ -66,7 +132,7 @@ export function Footer({
           </Text>
         </Box>
       ) : (
-        <Text color={theme.muted}>no issue selected</Text>
+        <Text color={theme.muted}>{emptyMessage ?? "No issue selected."}</Text>
       )}
 
       {mode === "search" ? (
@@ -77,7 +143,8 @@ export function Footer({
             </Text>
             <TextInput
               value={searchBuffer}
-              placeholder="filter by key, summary, assignee…"
+              placeholder="highlight by key, title, or assignee…"
+              width={Math.max(1, termCols - 34)}
               onChange={onSearchChange}
               onSubmit={onSearchSubmit}
               onCancel={onSearchCancel}
@@ -101,35 +168,17 @@ export function Footer({
         // global/meta, and each conditional group only shows when its keys are
         // actually live, so the bar never advertises a no-op.
         <Box flexWrap="wrap">
-          <Hint k="↑↓←→/hjkl" label="nav" />
-          {currentIssue ? (
-            <>
-              <Hint k="⏎" label="actions" />
-              <Hint k="v" label="view" />
-              <Hint k="t" label="transition" />
-              <Hint k="< >" label="± col" />
-              <Hint k="[ ]" label="rank" />
-              <Hint k="m" label="move" />
-              <Hint k="i" label="assign me" />
-              <Hint k="y" label="yank" />
-            </>
-          ) : null}
-          <Hint k="c" label="create" />
-          <Hint k="a" label="quick add" />
-          <Hint k="/" label="search" />
-          {query ? (
-            <Hint
-              k="n N"
-              label={matches === 0 ? "no matches" : `match ${matchIdx + 1}/${matches}`}
-            />
-          ) : null}
-          <Hint k="f" label="filter" />
-          {filterCount > 0 ? <Hint k="F" label="clear filters" /> : null}
-          {hasSwimlanes ? <Hint k="s" label={swimActive ? "flat view" : "swimlanes"} /> : null}
-          <Hint k="R" label="open" />
-          <Hint k="r" label="refresh" />
-          <Hint k="?" label="help" />
-          <Hint k="q" label="quit" />
+          {normalHints({
+            hasIssue: currentIssue !== null,
+            filterCount,
+            hasSwimlanes,
+            swimActive,
+            query,
+            matches,
+            matchIdx,
+          }).map((hint) => (
+            <Hint key={`${hint.k}-${hint.label}`} k={hint.k} label={hint.label} />
+          ))}
         </Box>
       )}
     </Box>

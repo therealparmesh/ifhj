@@ -20,7 +20,7 @@ type Props = {
 export function FilterPickerModal({ label, items, currentId, onPick, onClear, onCancel }: Props) {
   return (
     <FilterPicker
-      title={`filter by ${label}`}
+      title={`Filter by ${label}`}
       items={items.map((v) => ({ id: v, label: v }))}
       {...(currentId ? { currentId } : {})}
       borderColor={theme.info}

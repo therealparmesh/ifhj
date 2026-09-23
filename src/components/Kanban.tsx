@@ -67,7 +67,7 @@ export function ColumnView({
     >
       <Box paddingX={1} justifyContent="space-between">
         <Text color={isActive ? theme.accent : theme.fgDim} bold>
-          {truncate(column.name.toUpperCase(), Math.max(4, width - 14))}
+          {truncate(column.name, Math.max(4, width - 14))}
         </Text>
         <Box>
           {estimateSum > 0 ? (

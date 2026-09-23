@@ -2,66 +2,50 @@ import { expect, test } from "bun:test";
 import { PassThrough } from "node:stream";
 
 import { render, Text } from "ink";
-import { useEffect } from "react";
 
 import { useLoading } from "./hooks";
-import { deferred } from "./test/utils";
+import { createTerminal, deferred, waitFor } from "./test/utils";
 
 test("useLoading remains busy until all concurrent promises settle", async () => {
-  const states: boolean[] = [];
   let track!: <T>(promise: Promise<T>) => Promise<T>;
-  let busy = false;
-  let renderResolve: (() => void) | undefined;
+  const terminal = createTerminal();
 
-  function Harness() {
+  function Harness({ probe }: { probe: number }) {
     const loading = useLoading();
     track = loading.track;
-    busy = loading.busy;
-    useEffect(() => {
-      states.push(loading.busy);
-    }, [loading.busy]);
-    return <Text>{loading.busy ? "busy" : "idle"}</Text>;
+    return (
+      <Text>
+        {loading.busy ? "busy" : "idle"} {probe}
+      </Text>
+    );
   }
 
-  const app = render(<Harness />, {
+  const app = render(<Harness probe={0} />, {
     interactive: true,
-    stdout: new PassThrough() as unknown as typeof process.stdout,
+    stdout: terminal.stdout as unknown as typeof process.stdout,
     stderr: new PassThrough() as unknown as typeof process.stderr,
     patchConsole: false,
-    onRender: () => {
-      renderResolve?.();
-      renderResolve = undefined;
-    },
+    debug: true,
   });
-  const nextRender = () =>
-    new Promise<void>((resolve) => {
-      renderResolve = resolve;
-    });
   try {
     await app.waitUntilRenderFlush();
     const first = deferred<void>();
     const second = deferred<void>();
-    let committed = nextRender();
     const firstTracked = track(first.promise);
     const secondTracked = track(second.promise);
-    await committed;
-    await app.waitUntilRenderFlush();
-    expect(busy).toBe(true);
+    await waitFor(() => terminal.output().includes("busy 0"), "concurrent loading frame");
 
-    committed = nextRender();
     first.resolve();
     await firstTracked;
-    await committed;
-    await app.waitUntilRenderFlush();
-    expect(busy).toBe(true);
+    terminal.clearOutput();
+    app.rerender(<Harness probe={1} />);
+    await waitFor(() => terminal.output().includes("busy 1"), "one-promise-pending frame");
+    expect(terminal.output()).toContain("busy 1");
 
-    committed = nextRender();
     second.resolve();
     await secondTracked;
-    await committed;
-    await app.waitUntilRenderFlush();
-    expect(busy).toBe(false);
-    expect(states).toEqual([false, true, false]);
+    await waitFor(() => terminal.output().includes("idle 1"), "settled loading frame");
+    expect(terminal.output()).toContain("idle 1");
   } finally {
     app.unmount();
   }

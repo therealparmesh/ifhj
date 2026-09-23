@@ -1,12 +1,15 @@
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import { useCallback, useMemo, useRef, useState } from "react";
 
 import type { JiraConfig } from "../config";
 import { useDimensions } from "../hooks";
+import { useInput } from "../input";
 import type { EditableField, EditableFieldValue, Transition } from "../jira";
 import { clamp, fg, stickyScroll, theme, truncate } from "../ui";
+import { ErrorMessage } from "./ErrorMessage";
 import { FieldEditor } from "./FieldEditor";
 import { Hint } from "./Hint";
+import { LoadingLine } from "./LoadingLine";
 
 /**
  * Render a stored value back as a human label for the field list.
@@ -55,6 +58,10 @@ export function TransitionScreenModal({
   initialValues = {},
   onCancel,
   onSubmit,
+  onOpenIssue,
+  onEdit,
+  busy = false,
+  error,
 }: {
   cfg: JiraConfig;
   projectKey: string;
@@ -63,6 +70,11 @@ export function TransitionScreenModal({
   initialValues?: Record<string, EditableFieldValue>;
   onCancel: (values?: Record<string, EditableFieldValue>) => void;
   onSubmit: (fields: Record<string, EditableFieldValue>) => void;
+  onOpenIssue?: () => void;
+  /** Called only when a collected field value actually changes. */
+  onEdit?: () => void;
+  busy?: boolean | undefined;
+  error?: string | null | undefined;
 }) {
   const { cols: termCols, rows: termRows } = useDimensions();
   const [values, setValues] = useState<Record<string, EditableFieldValue>>(initialValues);
@@ -70,6 +82,10 @@ export function TransitionScreenModal({
   const scrollRef = useRef(0);
   const [editing, setEditing] = useState<EditableField | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const submitLocked = useRef(false);
+  const wasBusy = useRef(busy);
+  if (wasBusy.current && !busy) submitLocked.current = false;
+  wasBusy.current = busy;
 
   const fields = transition.requiredFields;
 
@@ -92,16 +108,19 @@ export function TransitionScreenModal({
   }, [fields, values]);
 
   const doSubmit = useCallback(() => {
+    if (submitLocked.current) return;
     if (missing.length > 0) {
       setStatusMsg(`missing: ${missing.join(", ")}`);
       return;
     }
+    submitLocked.current = true;
     onSubmit(values);
   }, [missing, values, onSubmit]);
 
   useInput(
     (input, key) => {
       if (key.escape) return onCancel(values);
+      if (input === "o" && onOpenIssue) return onOpenIssue();
       if (key.downArrow || input === "j")
         setIdx((i) => clamp(i + 1, 0, Math.max(0, fields.length - 1)));
       else if (key.upArrow || input === "k")
@@ -110,14 +129,18 @@ export function TransitionScreenModal({
         const f = fields[clamp(idx, 0, fields.length - 1)];
         if (!f) return;
         if (f.kind === "unsupported") {
-          setStatusMsg(`${f.name}: complete this required field in the browser`);
+          setStatusMsg(
+            onOpenIssue
+              ? `${f.name} needs Jira. Press o to open ${issueKey}.`
+              : `${f.name}: complete this required field in the browser`,
+          );
           return;
         }
         setStatusMsg(null);
         setEditing(f);
       } else if (input === "s") doSubmit();
     },
-    { isActive: editing === null },
+    { isActive: editing === null && !busy },
   );
 
   if (editing) {
@@ -130,6 +153,8 @@ export function TransitionScreenModal({
         {...(currentValue !== undefined ? { current: currentValue } : {})}
         onSubmit={(value) => {
           setStatusMsg(null);
+          const nextValue = value === null ? undefined : value;
+          if (JSON.stringify(currentValue) !== JSON.stringify(nextValue)) onEdit?.();
           setValues((v) => {
             const next = { ...v };
             if (value === null) delete next[editing.id];
@@ -139,6 +164,7 @@ export function TransitionScreenModal({
           setEditing(null);
         }}
         onCancel={() => setEditing(null)}
+        submitLabel="use value"
       />
     );
   }
@@ -172,7 +198,9 @@ export function TransitionScreenModal({
       </Box>
       <Box marginTop={1}>
         <Text color={theme.muted} wrap="truncate">
-          fill required fields, then press s to submit
+          {busy
+            ? "Saving transition. Inputs are unavailable."
+            : "Fill required fields, then press s to submit."}
         </Text>
       </Box>
       <Box flexDirection="column" marginTop={1}>
@@ -186,7 +214,7 @@ export function TransitionScreenModal({
             !(Array.isArray(values[f.id]) && (values[f.id] as unknown[]).length === 0);
           const valueStr =
             f.kind === "unsupported"
-              ? `(${f.schemaType} — complete in browser)`
+              ? `(${f.schemaType} — ${busy ? "unavailable while saving" : onOpenIssue ? "press o to open" : "complete in browser"})`
               : displayValue(f, values[f.id]);
           const valueCell = truncate(valueStr, valueWidth).padEnd(valueWidth);
           const color =
@@ -205,21 +233,29 @@ export function TransitionScreenModal({
         })}
       </Box>
       <Box marginTop={1} justifyContent="space-between">
-        <Box>
-          <Hint k="↑↓" label="nav" />
-          <Hint k="⏎" label="edit" />
-          <Hint k="s" label="submit" />
-          <Hint k="esc" label="cancel" />
-        </Box>
+        {busy ? (
+          <Text color={theme.muted}>Please wait for the save to finish.</Text>
+        ) : (
+          <Box>
+            <Hint k="↑↓" label="nav" />
+            <Hint k="⏎" label="edit" />
+            <Hint k="s" label="submit" />
+            {onOpenIssue ? <Hint k="o" label={`open ${issueKey}`} /> : null}
+            <Hint k="esc" label="cancel" />
+          </Box>
+        )}
         <Text color={theme.muted}>
           {cursor + 1}/{fields.length}
         </Text>
       </Box>
-      {statusMsg ? (
+      {busy ? <LoadingLine label="Saving transition…" /> : null}
+      {error ? (
         <Box marginTop={1}>
-          <Text color={theme.error} wrap="truncate">
-            {statusMsg}
-          </Text>
+          <ErrorMessage message={error} width={contentWidth} />
+        </Box>
+      ) : statusMsg ? (
+        <Box marginTop={1}>
+          <ErrorMessage message={statusMsg} width={contentWidth} />
         </Box>
       ) : missing.length > 0 ? (
         <Box marginTop={1}>

@@ -2,9 +2,10 @@ import { afterEach, expect, test } from "bun:test";
 import { PassThrough } from "node:stream";
 
 import { render } from "ink";
+import { useState } from "react";
 
 import type { EditableField, Transition } from "../jira";
-import { createTerminal, nextTurn, sendInput } from "../test/utils";
+import { createTerminal, nextTurn, sendInput, waitFor } from "../test/utils";
 import { TransitionScreenModal } from "./TransitionScreenModal";
 
 const apps: ReturnType<typeof render>[] = [];
@@ -99,4 +100,173 @@ test("windows required fields and keeps the selected last field reachable", asyn
     app.unmount();
     apps.splice(apps.indexOf(app), 1);
   }
+});
+
+test("notifies a stateful caller only when a field value changes", async () => {
+  const field: EditableField = {
+    id: "estimate",
+    name: "Estimate",
+    kind: "number",
+    required: true,
+    hasDefaultValue: false,
+  };
+  const transition: Transition = {
+    id: "close",
+    name: "Close issue",
+    toStatusId: "2",
+    requiredFields: [field],
+  };
+  let edits = 0;
+  function Harness() {
+    const [error, setError] = useState<string | null>("Estimate must be positive");
+    return (
+      <TransitionScreenModal
+        cfg={{ server: "https://transition-edit.invalid", authHeader: "Basic test" }}
+        projectKey="TEST"
+        issueKey="TEST-1"
+        transition={transition}
+        initialValues={{ estimate: -1 }}
+        error={error}
+        onEdit={() => {
+          edits++;
+          setError(null);
+        }}
+        onCancel={() => {}}
+        onSubmit={() => {}}
+      />
+    );
+  }
+  const terminal = createTerminal();
+  const app = render(<Harness />, {
+    interactive: true,
+    stdin: terminal.stdin as unknown as typeof process.stdin,
+    stdout: terminal.stdout as unknown as typeof process.stdout,
+    stderr: new PassThrough() as unknown as typeof process.stderr,
+    exitOnCtrlC: false,
+    patchConsole: false,
+  });
+  apps.push(app);
+  await app.waitUntilRenderFlush();
+
+  terminal.clearOutput();
+  await sendInput(app, terminal.stdin, "\r");
+  terminal.clearOutput();
+  await sendInput(app, terminal.stdin, "\u001b");
+  await waitFor(() => terminal.output().includes("Close issue"), "form after unchanged cancel");
+  expect(edits).toBe(0);
+  expect(terminal.output()).toContain("Estimate must be positive");
+
+  terminal.clearOutput();
+  await sendInput(app, terminal.stdin, "\r");
+  terminal.clearOutput();
+  await sendInput(app, terminal.stdin, "\r");
+  await waitFor(() => terminal.output().includes("Close issue"), "form after unchanged submit");
+  expect(edits).toBe(0);
+  expect(terminal.output()).toContain("Estimate must be positive");
+  expect(terminal.output()).toMatch(/Estimate\s+-1/);
+
+  terminal.clearOutput();
+  await sendInput(app, terminal.stdin, "\r");
+  await sendInput(app, terminal.stdin, "\x15");
+  await sendInput(app, terminal.stdin, "5");
+  terminal.clearOutput();
+  await sendInput(app, terminal.stdin, "\r");
+  expect(edits).toBe(1);
+  expect(terminal.output()).toMatch(/Estimate\s+5/);
+  expect(terminal.output()).not.toContain("Estimate must be positive");
+});
+
+test("busy transition copy does not advertise disabled actions", async () => {
+  const busyTransition: Transition = {
+    id: "close",
+    name: "Close issue",
+    toStatusId: "2",
+    requiredFields: [
+      {
+        id: "root-cause",
+        name: "Root cause",
+        kind: "unsupported",
+        schemaType: "richtext",
+        required: true,
+        hasDefaultValue: false,
+      },
+    ],
+  };
+  const idleTransition: Transition = {
+    ...busyTransition,
+    requiredFields: [
+      {
+        id: "estimate",
+        name: "Estimate",
+        kind: "number",
+        required: true,
+        hasDefaultValue: false,
+      },
+    ],
+  };
+  let cancels = 0;
+  let submits = 0;
+  let edits = 0;
+  let opens = 0;
+  const terminal = createTerminal();
+  const element = (busy: boolean) => (
+    <TransitionScreenModal
+      cfg={{ server: "https://transition-busy.invalid", authHeader: "Basic test" }}
+      projectKey="TEST"
+      issueKey="TEST-1"
+      transition={busy ? busyTransition : idleTransition}
+      initialValues={busy ? {} : { estimate: 1 }}
+      busy={busy}
+      onCancel={() => cancels++}
+      onSubmit={() => submits++}
+      onEdit={() => edits++}
+      onOpenIssue={() => opens++}
+    />
+  );
+  const app = render(element(true), {
+    interactive: true,
+    stdin: terminal.stdin as unknown as typeof process.stdin,
+    stdout: terminal.stdout as unknown as typeof process.stdout,
+    stderr: new PassThrough() as unknown as typeof process.stderr,
+    exitOnCtrlC: false,
+    patchConsole: false,
+  });
+  apps.push(app);
+  await app.waitUntilRenderFlush();
+  const frame = terminal.output();
+  expect(frame).toContain("Saving transition. Inputs are unavailable.");
+  expect(frame).toContain("unavailable while saving");
+  expect(frame).toContain("Please wait for the save to finish");
+  expect(frame).not.toContain("press s to submit");
+  expect(frame).not.toContain("press o to open");
+  expect(frame).not.toContain("esc cancel");
+  expect(frame).not.toContain("s submit");
+  await sendInput(app, terminal.stdin, "s");
+  await sendInput(app, terminal.stdin, "\r");
+  await sendInput(app, terminal.stdin, "o");
+  await sendInput(app, terminal.stdin, "\u001b");
+  expect({ cancels, submits, edits, opens }).toEqual({
+    cancels: 0,
+    submits: 0,
+    edits: 0,
+    opens: 0,
+  });
+
+  terminal.clearOutput();
+  app.rerender(element(false));
+  await waitFor(() => terminal.output().includes("Fill required fields"), "enabled transition");
+  await sendInput(app, terminal.stdin, "\r");
+  await sendInput(app, terminal.stdin, "\x15");
+  await sendInput(app, terminal.stdin, "2");
+  await sendInput(app, terminal.stdin, "\r");
+  expect(edits).toBe(1);
+  await sendInput(app, terminal.stdin, "o");
+  await sendInput(app, terminal.stdin, "s");
+  await sendInput(app, terminal.stdin, "\u001b");
+  expect({ cancels, submits, edits, opens }).toEqual({
+    cancels: 1,
+    submits: 1,
+    edits: 1,
+    opens: 1,
+  });
 });

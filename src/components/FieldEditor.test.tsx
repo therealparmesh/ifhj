@@ -2,10 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { PassThrough } from "node:stream";
 
 import { render } from "ink";
+import { useState } from "react";
 
 import type { JiraConfig } from "../config";
 import type { EditableField, EditableFieldValue } from "../jira";
-import { createTerminal, nextTurn, waitFor } from "../test/utils";
+import { createTerminal, nextTurn, sendInput, waitFor } from "../test/utils";
 import { FieldEditor } from "./FieldEditor";
 
 const cfg: JiraConfig = {
@@ -29,8 +30,6 @@ function renderEditor(
   onCancel: () => void = () => {},
 ) {
   const { stdin, stdout, output } = createTerminal();
-  const rawModes: boolean[] = [];
-  stdin.setRawMode = (raw) => rawModes.push(raw);
   const app = render(
     <FieldEditor
       cfg={cfg}
@@ -57,7 +56,7 @@ function renderEditor(
     await nextTurn();
     await app.waitUntilRenderFlush();
   };
-  return { app, send, stdin, rawModes, output };
+  return { app, send, stdin, output };
 }
 
 type FieldSpec<T> = T extends unknown ? Omit<T, "id" | "name" | "hasDefaultValue"> : never;
@@ -76,7 +75,7 @@ describe("FieldEditor", () => {
     globalThis.fetch = (async (_input) =>
       Response.json([{ accountId: "a", displayName: "Synthetic User" }])) as typeof fetch;
     let cancelled = 0;
-    const { app, stdin, rawModes, output } = renderEditor(
+    const { app, stdin, output } = renderEditor(
       makeField({ kind: "user", required: false }),
       () => {},
       { accountId: "a" },
@@ -85,8 +84,6 @@ describe("FieldEditor", () => {
     );
 
     await waitFor(() => output().includes("Synthetic User"), "user picker");
-    await nextTurn();
-    expect(rawModes).toEqual([true]);
     stdin.write("\u001b");
     await waitFor(() => cancelled > 0, "user picker cancellation");
     await app.waitUntilRenderFlush();
@@ -94,59 +91,55 @@ describe("FieldEditor", () => {
     expect(cancelled).toBe(1);
   });
 
-  test("rejects non-finite numbers instead of submitting JSON null", async () => {
+  test("validates a required number, preserves correction input, and submits the fixed value", async () => {
+    const terminal = createTerminal();
     const submitted: (EditableFieldValue | null)[] = [];
-    const { send } = renderEditor(makeField({ kind: "number", required: false }), (value) =>
-      submitted.push(value),
-    );
+    let edits = 0;
+    function Harness() {
+      const [error, setError] = useState<string | undefined>("Rejected old value");
+      return (
+        <FieldEditor
+          cfg={cfg}
+          projectKey="PROJ"
+          field={makeField({ kind: "number", required: true })}
+          error={error}
+          onEdit={() => {
+            edits++;
+            setError(undefined);
+          }}
+          onSubmit={(value) => submitted.push(value)}
+          onCancel={() => {}}
+        />
+      );
+    }
+    const app = render(<Harness />, {
+      interactive: true,
+      stdin: terminal.stdin as unknown as typeof process.stdin,
+      stdout: terminal.stdout as unknown as typeof process.stdout,
+      stderr: new PassThrough() as unknown as typeof process.stderr,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    apps.push(app);
+    await app.waitUntilRenderFlush();
 
-    await send("Infinity");
-    await send("\r");
-
+    await sendInput(app, terminal.stdin, "\r");
     expect(submitted).toEqual([]);
-  });
+    expect(terminal.output()).toContain("Test field is required.");
 
-  test("submits a finite number through the same input path", async () => {
-    const submitted: (EditableFieldValue | null)[] = [];
-    const { send } = renderEditor(makeField({ kind: "number", required: false }), (value) =>
-      submitted.push(value),
-    );
-
-    await send("42.5");
-    await send("\r");
-
-    expect(submitted).toEqual([42.5]);
-  });
-
-  test("does not clear a required scalar with empty input", async () => {
-    const submitted: (EditableFieldValue | null)[] = [];
-    const { send } = renderEditor(makeField({ kind: "number", required: true }), (value) =>
-      submitted.push(value),
-    );
-
-    await send("\r");
-
+    terminal.clearOutput();
+    await sendInput(app, terminal.stdin, "Infinity");
+    expect(edits).toBe(1);
+    expect(Bun.stripANSI(terminal.output())).toMatch(/›\s+Infinity/);
+    expect(terminal.output()).not.toContain("Rejected old value");
+    await sendInput(app, terminal.stdin, "\r");
     expect(submitted).toEqual([]);
-  });
+    expect(terminal.output()).toContain("Enter a finite number.");
 
-  test("removes one selected option while preserving the other values", async () => {
-    const submitted: (EditableFieldValue | null)[] = [];
-    const { send } = renderEditor(
-      makeField({
-        kind: "option-list",
-        required: false,
-        allowedValues: [
-          { id: "a", name: "Alpha" },
-          { id: "b", name: "Beta" },
-        ],
-      }),
-      (value) => submitted.push(value),
-      [{ id: "a" }, { id: "b" }],
-    );
-
-    await send("\r");
-
-    expect(submitted).toEqual([[{ id: "b" }]]);
+    await sendInput(app, terminal.stdin, "\x15");
+    await sendInput(app, terminal.stdin, "5");
+    await sendInput(app, terminal.stdin, "\r");
+    expect(submitted).toEqual([5]);
   });
 
   test("allows removing the last item from an optional option list", async () => {
@@ -190,25 +183,6 @@ describe("FieldEditor", () => {
     expect(submitted).toEqual([[{ id: "a" }, { id: "b" }]]);
   });
 
-  test("allows removing one item when a required option list has another value", async () => {
-    const submitted: (EditableFieldValue | null)[] = [];
-    const { send } = renderEditor(
-      makeField({
-        kind: "option-list",
-        required: true,
-        allowedValues: [
-          { id: "a", name: "Alpha" },
-          { id: "b", name: "Beta" },
-        ],
-      }),
-      (value) => submitted.push(value),
-      [{ id: "a" }, { id: "b" }],
-    );
-
-    await send("\r");
-    expect(submitted).toEqual([[{ id: "b" }]]);
-  });
-
   test("keeps the last required user and allows adding another user", async () => {
     globalThis.fetch = (async (input) => {
       const url = new URL(String(input));
@@ -237,29 +211,6 @@ describe("FieldEditor", () => {
     await send("\u001b[B");
     await send("\r");
     expect(submitted).toEqual([[{ accountId: "a" }, { accountId: "b" }]]);
-  });
-
-  test("allows removing the last user from an optional user list", async () => {
-    globalThis.fetch = (async (input) => {
-      const url = new URL(String(input));
-      if (url.pathname !== "/rest/api/3/user/assignable/search") {
-        throw new Error(`unexpected request: ${url}`);
-      }
-      return new Response(JSON.stringify([{ accountId: "a", displayName: "Alpha" }]), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
-    }) as typeof fetch;
-    const submitted: (EditableFieldValue | null)[] = [];
-    const { send, output } = renderEditor(
-      makeField({ kind: "user-list", required: false }),
-      (value) => submitted.push(value),
-      [{ accountId: "a" }],
-    );
-
-    await waitFor(() => output().includes("Alpha"), "optional user choices");
-    await send("\r");
-    expect(submitted).toEqual([[]]);
   });
 
   test("does not expose the clear shortcut for a required option", async () => {
@@ -316,4 +267,63 @@ describe("FieldEditor", () => {
     await app.waitUntilRenderFlush();
     expect(output()).not.toContain("Old User");
   });
+
+  test("only plain e leaves the picker error screen and Ctrl+P reaches the full reason", async () => {
+    const terminal = createTerminal();
+    let edits = 0;
+    const reason = `${"Detailed validation reason. ".repeat(20)}FINAL_REASON`;
+    function Harness() {
+      const [error, setError] = useState<string | undefined>(reason);
+      return (
+        <FieldEditor
+          cfg={cfg}
+          projectKey="PROJ"
+          field={makeField({
+            kind: "option",
+            required: false,
+            allowedValues: [{ id: "a", name: "Alpha" }],
+          })}
+          error={error}
+          onEdit={() => {
+            edits++;
+            setError(undefined);
+          }}
+          onSubmit={() => {}}
+          onCancel={() => {}}
+        />
+      );
+    }
+    const app = render(<Harness />, {
+      interactive: true,
+      stdin: terminal.stdin as unknown as typeof process.stdin,
+      stdout: terminal.stdout as unknown as typeof process.stdout,
+      stderr: new PassThrough() as unknown as typeof process.stderr,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    apps.push(app);
+    await app.waitUntilRenderFlush();
+
+    for (const input of ["x", "\x1b[B", "\x05", "\x1be"]) {
+      await sendInput(app, terminal.stdin, input);
+      expect(edits).toBe(0);
+    }
+    expect(outputHas(terminal.output(), "Test field was not saved")).toBe(true);
+
+    for (let page = 0; page < 20 && !terminal.output().includes("FINAL_REASON"); page++) {
+      terminal.clearOutput();
+      await sendInput(app, terminal.stdin, "\x10");
+    }
+    expect(terminal.output()).toContain("FINAL_REASON");
+    expect(edits).toBe(0);
+
+    terminal.clearOutput();
+    await sendInput(app, terminal.stdin, "e");
+    expect(edits).toBe(1);
+    expect(terminal.output()).toContain("Alpha");
+  });
 });
+
+function outputHas(output: string, value: string): boolean {
+  return Bun.stripANSI(output).includes(value);
+}

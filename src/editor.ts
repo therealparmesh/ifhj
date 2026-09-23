@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
+import { setExternalScreenActive } from "./hooks";
 import type { JiraUser } from "./jira";
 import { writeMentionAssets } from "./nvimMention";
 
@@ -37,9 +38,9 @@ function resolveEditor(): { bin: string; label: string } | null {
   return cachedEditor;
 }
 
-/** Human name of the resolved editor, for the "editing in …" banner. */
+/** Human name of the resolved editor for action labels and help. */
 export function editorLabel(): string {
-  return resolveEditor()?.label ?? "your editor";
+  return resolveEditor()?.label ?? "Neovim or Vim";
 }
 
 export async function editInNeovim(
@@ -59,8 +60,16 @@ export async function editInNeovim(
   const stdout = process.stdout;
 
   const savedListeners = stdin.listeners("data") as ((chunk: Buffer | string) => void)[];
+  const savedReadableListeners = stdin.listeners("readable") as (() => void)[];
+  const readableListenersToRestore = new Set<(...args: unknown[]) => void>(savedReadableListeners);
+  const originalOn = stdin.on;
+  const originalAddListener = stdin.addListener;
+  const originalOff = stdin.off;
+  const originalRemoveListener = stdin.removeListener;
+  const savedResizeListeners = stdout.listeners("resize") as (() => void)[];
   const wasRaw = stdin.isRaw;
   let inputDetached = false;
+  let externalScreenOwned = false;
   let text = initial;
   let failure: unknown;
 
@@ -72,8 +81,42 @@ export async function editInNeovim(
         ? await writeMentionAssets(opts.mentionUsers)
         : null;
 
+    setExternalScreenActive(true);
+    externalScreenOwned = true;
     for (const l of savedListeners) stdin.off("data", l);
+    for (const listener of savedReadableListeners) stdin.off("readable", listener);
     inputDetached = true;
+    const deferReadable = (
+      original: typeof stdin.on,
+      event: string | symbol,
+      listener: (...args: unknown[]) => void,
+    ) => {
+      if (event === "readable") {
+        readableListenersToRestore.add(listener);
+        return stdin;
+      }
+      return original.call(stdin, event, listener);
+    };
+    stdin.on = ((event: string | symbol, listener: (...args: unknown[]) => void) =>
+      deferReadable(originalOn, event, listener)) as typeof stdin.on;
+    stdin.addListener = ((event: string | symbol, listener: (...args: unknown[]) => void) =>
+      deferReadable(originalAddListener, event, listener)) as typeof stdin.addListener;
+    const deferReadableRemoval = (
+      original: typeof stdin.off,
+      event: string | symbol,
+      listener: (...args: unknown[]) => void,
+    ) => {
+      if (event === "readable") {
+        readableListenersToRestore.delete(listener);
+        return stdin;
+      }
+      return original.call(stdin, event, listener);
+    };
+    stdin.off = ((event: string | symbol, listener: (...args: unknown[]) => void) =>
+      deferReadableRemoval(originalOff, event, listener)) as typeof stdin.off;
+    stdin.removeListener = ((event: string | symbol, listener: (...args: unknown[]) => void) =>
+      deferReadableRemoval(originalRemoveListener, event, listener)) as typeof stdin.removeListener;
+    for (const listener of savedResizeListeners) stdout.off("resize", listener);
     if (wasRaw) stdin.setRawMode(false);
     stdin.pause();
     stdout.write("\x1b[?25h\x1b[2J\x1b[H");
@@ -111,11 +154,19 @@ export async function editInNeovim(
     };
     try {
       if (inputDetached) {
+        stdin.on = originalOn;
+        stdin.addListener = originalAddListener;
+        stdin.off = originalOff;
+        stdin.removeListener = originalRemoveListener;
         restore(() => stdout.write("\x1b[2J\x1b[H\x1b[?25l"));
         if (wasRaw) restore(() => stdin.setRawMode(true));
-        restore(() => stdin.resume());
         for (const l of savedListeners) restore(() => stdin.on("data", l));
+        for (const listener of readableListenersToRestore)
+          restore(() => stdin.on("readable", listener));
+        restore(() => stdin.resume());
+        for (const listener of savedResizeListeners) restore(() => stdout.on("resize", listener));
       }
+      if (externalScreenOwned) setExternalScreenActive(false);
     } finally {
       try {
         if (assets) await assets.cleanup();

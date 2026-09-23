@@ -52,12 +52,12 @@ async function runBoardCase(name: string, body: string): Promise<unknown> {
             isLast: true,
             issues,
           });
-          const mount = (terminal, maxColumns = 4) => render(
+          const mount = (terminal, maxColumns = 4, onExit = () => {}) => render(
             React.createElement(BoardView, {
               cfg,
               board: { id: 7, name: "Test board" },
               maxColumns,
-              onExit() {},
+              onExit,
             }),
             {
               interactive: true,
@@ -69,6 +69,22 @@ async function runBoardCase(name: string, body: string): Promise<unknown> {
             },
           );
           const send = (app, terminal, input) => sendInput(app, terminal.stdin, input);
+          const currentPaint = async (app, terminal, columns = 120) => {
+            const rows = terminal.stdout.rows;
+            Object.defineProperty(process.stdout, "columns", { value: columns + 1, configurable: true });
+            terminal.stdout.columns = columns + 1;
+            process.stdout.emit("resize");
+            await nextTurn();
+            await app.waitUntilRenderFlush();
+            terminal.clearOutput();
+            Object.defineProperty(process.stdout, "columns", { value: columns, configurable: true });
+            terminal.stdout.columns = columns;
+            terminal.stdout.rows = rows;
+            process.stdout.emit("resize");
+            await nextTurn();
+            await app.waitUntilRenderFlush();
+            return Bun.stripANSI(terminal.output());
+          };
 
           ${body}
         `,
@@ -79,6 +95,146 @@ async function runBoardCase(name: string, body: string): Promise<unknown> {
   } finally {
     await rm(home, { recursive: true, force: true });
   }
+}
+
+async function runDetailMutationInvalidationCase(
+  operation: "clear" | "watch",
+  lookupOutcome: "success" | "failure",
+): Promise<unknown> {
+  return runBoardCase(
+    `detail-${operation}-invalidates-${lookupOutcome}-transition`,
+    `
+      const operation = ${JSON.stringify(operation)};
+      const lookupOutcome = ${JSON.stringify(lookupOutcome)};
+      const transitionLookup = deferred();
+      let transitionGets = 0;
+      const mutation = deferred();
+      const mutationRequests = [];
+      globalThis.fetch = async (input, init = {}) => {
+        const url = new URL(String(input));
+        const method = init.method ?? "GET";
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname === "/rest/api/3/myself") return response({ accountId: "me" });
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") return issuePage(issue("PROJ-1", "Card"));
+        if (url.pathname === "/rest/api/3/issue/PROJ-1/transitions") {
+          transitionGets++;
+          return transitionLookup.promise;
+        }
+        if (url.pathname === "/rest/api/3/issue/PROJ-1" && method === "PUT") {
+          mutationRequests.push({ method, path: url.pathname, body: JSON.parse(String(init.body)) });
+          return mutation.promise;
+        }
+        if (url.pathname === "/rest/api/3/issue/PROJ-1/watchers" && method === "POST") {
+          mutationRequests.push({ method, path: url.pathname, body: init.body ?? null });
+          return mutation.promise;
+        }
+        if (url.pathname === "/rest/api/3/issue/PROJ-1") {
+          const value = issue("PROJ-1", "Card");
+          Object.assign(value.fields, {
+            project: { key: "PROJ" },
+            assignee: { accountId: "user-1", displayName: "Synthetic User" },
+            watches: { isWatching: false },
+            components: [], fixVersions: [], subtasks: [], issuelinks: [],
+            created: "2026-01-01T00:00:00.000Z",
+          });
+          return response(value);
+        }
+        if (url.pathname.endsWith("/comment")) return response({ comments: [] });
+        if (url.pathname.endsWith("/editmeta")) {
+          return response({ fields: {
+            assignee: { name: "Assignee", required: false, schema: { type: "user" } },
+          } });
+        }
+        throw new Error("unexpected request: " + method + " " + url);
+      };
+
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Card"), "board");
+      await send(app, terminal, "v");
+      await waitFor(() => terminal.output().includes("Description"), "detail");
+      await send(app, terminal, "t");
+      await waitFor(() => transitionGets === 1, "one pending transition lookup");
+      if (operation === "clear") {
+        await send(app, terminal, "\\t");
+        await send(app, terminal, "\\u001b[B");
+        await send(app, terminal, "x");
+      } else {
+        await send(app, terminal, "w");
+      }
+      await waitFor(() => mutationRequests.length === 1, operation + " mutation request");
+
+      if (lookupOutcome === "failure") {
+        transitionLookup.resolve(new Response("old transition rejected", { status: 503 }));
+      } else {
+        transitionLookup.resolve(response({ transitions: [{ id: "done", name: "Done", to: { id: "2" }, fields: {} }] }));
+      }
+      await nextTurn();
+      await nextTurn();
+      const pendingPaint = await currentPaint(app, terminal);
+
+      if (operation === "clear") await send(app, terminal, "x");
+      else await send(app, terminal, "w");
+      await nextTurn();
+      const duplicateCount = mutationRequests.length;
+
+      mutation.resolve(new Response("mutation rejected", { status: 400 }));
+      await waitFor(() => terminal.output().includes("mutation rejected"), operation + " mutation failure");
+      const settledPaint = await currentPaint(app, terminal);
+      app.unmount();
+      console.log(JSON.stringify({
+        request: mutationRequests[0],
+        transitionGets,
+        duplicateCount,
+        pendingDetail: pendingPaint.includes("Description"),
+        pendingPickerAbsent: !pendingPaint.includes("Transition PROJ-1"),
+        pendingWriteVisible: pendingPaint.includes("Saving") || pendingPaint.includes("Please wait"),
+        staleErrorAbsent: !pendingPaint.includes("old transition rejected"),
+        settledDetail: settledPaint.includes("Description"),
+        settledPickerAbsent: !settledPaint.includes("Transition PROJ-1"),
+      }));
+    `,
+  );
+}
+
+const detailMutationRequests = [
+  [
+    "clear",
+    "success",
+    {
+      method: "PUT",
+      path: "/rest/api/3/issue/PROJ-1",
+      body: { fields: { assignee: null } },
+    },
+  ],
+  [
+    "watch",
+    "failure",
+    {
+      method: "POST",
+      path: "/rest/api/3/issue/PROJ-1/watchers",
+      body: null,
+    },
+  ],
+] as const;
+
+for (const [operation, lookupOutcome, request] of detailMutationRequests) {
+  test(`detail ${operation} invalidates an older ${lookupOutcome} transition lookup while its write stays locked`, async () => {
+    expect(await runDetailMutationInvalidationCase(operation, lookupOutcome)).toEqual({
+      request,
+      transitionGets: 1,
+      duplicateCount: 1,
+      pendingDetail: true,
+      pendingPickerAbsent: true,
+      pendingWriteVisible: true,
+      staleErrorAbsent: true,
+      settledDetail: true,
+      settledPickerAbsent: true,
+    });
+  });
 }
 
 test("the newest overlapping load owns rendered and cached board data", async () => {
@@ -369,6 +525,185 @@ test("overlapping moves keep independent locks and a failure cannot clear succes
   });
 });
 
+test("single-packet Down and next-column transition target the new issue", async () => {
+  const result = await runBoardCase(
+    "rapid-direct-transition",
+    `
+      const posts = [];
+      let issueCalls = 0;
+      globalThis.fetch = async (input, init = {}) => {
+        const url = new URL(String(input));
+        const method = init.method ?? "GET";
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") {
+          issueCalls++;
+          return issuePage(issue("PROBE-1", "First"), issue("PROBE-2", "Second", issueCalls > 1 ? "2" : "1"));
+        }
+        const key = ["PROBE-1", "PROBE-2"].find((candidate) =>
+          url.pathname === "/rest/api/3/issue/" + candidate + "/transitions"
+        );
+        if (key && method === "GET") {
+          return response({ transitions: [{ id: "done", name: "Done", to: { id: "2" }, fields: {} }] });
+        }
+        if (key && method === "POST") {
+          posts.push(key);
+          return new Response(null, { status: 204 });
+        }
+        throw new Error("unexpected request: " + method + " " + url);
+      };
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Second"), "two cards");
+      await send(app, terminal, "\\u001b[B>");
+      await waitFor(() => posts.length === 1, "transition post");
+      app.unmount();
+      console.log(JSON.stringify({ posts }));
+    `,
+  );
+  expect(result).toEqual({ posts: ["PROBE-2"] });
+});
+
+test("burst flat-to-swim toggle navigation transitions the swim issue", async () => {
+  const result = await runBoardCase(
+    "rapid-flat-to-swim",
+    `
+      const posts = [];
+      globalThis.fetch = async (input, init = {}) => {
+        const url = new URL(String(input));
+        const method = init.method ?? "GET";
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) {
+          return response({ swimlanesData: { swimlaneStrategy: "assignee" } });
+        }
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") {
+          const first = issue("PROBE-1", "First");
+          first.fields.assignee = { displayName: "Alpha" };
+          const second = issue("PROBE-2", "Second");
+          second.fields.assignee = { displayName: "Beta" };
+          return issuePage(first, second);
+        }
+        const key = ["PROBE-1", "PROBE-2"].find((candidate) =>
+          url.pathname === "/rest/api/3/issue/" + candidate + "/transitions"
+        );
+        if (key && method === "GET") {
+          return response({ transitions: [{ id: "done", name: "Done", to: { id: "2" }, fields: {} }] });
+        }
+        if (key && method === "POST") {
+          posts.push(key);
+          return new Response(null, { status: 204 });
+        }
+        throw new Error("unexpected request: " + method + " " + url);
+      };
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("swimlanes"), "swimlane availability");
+      terminal.stdin.write("s"); terminal.stdin.emit("readable");
+      terminal.stdin.write("\\u001b[B"); terminal.stdin.emit("readable");
+      terminal.stdin.write(">"); terminal.stdin.emit("readable");
+      await waitFor(() => posts.length === 1, "swim transition post");
+      app.unmount();
+      console.log(JSON.stringify({ posts }));
+    `,
+  );
+  expect(result).toEqual({ posts: ["PROBE-2"] });
+});
+
+test("burst swim-to-flat toggle navigation opens the flat issue", async () => {
+  const result = await runBoardCase(
+    "rapid-swim-to-flat",
+    `
+      const opened = [];
+      globalThis.fetch = async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname === "/rest/api/3/myself") return response({ accountId: "me" });
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) {
+          return response({ swimlanesData: { swimlaneStrategy: "assignee" } });
+        }
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") {
+          const first = issue("PROBE-1", "First");
+          first.fields.assignee = { displayName: "Alpha" };
+          const second = issue("PROBE-2", "Second");
+          second.fields.assignee = { displayName: "Beta" };
+          return issuePage(first, second);
+        }
+        if (url.pathname === "/rest/api/3/issue/PROBE-2") {
+          opened.push("PROBE-2");
+          const value = issue("PROBE-2", "Second");
+          Object.assign(value.fields, { components: [], fixVersions: [], subtasks: [], issuelinks: [], created: "2026-01-01T00:00:00.000Z" });
+          return response(value);
+        }
+        if (url.pathname.endsWith("/comment")) return response({ comments: [] });
+        if (url.pathname.endsWith("/editmeta")) return response({ fields: {} });
+        throw new Error("unexpected request: " + url);
+      };
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("swimlanes"), "swimlane availability");
+      await send(app, terminal, "s");
+      await waitFor(() => terminal.output().includes("lanes"), "swim view");
+      terminal.stdin.write("s"); terminal.stdin.emit("readable");
+      terminal.stdin.write("\\u001b[B"); terminal.stdin.emit("readable");
+      terminal.stdin.write("v"); terminal.stdin.emit("readable");
+      await waitFor(() => opened.length === 1, "flat detail request");
+      app.unmount();
+      console.log(JSON.stringify({ opened }));
+    `,
+  );
+  expect(result).toEqual({ opened: ["PROBE-2"] });
+});
+
+test("highlight commit derives matches from the submitted callback value", async () => {
+  const result = await runBoardCase(
+    "rapid-highlight-submit",
+    `
+      const opened = [];
+      globalThis.fetch = async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname === "/rest/api/3/myself") return response({ accountId: "me" });
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") {
+          return issuePage(issue("PROBE-1", "First"), issue("PROBE-2", "Second"));
+        }
+        if (url.pathname === "/rest/api/3/issue/PROBE-2") {
+          opened.push("PROBE-2");
+          const value = issue("PROBE-2", "Second");
+          Object.assign(value.fields, { components: [], fixVersions: [], subtasks: [], issuelinks: [], created: "2026-01-01T00:00:00.000Z" });
+          return response(value);
+        }
+        if (url.pathname.endsWith("/comment")) return response({ comments: [] });
+        if (url.pathname.endsWith("/editmeta")) return response({ fields: {} });
+        throw new Error("unexpected request: " + url);
+      };
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Second"), "two cards");
+      await send(app, terminal, "/");
+      terminal.stdin.write("Second");
+      terminal.stdin.emit("readable");
+      terminal.stdin.write("\\r");
+      terminal.stdin.emit("readable");
+      await app.waitUntilRenderFlush();
+      await send(app, terminal, "v");
+      await waitFor(() => opened.length === 1, "highlighted issue detail");
+      const output = terminal.output();
+      app.unmount();
+      console.log(JSON.stringify({ opened, falseNoMatch: !output.includes("No matches.") }));
+    `,
+  );
+  expect(result).toEqual({ opened: ["PROBE-2"], falseNoMatch: true });
+});
+
 test("disposing a board cancels a queued coalesced reload", async () => {
   const result = await runBoardCase(
     "disposed-coalescer",
@@ -525,7 +860,7 @@ test("quick add routes types with extra required fields to full create", async (
       console.log(JSON.stringify({
         creates,
         fullCreate: terminal.output().includes("Create issue"),
-        quickAdd: terminal.output().includes("quick add ·"),
+        quickAdd: terminal.output().includes("Quick add ·"),
       }));
     `,
   );
@@ -563,7 +898,7 @@ test("quick add keeps the created key when status lookup fails", async () => {
         }
         if (url.pathname === "/rest/api/3/issue/PROJ-9") {
           statusGets++;
-          return new Response("status unavailable", { status: 503 });
+          return new Response("status unavailable " + "longreason".repeat(30) + " FOLLOWUP_END", { status: 503 });
         }
         throw new Error("unexpected request: " + (init.method ?? "GET") + " " + url);
       };
@@ -573,21 +908,30 @@ test("quick add keeps the created key when status lookup fails", async () => {
       await waitFor(() => terminal.output().includes("Existing card"), "initial board");
       terminal.clearOutput();
       await send(app, terminal, "a");
-      await waitFor(() => terminal.output().includes("quick add ·"), "quick add input");
+      await waitFor(() => terminal.output().includes("Quick add ·"), "quick add input");
       await send(app, terminal, "New card");
       await send(app, terminal, "\\r");
-      await waitFor(() => terminal.output().includes("created PROJ-9"), "partial create result");
+      await waitFor(() => terminal.output().includes("Created PROJ-9"), "partial create result");
+      for (let page = 0; page < 10; page++) await send(app, terminal, "\\x10");
+      const output = terminal.output();
       app.unmount();
       console.log(JSON.stringify({
         creates,
         statusGets,
-        keptKey: terminal.output().includes("created PROJ-9"),
-        partial: terminal.output().includes("couldn't move"),
+        keptKey: output.includes("Created PROJ-9"),
+        partial: output.includes("follow-up failed"),
+        fullReason: output.includes("FOLLOWUP_END"),
       }));
     `,
   );
 
-  expect(result).toEqual({ creates: 1, statusGets: 1, keptKey: true, partial: true });
+  expect(result).toEqual({
+    creates: 1,
+    statusGets: 1,
+    keptKey: true,
+    partial: true,
+    fullReason: true,
+  });
 });
 
 test("quick add routes a required postcreate transition through its field screen", async () => {
@@ -645,7 +989,7 @@ test("quick add routes a required postcreate transition through its field screen
       await send(app, terminal, "l");
       terminal.clearOutput();
       await send(app, terminal, "a");
-      await waitFor(() => terminal.output().includes("quick add ·"), "quick add input");
+      await waitFor(() => terminal.output().includes("Quick add ·"), "quick add input");
       await send(app, terminal, "Needs resolution");
       await send(app, terminal, "\\r");
       await waitFor(() => terminal.output().includes("Resolution"), "transition field screen");
@@ -661,6 +1005,59 @@ test("quick add routes a required postcreate transition through its field screen
   );
 
   expect(result).toEqual({ creates: 1, transitionPosts: 0, screen: true, keptKey: true });
+});
+
+test("quick-add follow-up cannot replace newer navigation", async () => {
+  const result = await runBoardCase(
+    "quick-followup-navigation",
+    `
+      const transitions = deferred();
+      let transitionRequested = false;
+      globalThis.fetch = async (input, init = {}) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") return issuePage(issue("PROJ-1", "Existing"));
+        if (url.pathname === "/rest/api/3/issue/createmeta/PROJ/issuetypes") {
+          return response({ issueTypes: [{ id: "1", name: "Task", subtask: false }] });
+        }
+        if (url.pathname === "/rest/api/3/issue/createmeta/PROJ/issuetypes/1") {
+          return response({ fields: [{ fieldId: "summary", name: "Title", required: true, schema: { type: "string" } }] });
+        }
+        if (url.pathname === "/rest/api/3/issueLinkType") return response({ issueLinkTypes: [] });
+        if (url.pathname === "/rest/api/3/issue" && init.method === "POST") return response({ key: "PROJ-9" }, 201);
+        if (url.pathname === "/rest/api/3/issue/PROJ-9") return response({ fields: { status: { id: "1" } } });
+        if (url.pathname === "/rest/api/3/issue/PROJ-9/transitions") {
+          transitionRequested = true;
+          return transitions.promise;
+        }
+        throw new Error("unexpected request: " + (init.method ?? "GET") + " " + url);
+      };
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Existing"), "board");
+      await send(app, terminal, "l");
+      await send(app, terminal, "a");
+      await waitFor(() => terminal.output().includes("Quick add"), "quick add");
+      await send(app, terminal, "Created card");
+      await send(app, terminal, "\\r");
+      await waitFor(() => transitionRequested, "post-create transition lookup");
+      await send(app, terminal, "J");
+      await waitFor(() => terminal.output().includes("JQL query"), "newer JQL navigation");
+      terminal.clearOutput();
+      transitions.resolve(response({ transitions: [{ id: "done", name: "Done", to: { id: "2" }, fields: {
+        customfield_1: { name: "Estimate", required: true, hasDefaultValue: false, schema: { type: "number" } },
+      } }] }));
+      await nextTurn();
+      await nextTurn();
+      const output = terminal.output();
+      app.unmount();
+      console.log(JSON.stringify({ replaced: output.includes("Estimate") }));
+    `,
+  );
+  expect(result).toEqual({ replaced: false });
 });
 
 test("detail users and subtask metadata use the issue project", async () => {
@@ -713,7 +1110,7 @@ test("detail users and subtask metadata use the issue project", async () => {
       const app = mount(terminal);
       await waitFor(() => terminal.output().includes("Other project card"), "board card");
       await send(app, terminal, "v");
-      await waitFor(() => terminal.output().includes("DESCRIPTION"), "detail view");
+      await waitFor(() => terminal.output().includes("Description"), "detail view");
       await send(app, terminal, "\\t");
       await send(app, terminal, "j");
       await send(app, terminal, "\\r");
@@ -744,6 +1141,1092 @@ test("detail users and subtask metadata use the issue project", async () => {
     standardShown: false,
   });
 }, 20_000);
+
+test("refresh preserves the selected issue key when rows reorder", async () => {
+  const result = await runBoardCase(
+    "selection-key",
+    `
+      let boardCalls = 0;
+      const opened = [];
+      globalThis.fetch = async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname === "/rest/api/3/myself") return response({ accountId: "me", displayName: "Me" });
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") {
+          boardCalls++;
+          return boardCalls === 1
+            ? issuePage(issue("PROJ-1", "First"), issue("PROJ-2", "Selected"))
+            : issuePage(issue("PROJ-9", "Inserted"), issue("PROJ-1", "First"), issue("PROJ-2", "Selected"));
+        }
+        if (url.pathname === "/rest/api/3/issue/PROJ-2") {
+          opened.push("PROJ-2");
+          const value = issue("PROJ-2", "Selected");
+          Object.assign(value.fields, { components: [], fixVersions: [], subtasks: [], issuelinks: [], created: "2026-01-01T00:00:00.000Z" });
+          return response(value);
+        }
+        if (url.pathname.endsWith("/comment")) return response({ comments: [] });
+        if (url.pathname.endsWith("/editmeta")) return response({ fields: {} });
+        throw new Error("unexpected request: " + url);
+      };
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Selected"), "initial issues");
+      await send(app, terminal, "j");
+      await send(app, terminal, "r");
+      await waitFor(() => boardCalls === 2, "refreshed issues");
+      await send(app, terminal, "v");
+      await waitFor(() => opened.length === 1, "selected detail");
+      app.unmount();
+      console.log(JSON.stringify({ opened: opened[0] }));
+    `,
+  );
+  expect(result).toEqual({ opened: "PROJ-2" });
+});
+
+test("a cancelled detail transition cannot reopen from a late response", async () => {
+  const result = await runBoardCase(
+    "stale-detail-transition",
+    `
+      const transition = deferred();
+      globalThis.fetch = async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname === "/rest/api/3/myself") return response({ accountId: "me", displayName: "Me" });
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") return issuePage(issue("PROJ-1", "Card"));
+        if (url.pathname === "/rest/api/3/issue/PROJ-1/transitions") return transition.promise;
+        if (url.pathname === "/rest/api/3/issue/PROJ-1") {
+          const value = issue("PROJ-1", "Card");
+          Object.assign(value.fields, { components: [], fixVersions: [], subtasks: [], issuelinks: [], created: "2026-01-01T00:00:00.000Z" });
+          return response(value);
+        }
+        if (url.pathname.endsWith("/comment")) return response({ comments: [] });
+        if (url.pathname.endsWith("/editmeta")) return response({ fields: {} });
+        throw new Error("unexpected request: " + url);
+      };
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Card"), "board");
+      await send(app, terminal, "v");
+      await waitFor(() => terminal.output().includes("Description"), "detail");
+      await send(app, terminal, "t");
+      await send(app, terminal, "\\u001b");
+      terminal.clearOutput();
+      transition.resolve(response({ transitions: [{ id: "done", name: "Done", to: { id: "2" }, fields: {} }] }));
+      await nextTurn();
+      await nextTurn();
+      const output = terminal.output();
+      app.unmount();
+      console.log(JSON.stringify({ reopened: output.includes("Transition PROJ-1") }));
+    `,
+  );
+  expect(result).toEqual({ reopened: false });
+});
+
+test("detail inline title invalidates a pending transition launch", async () => {
+  const result = await runBoardCase(
+    "detail-local-title-guard",
+    `
+      const transition = deferred();
+      globalThis.fetch = async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname === "/rest/api/3/myself") return response({ accountId: "me", displayName: "Me" });
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") return issuePage(issue("PROJ-1", "Card"));
+        if (url.pathname === "/rest/api/3/issue/PROJ-1/transitions") return transition.promise;
+        if (url.pathname === "/rest/api/3/issue/PROJ-1") {
+          const value = issue("PROJ-1", "Card");
+          Object.assign(value.fields, { components: [], fixVersions: [], subtasks: [], issuelinks: [], created: "2026-01-01T00:00:00.000Z" });
+          return response(value);
+        }
+        if (url.pathname.endsWith("/comment")) return response({ comments: [] });
+        if (url.pathname.endsWith("/editmeta")) return response({ fields: {} });
+        throw new Error("unexpected request: " + url);
+      };
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Card"), "board");
+      await send(app, terminal, "v");
+      await waitFor(() => terminal.output().includes("Description"), "detail");
+      await send(app, terminal, "t");
+      await send(app, terminal, "e");
+      await waitFor(() => terminal.output().includes("Title"), "inline title");
+      terminal.clearOutput();
+      transition.resolve(response({ transitions: [{ id: "done", name: "Done", to: { id: "2" }, fields: {} }] }));
+      await nextTurn();
+      await nextTurn();
+      const output = terminal.output();
+      app.unmount();
+      console.log(JSON.stringify({ replaced: output.includes("Transition PROJ-1") }));
+    `,
+  );
+  expect(result).toEqual({ replaced: false });
+});
+
+test("detail external editor invalidates a pending transition launch", async () => {
+  const result = await runBoardCase(
+    "detail-local-editor-guard",
+    `
+      const transition = deferred();
+      const editorExit = deferred();
+      let editorStarted = false;
+      globalThis.fetch = async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname === "/rest/api/3/myself") return response({ accountId: "me", displayName: "Me" });
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") return issuePage(issue("PROJ-1", "Card"));
+        if (url.pathname === "/rest/api/3/issue/PROJ-1/transitions") return transition.promise;
+        if (url.pathname === "/rest/api/3/issue/PROJ-1") {
+          const value = issue("PROJ-1", "Card");
+          Object.assign(value.fields, { components: [], fixVersions: [], subtasks: [], issuelinks: [], created: "2026-01-01T00:00:00.000Z" });
+          return response(value);
+        }
+        if (url.pathname.endsWith("/comment")) return response({ comments: [] });
+        if (url.pathname.endsWith("/editmeta")) return response({ fields: {} });
+        throw new Error("unexpected request: " + url);
+      };
+      const originalWhich = Bun.which;
+      const originalSpawn = Bun.spawn;
+      const originalWrite = process.stdout.write;
+      Bun.which = () => "/mock/editor";
+      Bun.spawn = () => {
+        editorStarted = true;
+        return { exitCode: 0, exited: editorExit.promise };
+      };
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      try {
+        await waitFor(() => terminal.output().includes("Card"), "board");
+        await send(app, terminal, "v");
+        await waitFor(() => terminal.output().includes("Description"), "detail");
+        await send(app, terminal, "t");
+        process.stdout.write = () => true;
+        terminal.stdin.write("E");
+        await waitFor(() => editorStarted, "fake editor handoff");
+        transition.resolve(response({ transitions: [{ id: "done", name: "Done", to: { id: "2" }, fields: {} }] }));
+        terminal.stdin.write("x");
+        await nextTurn();
+        editorExit.resolve(0);
+        await nextTurn();
+        await nextTurn();
+      } finally {
+        process.stdout.write = originalWrite;
+        Bun.which = originalWhich;
+        Bun.spawn = originalSpawn;
+      }
+      const output = terminal.output();
+      app.unmount();
+      console.log(JSON.stringify({ replaced: output.includes("Transition PROJ-1") }));
+    `,
+  );
+  expect(result).toEqual({ replaced: false });
+});
+
+test("board navigation invalidates a pending transition picker launch", async () => {
+  const result = await runBoardCase(
+    "stale-board-transition",
+    `
+      const transition = deferred();
+      globalThis.fetch = async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") return issuePage(issue("PROJ-1", "Card"));
+        if (url.pathname === "/rest/api/3/issue/PROJ-1/transitions") return transition.promise;
+        throw new Error("unexpected request: " + url);
+      };
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Card"), "board");
+      await send(app, terminal, "t");
+      await send(app, terminal, "e");
+      await waitFor(() => terminal.output().includes("Edit title"), "newer title screen");
+      terminal.clearOutput();
+      transition.resolve(response({ transitions: [{ id: "done", name: "Done", to: { id: "2" }, fields: {} }] }));
+      await nextTurn();
+      await nextTurn();
+      const output = terminal.output();
+      app.unmount();
+      console.log(JSON.stringify({ replaced: output.includes("Transition PROJ-1") }));
+    `,
+  );
+  expect(result).toEqual({ replaced: false });
+});
+
+test("Escape cancels a pending move lookup and suppresses its late screen", async () => {
+  const result = await runBoardCase(
+    "cancelled-move-lookup",
+    `
+      const transition = deferred();
+      globalThis.fetch = async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") return issuePage(issue("PROJ-1", "Card"));
+        if (url.pathname === "/rest/api/3/issue/PROJ-1/transitions") return transition.promise;
+        throw new Error("unexpected request: " + url);
+      };
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Card"), "board");
+      await send(app, terminal, "m");
+      await send(app, terminal, "\\u001b[B");
+      await send(app, terminal, "\\r");
+      await waitFor(() => terminal.output().includes("Loading transitions"), "move lookup");
+      await send(app, terminal, "\\u001b");
+      terminal.clearOutput();
+      transition.resolve(response({ transitions: [{ id: "done", name: "Done", to: { id: "2" }, fields: {
+        customfield_1: { name: "Estimate", required: true, hasDefaultValue: false, schema: { type: "number" } },
+      } }] }));
+      await nextTurn();
+      await nextTurn();
+      const output = terminal.output();
+      app.unmount();
+      console.log(JSON.stringify({ reopened: output.includes("Estimate") }));
+    `,
+  );
+  expect(result).toEqual({ reopened: false });
+});
+
+test("80x24 move lookup error stays bounded with recovery controls and full reason", async () => {
+  const result = await runBoardCase(
+    "bounded-move-error",
+    `
+      Object.defineProperty(process.stdout, "columns", { value: 80, configurable: true });
+      Object.defineProperty(process.stdout, "rows", { value: 24, configurable: true });
+      const reason = "wideword".repeat(30) + " MOVE_END";
+      globalThis.fetch = async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") return issuePage(issue("PROJ-1", "Card"));
+        if (url.pathname === "/rest/api/3/issue/PROJ-1/transitions") {
+          return new Response(reason, { status: 503 });
+        }
+        throw new Error("unexpected request: " + url);
+      };
+      const terminal = createTerminal(80, 24);
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Card"), "board");
+      await send(app, terminal, "m");
+      await send(app, terminal, "\\u001b[B");
+      await send(app, terminal, "\\r");
+      await waitFor(() => terminal.output().includes("Ctrl+P error"), "bounded move error");
+      Object.defineProperty(process.stdout, "columns", { value: 81, configurable: true });
+      terminal.stdout.columns = 81;
+      process.stdout.emit("resize");
+      await nextTurn();
+      await app.waitUntilRenderFlush();
+      terminal.clearOutput();
+      Object.defineProperty(process.stdout, "columns", { value: 80, configurable: true });
+      terminal.stdout.columns = 80;
+      process.stdout.emit("resize");
+      await nextTurn();
+      await app.waitUntilRenderFlush();
+      const first = Bun.stripANSI(terminal.output());
+      for (let page = 0; page < 10; page++) await send(app, terminal, "\\x10");
+      const output = terminal.output();
+      app.unmount();
+      console.log(JSON.stringify({
+        bounded: first.split("\\n").length <= 24,
+        controls: first.includes("esc cancel"),
+        full: output.includes("MOVE_END"),
+      }));
+    `,
+  );
+  expect(result).toEqual({ bounded: true, controls: true, full: true });
+});
+
+test("three long errors leave a complete selected rich card visible at 80x24", async () => {
+  const result = await runBoardCase(
+    "toast-card-space",
+    `
+      Object.defineProperty(process.stdout, "columns", { value: 80, configurable: true });
+      Object.defineProperty(process.stdout, "rows", { value: 24, configurable: true });
+      let transitionGets = 0;
+      globalThis.fetch = async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") {
+          return issuePage(
+            issue("PROBE-1", "First card"),
+            issue("PROBE-2", "Second card"),
+            issue("PROBE-3", "Third card"),
+            issue("PROBE-4", "Fourth card"),
+            issue("PROBE-5", "Fifth card"),
+          );
+        }
+        if (url.pathname === "/rest/api/3/issue/PROBE-1/transitions") {
+          transitionGets++;
+          return new Response("long failure " + "reason".repeat(40) + " END_" + transitionGets, { status: 503 });
+        }
+        throw new Error("unexpected request: " + url);
+      };
+      const terminal = createTerminal(80, 24);
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Second card"), "three cards");
+      for (let index = 0; index < 3; index++) {
+        await send(app, terminal, "t");
+        await waitFor(() => transitionGets === index + 1, "failed transition " + index);
+      }
+      terminal.clearOutput();
+      await send(app, terminal, "\\u001b[B");
+      await send(app, terminal, "\\u001b[B");
+      Object.defineProperty(process.stdout, "columns", { value: 81, configurable: true });
+      terminal.stdout.columns = 81;
+      process.stdout.emit("resize");
+      await nextTurn();
+      await app.waitUntilRenderFlush();
+      terminal.clearOutput();
+      Object.defineProperty(process.stdout, "columns", { value: 80, configurable: true });
+      terminal.stdout.columns = 80;
+      process.stdout.emit("resize");
+      await nextTurn();
+      await app.waitUntilRenderFlush();
+      const output = Bun.stripANSI(terminal.output());
+      const footer = output.indexOf("──────────────────────────────────────────────────────────────────────────────");
+      const grid = output.slice(0, footer);
+      app.unmount();
+      console.log(JSON.stringify({
+        bounded: output.split("\\n").length <= 24,
+        key: grid.includes("PROBE-3"),
+        title: grid.includes("Third card"),
+        assignee: grid.includes("Unassigned"),
+        above: grid.includes("^ 1 more"),
+        below: grid.includes("v 2 more"),
+      }));
+    `,
+  );
+  expect(result).toEqual({
+    bounded: true,
+    key: true,
+    title: true,
+    assignee: true,
+    above: true,
+    below: true,
+  });
+});
+
+test("Ctrl+G clears combined Board and detail notifications without moving selection", async () => {
+  const result = await runBoardCase(
+    "dismiss-combined-detail-notifications",
+    `
+      Object.defineProperty(process.stdout, "columns", { value: 80, configurable: true });
+      Object.defineProperty(process.stdout, "rows", { value: 24, configurable: true });
+      const detailGets = [];
+      globalThis.fetch = async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname === "/rest/api/3/myself") return response({ accountId: "me" });
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") {
+          return issuePage(issue("PROJ-1", "First"), issue("PROJ-2", "Second"));
+        }
+        if (url.pathname === "/rest/api/3/issue/PROJ-2/transitions") {
+          return new Response("transition denied", { status: 503 });
+        }
+        if (url.pathname === "/rest/api/3/issue/PROJ-2") {
+          detailGets.push("PROJ-2");
+          const value = issue("PROJ-2", "Second");
+          Object.assign(value.fields, { components: [], fixVersions: [], subtasks: [], issuelinks: [], created: "2026-01-01T00:00:00.000Z" });
+          return response(value);
+        }
+        if (url.pathname.endsWith("/comment")) return response({ comments: [] });
+        if (url.pathname.endsWith("/editmeta")) return response({ fields: {} });
+        throw new Error("unexpected request: " + url);
+      };
+      const terminal = createTerminal(80, 24);
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Second"), "board");
+      await send(app, terminal, "\\u001b[B");
+      await send(app, terminal, "t");
+      await waitFor(() => terminal.output().includes("transition denied"), "Board notification");
+      await send(app, terminal, "v");
+      await waitFor(() => terminal.output().includes("Description"), "detail");
+      await send(app, terminal, "\\t");
+      await send(app, terminal, "\\u001b[B");
+      await send(app, terminal, "\\u001b[B");
+      await send(app, terminal, "\\u001b[B");
+      await send(app, terminal, "x");
+      await waitFor(() => terminal.output().includes("Not editable"), "local detail notification");
+      const before = await currentPaint(app, terminal, 80);
+      await send(app, terminal, "\\x07");
+      const after = await currentPaint(app, terminal, 80);
+      await send(app, terminal, "q");
+      const board = await currentPaint(app, terminal, 80);
+      app.unmount();
+      console.log(JSON.stringify({
+        beforeExternal: before.includes("transition denied"),
+        beforeLocal: before.includes("Not editable"),
+        dismissHint: before.includes("Ctrl+G dismiss"),
+        beforeBounded: before.split("\\n").length <= 24,
+        afterExternal: after.includes("transition denied"),
+        afterLocal: after.includes("Not editable"),
+        fieldSelection: after.includes("> priority"),
+        detailIssue: after.includes("PROJ-2"),
+        boardExternal: board.includes("transition denied"),
+        boardIssue: board.includes("PROJ-2"),
+        detailGets,
+      }));
+    `,
+  );
+  expect(result).toEqual({
+    beforeExternal: true,
+    beforeLocal: true,
+    dismissHint: true,
+    beforeBounded: true,
+    afterExternal: false,
+    afterLocal: false,
+    fieldSelection: true,
+    detailIssue: true,
+    boardExternal: false,
+    boardIssue: true,
+    detailGets: ["PROJ-2"],
+  });
+});
+
+test("Ctrl+G does not dismiss a controlled title error or change its draft", async () => {
+  const result = await runBoardCase(
+    "controlled-title-error-not-dismissible",
+    `
+      const puts = [];
+      globalThis.fetch = async (input, init = {}) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") return issuePage(issue("PROJ-1", "Card"));
+        if (url.pathname === "/rest/api/3/issue/PROJ-1" && init.method === "PUT") {
+          puts.push(JSON.parse(String(init.body)));
+          return new Response("title rejected", { status: 400 });
+        }
+        throw new Error("unexpected request: " + (init.method ?? "GET") + " " + url);
+      };
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Card"), "board");
+      await send(app, terminal, "e");
+      await send(app, terminal, " draft");
+      await send(app, terminal, "\\r");
+      await waitFor(() => terminal.output().includes("Could not save title"), "controlled title error");
+      const before = await currentPaint(app, terminal);
+      await send(app, terminal, "\\x07");
+      const after = await currentPaint(app, terminal);
+      app.unmount();
+      console.log(JSON.stringify({
+        beforeDraft: before.includes("Card draft"),
+        beforeError: before.includes("title rejected"),
+        beforeDismissHint: before.includes("Ctrl+G dismiss"),
+        afterDraft: after.includes("Card draft"),
+        afterError: after.includes("title rejected"),
+        puts,
+      }));
+    `,
+  );
+  expect(result).toEqual({
+    beforeDraft: true,
+    beforeError: true,
+    beforeDismissHint: false,
+    afterDraft: true,
+    afterError: true,
+    puts: [{ fields: { summary: "Card draft" } }],
+  });
+});
+
+test("unmount invalidates a pending modal launch", async () => {
+  const result = await runBoardCase(
+    "unmounted-modal-launch",
+    `
+      const transition = deferred();
+      let requested = false;
+      globalThis.fetch = async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") return issuePage(issue("PROJ-1", "Card"));
+        if (url.pathname === "/rest/api/3/issue/PROJ-1/transitions") {
+          requested = true;
+          return transition.promise;
+        }
+        throw new Error("unexpected request: " + url);
+      };
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Card"), "board");
+      await send(app, terminal, "t");
+      await waitFor(() => requested, "transition lookup");
+      terminal.clearOutput();
+      app.unmount();
+      transition.resolve(response({ transitions: [{ id: "done", name: "Done", to: { id: "2" }, fields: {} }] }));
+      await nextTurn();
+      await nextTurn();
+      console.log(JSON.stringify({ latePaint: terminal.output().includes("Transition PROJ-1") }));
+    `,
+  );
+  expect(result).toEqual({ latePaint: false });
+});
+
+test("move cancellation returns to detail with its field-pane focus", async () => {
+  const result = await runBoardCase(
+    "detail-move-return",
+    `
+      globalThis.fetch = async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname === "/rest/api/3/myself") return response({ accountId: "me", displayName: "Me" });
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") return issuePage(issue("PROJ-1", "Card"));
+        if (url.pathname === "/rest/api/3/issue/PROJ-1") {
+          const value = issue("PROJ-1", "Card");
+          Object.assign(value.fields, { components: [], fixVersions: [], subtasks: [], issuelinks: [], created: "2026-01-01T00:00:00.000Z" });
+          return response(value);
+        }
+        if (url.pathname.endsWith("/comment")) return response({ comments: [] });
+        if (url.pathname.endsWith("/editmeta")) return response({ fields: {} });
+        throw new Error("unexpected request: " + url);
+      };
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Card"), "board");
+      await send(app, terminal, "v");
+      await waitFor(() => terminal.output().includes("Description"), "detail");
+      await send(app, terminal, "\\t");
+      await waitFor(() => terminal.output().includes("> status"), "field pane");
+      await send(app, terminal, "m");
+      await waitFor(() => terminal.output().includes("Move PROJ-1 to"), "move picker");
+      terminal.clearOutput();
+      await send(app, terminal, "\\u001b");
+      await waitFor(() => terminal.output().includes("> status"), "restored field pane");
+      const output = terminal.output();
+      app.unmount();
+      console.log(JSON.stringify({ detail: output.includes("PROJ-1"), fieldPane: output.includes("> status") }));
+    `,
+  );
+  expect(result).toEqual({ detail: true, fieldPane: true });
+});
+
+test("failed description draft survives a move child and cancellation", async () => {
+  const result = await runBoardCase(
+    "detail-description-draft",
+    `
+      const seeds = [];
+      let puts = 0;
+      globalThis.fetch = async (input, init = {}) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname === "/rest/api/3/myself") return response({ accountId: "me", displayName: "Me" });
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") return issuePage(issue("PROJ-1", "Card"));
+        if (url.pathname === "/rest/api/3/issue/PROJ-1" && init.method === "PUT") {
+          puts++;
+          return new Response("description rejected", { status: 400 });
+        }
+        if (url.pathname === "/rest/api/3/issue/PROJ-1") {
+          const value = issue("PROJ-1", "Card");
+          Object.assign(value.fields, { components: [], fixVersions: [], subtasks: [], issuelinks: [], created: "2026-01-01T00:00:00.000Z" });
+          return response(value);
+        }
+        if (url.pathname.endsWith("/comment")) return response({ comments: [] });
+        if (url.pathname.endsWith("/editmeta")) return response({ fields: {} });
+        throw new Error("unexpected request: " + (init.method ?? "GET") + " " + url);
+      };
+      const originalWhich = Bun.which;
+      const originalSpawn = Bun.spawn;
+      const originalWrite = process.stdout.write;
+      Bun.which = () => "/mock/editor";
+      Bun.spawn = (args) => ({
+        exitCode: 0,
+        exited: Bun.file(args.at(-1)).text().then((seed) => {
+          seeds.push(seed);
+          return Bun.write(args.at(-1), "Retained description draft").then(() => 0);
+        }),
+      });
+      process.stdout.write = () => true;
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      try {
+        await waitFor(() => terminal.output().includes("Card"), "board");
+        await send(app, terminal, "v");
+        await waitFor(() => terminal.output().includes("Description"), "detail");
+        await send(app, terminal, "E");
+        await waitFor(() => puts === 1, "rejected description");
+        await waitFor(() => terminal.output().includes("Description not saved"), "draft error");
+        await send(app, terminal, "m");
+        await waitFor(() => terminal.output().includes("Move PROJ-1"), "move child");
+        await send(app, terminal, "\\u001b");
+        await waitFor(() => terminal.output().includes("Description"), "returned detail");
+        await send(app, terminal, "E");
+        await waitFor(() => seeds.length === 2, "reopened editor");
+      } finally {
+        app.unmount();
+        Bun.which = originalWhich;
+        Bun.spawn = originalSpawn;
+        process.stdout.write = originalWrite;
+      }
+      console.log(JSON.stringify({ first: seeds[0], second: seeds[1] }));
+    `,
+  );
+  expect(result).toEqual({ first: "", second: "Retained description draft" });
+});
+
+test("board description stays pending, blocks duplicates, and reopens its failed draft", async () => {
+  const result = await runBoardCase(
+    "board-description-pending",
+    `
+      const save = deferred();
+      const seeds = [];
+      let puts = 0;
+      globalThis.fetch = async (input, init = {}) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") return issuePage(issue("PROJ-1", "Card"));
+        if (url.pathname === "/rest/api/3/issue/PROJ-1" && init.method === "PUT") {
+          puts++;
+          return save.promise;
+        }
+        throw new Error("unexpected request: " + (init.method ?? "GET") + " " + url);
+      };
+      const originalWhich = Bun.which;
+      const originalSpawn = Bun.spawn;
+      const originalWrite = process.stdout.write;
+      Bun.which = () => "/mock/editor";
+      Bun.spawn = (args) => ({
+        exitCode: 0,
+        exited: Bun.file(args.at(-1)).text().then((seed) => {
+          seeds.push(seed);
+          return Bun.write(args.at(-1), "Board description draft").then(() => 0);
+        }),
+      });
+      process.stdout.write = () => true;
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      try {
+        await waitFor(() => terminal.output().includes("Card"), "board");
+        await send(app, terminal, "E");
+        await waitFor(() => puts === 1, "description put");
+        await waitFor(() => terminal.output().includes("Saving description"), "pending description");
+        await send(app, terminal, "E");
+        await send(app, terminal, "v");
+        const putsWhilePending = puts;
+        save.resolve(new Response("save rejected", { status: 400 }));
+        await waitFor(() => terminal.output().includes("Description not saved"), "description error");
+        await send(app, terminal, "E");
+        await waitFor(() => seeds.length === 2, "draft editor reopen");
+        app.unmount();
+        console.log(JSON.stringify({ putsWhilePending, seeds }));
+      } finally {
+        Bun.which = originalWhich;
+        Bun.spawn = originalSpawn;
+        process.stdout.write = originalWrite;
+      }
+    `,
+  );
+  expect(result).toEqual({
+    putsWhilePending: 1,
+    seeds: ["", "Board description draft"],
+  });
+});
+
+test("cancelled detail cannot open a late subtask wizard", async () => {
+  const result = await runBoardCase(
+    "stale-subtask-metadata",
+    `
+      const types = deferred();
+      let typeRequests = 0;
+      globalThis.fetch = async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname === "/rest/api/3/myself") return response({ accountId: "me", displayName: "Me" });
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") return issuePage(issue("PROJ-1", "Parent"));
+        if (url.pathname === "/rest/api/3/issue/PROJ-1") {
+          const value = issue("PROJ-1", "Parent");
+          Object.assign(value.fields, { project: { key: "PROJ" }, issuetype: { id: "10", name: "Task", subtask: false }, components: [], fixVersions: [], subtasks: [], issuelinks: [], created: "2026-01-01T00:00:00.000Z" });
+          return response(value);
+        }
+        if (url.pathname.endsWith("/comment")) return response({ comments: [] });
+        if (url.pathname.endsWith("/editmeta")) return response({ fields: {} });
+        if (url.pathname === "/rest/api/3/issue/createmeta/PROJ/issuetypes") {
+          typeRequests++;
+          return types.promise;
+        }
+        if (url.pathname === "/rest/api/3/issueLinkType") return response({ issueLinkTypes: [] });
+        throw new Error("unexpected request: " + url);
+      };
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Parent"), "board");
+      await send(app, terminal, "v");
+      await waitFor(() => terminal.output().includes("Description"), "detail");
+      await send(app, terminal, "C");
+      await waitFor(() => typeRequests === 1, "subtask metadata");
+      await send(app, terminal, "\\u001b");
+      terminal.clearOutput();
+      types.resolve(response({ issueTypes: [{ id: "11", name: "Subtask", subtask: true }] }));
+      await nextTurn();
+      await nextTurn();
+      const output = terminal.output();
+      app.unmount();
+      console.log(JSON.stringify({ reopened: output.includes("Create issue") }));
+    `,
+  );
+  expect(result).toEqual({ reopened: false });
+});
+
+test("required transition returns to its retained picker and reuses field drafts", async () => {
+  const result = await runBoardCase(
+    "transition-draft-return",
+    `
+      let posts = 0;
+      globalThis.fetch = async (input, init = {}) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname === "/rest/api/3/myself") return response({ accountId: "me", displayName: "Me" });
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") return issuePage(issue("PROJ-1", "Card"));
+        if (url.pathname === "/rest/api/3/issue/PROJ-1/transitions" && init.method === "POST") {
+          posts++;
+          return posts === 1
+            ? new Response("transition rejected", { status: 400 })
+            : new Response(null, { status: 204 });
+        }
+        if (url.pathname === "/rest/api/3/issue/PROJ-1/transitions") {
+          return response({ transitions: [{
+            id: "resolve", name: "Resolve", to: { id: "2" }, fields: {
+              customfield_1: { name: "Estimate", required: true, hasDefaultValue: false, schema: { type: "number" } },
+            },
+          }] });
+        }
+        if (url.pathname === "/rest/api/3/issue/PROJ-1") {
+          const value = issue("PROJ-1", "Card");
+          Object.assign(value.fields, { components: [], fixVersions: [], subtasks: [], issuelinks: [], created: "2026-01-01T00:00:00.000Z" });
+          return response(value);
+        }
+        if (url.pathname.endsWith("/comment")) return response({ comments: [] });
+        if (url.pathname.endsWith("/editmeta")) return response({ fields: {} });
+        throw new Error("unexpected request: " + (init.method ?? "GET") + " " + url);
+      };
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Card"), "board");
+      await send(app, terminal, "v");
+      await waitFor(() => terminal.output().includes("Description"), "detail");
+      await send(app, terminal, "t");
+      await waitFor(() => terminal.output().includes("Transition PROJ-1"), "transition picker");
+      await send(app, terminal, "\\r");
+      await waitFor(() => terminal.output().includes("Estimate"), "required screen");
+      await send(app, terminal, "\\r");
+      await send(app, terminal, "7");
+      await send(app, terminal, "\\r");
+      await waitFor(() => terminal.output().includes("7"), "field value");
+      terminal.clearOutput();
+      await send(app, terminal, "\\u001b");
+      await waitFor(() => terminal.output().includes("Transition PROJ-1"), "returned picker");
+      terminal.clearOutput();
+      await send(app, terminal, "\\r");
+      await waitFor(() => terminal.output().includes("Estimate"), "reopened required screen");
+      const reused = terminal.output().includes("7");
+      await send(app, terminal, "s");
+      await waitFor(() => terminal.output().includes("Could not save transition"), "transition error");
+      const keptAfterFailure = terminal.output().includes("7");
+      await send(app, terminal, "s");
+      await waitFor(() => posts === 2, "transition retry");
+      app.unmount();
+      console.log(JSON.stringify({ reused, keptAfterFailure, posts }));
+    `,
+  );
+  expect(result).toEqual({ reused: true, keptAfterFailure: true, posts: 2 });
+});
+
+test("required transition clears server validation only after a changed collected value", async () => {
+  const result = await runBoardCase(
+    "transition-validation-feedback",
+    `
+      const posts = [];
+      globalThis.fetch = async (input, init = {}) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname === "/rest/api/3/myself") return response({ accountId: "me" });
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") return issuePage(issue("PROJ-1", "Card"));
+        if (url.pathname === "/rest/api/3/issue/PROJ-1/transitions" && init.method === "POST") {
+          posts.push(JSON.parse(String(init.body)));
+          return new Response("validation rejected", { status: 400 });
+        }
+        if (url.pathname === "/rest/api/3/issue/PROJ-1/transitions") {
+          return response({ transitions: [{
+            id: "resolve", name: "Resolve", to: { id: "2" }, fields: {
+              customfield_1: { name: "Estimate", required: true, hasDefaultValue: false, schema: { type: "number" } },
+            },
+          }] });
+        }
+        if (url.pathname === "/rest/api/3/issue/PROJ-1") {
+          const value = issue("PROJ-1", "Card");
+          Object.assign(value.fields, { components: [], fixVersions: [], subtasks: [], issuelinks: [], created: "2026-01-01T00:00:00.000Z" });
+          return response(value);
+        }
+        if (url.pathname.endsWith("/comment")) return response({ comments: [] });
+        if (url.pathname.endsWith("/editmeta")) return response({ fields: {} });
+        throw new Error("unexpected request: " + (init.method ?? "GET") + " " + url);
+      };
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Card"), "board");
+      await send(app, terminal, "v");
+      await waitFor(() => terminal.output().includes("Description"), "detail");
+      await send(app, terminal, "t");
+      await waitFor(() => terminal.output().includes("Transition PROJ-1"), "transition picker");
+      await send(app, terminal, "\\r");
+      await waitFor(() => terminal.output().includes("Estimate"), "required screen");
+      await send(app, terminal, "\\r");
+      await send(app, terminal, "7");
+      await send(app, terminal, "\\r");
+      await send(app, terminal, "s");
+      await waitFor(() => posts.length === 1, "rejected transition post");
+      await waitFor(() => terminal.output().includes("Could not save transition"), "server validation");
+
+      let paint = await currentPaint(app, terminal);
+      const failedValueKept = /Estimate.*7/.test(paint);
+      const failedErrorVisible = paint.includes("Could not save transition");
+      const failedReasonVisible = paint.includes("validation rejected");
+
+      await send(app, terminal, "\\r");
+      await app.waitUntilRenderFlush();
+      await send(app, terminal, "\\u001b");
+      paint = await currentPaint(app, terminal);
+      const cancelKeptValue = /Estimate.*7/.test(paint);
+      const cancelKeptError = paint.includes("Could not save transition");
+      const cancelKeptReason = paint.includes("validation rejected");
+
+      await send(app, terminal, "\\r");
+      await send(app, terminal, "\\r");
+      paint = await currentPaint(app, terminal);
+      const unchangedKeptValue = /Estimate.*7/.test(paint);
+      const unchangedKeptError = paint.includes("Could not save transition");
+      const unchangedKeptReason = paint.includes("validation rejected");
+      const postsAfterUnchanged = posts.length;
+
+      await send(app, terminal, "\\r");
+      await send(app, terminal, "\\x15");
+      await send(app, terminal, "8");
+      await send(app, terminal, "\\r");
+      paint = await currentPaint(app, terminal);
+      const changedValueKept = /Estimate.*8/.test(paint);
+      const changedClearedError = !paint.includes("Could not save transition");
+      const changedClearedReason = !paint.includes("validation rejected");
+      const postsAfterChange = posts.length;
+      app.unmount();
+      console.log(JSON.stringify({
+        failedValueKept,
+        failedErrorVisible,
+        failedReasonVisible,
+        cancelKeptValue,
+        cancelKeptError,
+        cancelKeptReason,
+        unchangedKeptValue,
+        unchangedKeptError,
+        unchangedKeptReason,
+        postsAfterUnchanged,
+        changedValueKept,
+        changedClearedError,
+        changedClearedReason,
+        postsAfterChange,
+        firstPost: posts[0],
+      }));
+    `,
+  );
+  expect(result).toEqual({
+    failedValueKept: true,
+    failedErrorVisible: true,
+    failedReasonVisible: true,
+    cancelKeptValue: true,
+    cancelKeptError: true,
+    cancelKeptReason: true,
+    unchangedKeptValue: true,
+    unchangedKeptError: true,
+    unchangedKeptReason: true,
+    postsAfterUnchanged: 1,
+    changedValueKept: true,
+    changedClearedError: true,
+    changedClearedReason: true,
+    postsAfterChange: 1,
+    firstPost: {
+      transition: { id: "resolve" },
+      fields: { customfield_1: 7 },
+    },
+  });
+});
+
+test("required move returns to the retained move picker selection", async () => {
+  const result = await runBoardCase(
+    "move-required-return",
+    `
+      globalThis.fetch = async (input, init = {}) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname === "/rest/api/3/myself") return response({ accountId: "me", displayName: "Me" });
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") return issuePage(issue("PROJ-1", "Card"));
+        if (url.pathname === "/rest/api/3/issue/PROJ-1/transitions") {
+          return response({ transitions: [{
+            id: "resolve", name: "Resolve", to: { id: "2" }, fields: {
+              customfield_1: { name: "Estimate", required: true, hasDefaultValue: false, schema: { type: "number" } },
+            },
+          }] });
+        }
+        if (url.pathname === "/rest/api/3/issue/PROJ-1") {
+          const value = issue("PROJ-1", "Card");
+          Object.assign(value.fields, { components: [], fixVersions: [], subtasks: [], issuelinks: [], created: "2026-01-01T00:00:00.000Z" });
+          return response(value);
+        }
+        if (url.pathname.endsWith("/comment")) return response({ comments: [] });
+        if (url.pathname.endsWith("/editmeta")) return response({ fields: {} });
+        throw new Error("unexpected request: " + (init.method ?? "GET") + " " + url);
+      };
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Card"), "board");
+      await send(app, terminal, "v");
+      await waitFor(() => terminal.output().includes("Description"), "detail");
+      await send(app, terminal, "m");
+      await waitFor(() => terminal.output().includes("Move PROJ-1"), "move picker");
+      await send(app, terminal, "don");
+      await send(app, terminal, "\\r");
+      await waitFor(() => terminal.output().includes("Estimate"), "required move screen");
+      terminal.clearOutput();
+      await send(app, terminal, "\\u001b");
+      await waitFor(() => terminal.output().includes("Move PROJ-1"), "returned move picker");
+      const output = terminal.output();
+      app.unmount();
+      console.log(JSON.stringify({
+        selectedDone: output.includes("> Done"),
+        queryKept: output.includes("don"),
+      }));
+    `,
+  );
+  expect(result).toEqual({ selectedDone: true, queryKept: true });
+});
+
+test("first-load error commands cannot enter an invisible modal", async () => {
+  const result = await runBoardCase(
+    "first-load-input",
+    `
+      let configCalls = 0;
+      let exits = 0;
+      globalThis.fetch = async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname.endsWith("/configuration")) {
+          configCalls++;
+          return new Response("configuration unavailable", { status: 503 });
+        }
+        throw new Error("unexpected request: " + url);
+      };
+      const terminal = createTerminal();
+      const app = mount(terminal, 4, () => exits++);
+      await waitFor(() => terminal.output().includes("configuration unavailable"), "load error");
+      await send(app, terminal, "?");
+      await send(app, terminal, "r");
+      await waitFor(() => configCalls === 2, "retry");
+      await send(app, terminal, "q");
+      app.unmount();
+      console.log(JSON.stringify({ configCalls, exits }));
+    `,
+  );
+  expect(result).toEqual({ configCalls: 2, exits: 1 });
+});
+
+test("failed quick add keeps its title and blocks duplicate submission", async () => {
+  const result = await runBoardCase(
+    "quick-add-draft",
+    `
+      const create = deferred();
+      let creates = 0;
+      globalThis.fetch = async (input, init = {}) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return response([]);
+        if (url.pathname.endsWith("/configuration")) return boardConfig();
+        if (url.pathname.endsWith("/allData.json")) return response({});
+        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
+        if (url.pathname === "/rest/agile/1.0/board/7/issue") return issuePage(issue("PROJ-1", "Existing"));
+        if (url.pathname === "/rest/api/3/issue/createmeta/PROJ/issuetypes") {
+          return response({ issueTypes: [{ id: "1", name: "Task", subtask: false }] });
+        }
+        if (url.pathname === "/rest/api/3/issue/createmeta/PROJ/issuetypes/1") {
+          return response({ fields: [{ fieldId: "summary", name: "Title", required: true, schema: { type: "string" } }] });
+        }
+        if (url.pathname === "/rest/api/3/issueLinkType") return response({ issueLinkTypes: [] });
+        if (url.pathname === "/rest/api/3/issue" && init.method === "POST") {
+          creates++;
+          return create.promise;
+        }
+        throw new Error("unexpected request: " + (init.method ?? "GET") + " " + url);
+      };
+      const terminal = createTerminal();
+      const app = mount(terminal);
+      await waitFor(() => terminal.output().includes("Existing"), "board");
+      await send(app, terminal, "a");
+      await waitFor(() => terminal.output().includes("Quick add"), "quick add");
+      await send(app, terminal, "Retained title");
+      await send(app, terminal, "\\r");
+      await waitFor(() => creates === 1, "create request");
+      await waitFor(() => terminal.output().includes("Creating issue"), "pending create state");
+      const createsAfterFirst = creates;
+      await send(app, terminal, "\\r");
+      const createsBeforeResolve = creates;
+      create.resolve(new Response("synthetic rejection", { status: 400 }));
+      await waitFor(() => terminal.output().includes("Could not create issue"), "create error");
+      const output = terminal.output();
+      app.unmount();
+      console.log(JSON.stringify({ creates, createsAfterFirst, createsBeforeResolve, retained: output.includes("Retained title") }));
+    `,
+  );
+  expect(result).toEqual({
+    creates: 1,
+    createsAfterFirst: 1,
+    createsBeforeResolve: 1,
+    retained: true,
+  });
+});
 
 test("wizard metadata failure stays visible and does not retry on the Board toast rerender", async () => {
   const result = await runBoardCase(
@@ -906,7 +2389,7 @@ test("relationship partial success stays visible, persists recents, and never re
           creates,
           links,
           boardIssueCalls,
-          visibleKey: output.includes("created PROJ-9"),
+          visibleKey: output.includes("Created PROJ-9"),
           visibleWarning: output.includes("relationship failed"),
           recent: recents[0],
         }));
@@ -968,46 +2451,6 @@ test("configured estimation field drives requested values and rendered totals", 
     requestedDefault: false,
     renderedPoints: true,
   });
-});
-
-test("Original Time Estimate renders raw seconds as a precise duration", async () => {
-  const result = await runBoardCase(
-    "time-estimation",
-    `
-      globalThis.fetch = async (input) => {
-        const url = new URL(String(input));
-        if (url.pathname === "/rest/api/3/field") return response([]);
-        if (url.pathname.endsWith("/configuration")) {
-          return response({
-            name: "Time board",
-            location: { key: "PROJ" },
-            estimation: { type: "field", field: { fieldId: "timeoriginalestimate" } },
-            columnConfig: { columns: [{ name: "To Do", statuses: [{ id: "1" }] }] },
-          });
-        }
-        if (url.pathname.endsWith("/allData.json")) return response({});
-        if (url.pathname.endsWith("/user/assignable/search")) return response([]);
-        if (url.pathname === "/rest/agile/1.0/board/7/issue") {
-          const item = issue("PROJ-1", "Timed card");
-          item.fields.timeoriginalestimate = 3661;
-          return issuePage(item);
-        }
-        throw new Error("unexpected request: " + url);
-      };
-
-      const terminal = createTerminal();
-      const app = mount(terminal);
-      await waitFor(() => terminal.output().includes("Timed card"), "time estimate board");
-      const output = terminal.output();
-      app.unmount();
-      console.log(JSON.stringify({
-        duration: output.includes("1h 1m 1s"),
-        rawPoints: output.includes("3661p"),
-      }));
-    `,
-  );
-
-  expect(result).toEqual({ duration: true, rawPoints: false });
 });
 
 test("visible columns are bounded by terminal width and still page with navigation", async () => {
@@ -1252,9 +2695,9 @@ test("an outside-board JQL issue can move with its own key and project", async (
       await send(app, terminal, "\\r");
       await waitFor(() => terminal.output().includes("Outside card"), "outside JQL result");
       await send(app, terminal, "\\r");
-      await waitFor(() => terminal.output().includes("DESCRIPTION"), "outside detail");
+      await waitFor(() => terminal.output().includes("Description"), "outside detail");
       await send(app, terminal, "m");
-      await waitFor(() => terminal.output().includes("move OUT-9 to"), "outside move picker");
+      await waitFor(() => terminal.output().includes("Move OUT-9 to"), "outside move picker");
       const usablePicker = terminal.output().includes("Done");
       await send(app, terminal, "\\u001b[B");
       await send(app, terminal, "\\r");

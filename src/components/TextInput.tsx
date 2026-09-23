@@ -1,6 +1,7 @@
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import { useRef, useState } from "react";
 
+import { useInput } from "../input";
 import { graphemes } from "../text";
 import { fg, theme, truncate } from "../ui";
 
@@ -11,11 +12,14 @@ import { fg, theme, truncate } from "../ui";
 type Props = {
   value: string;
   placeholder?: string;
-  onChange: (v: string) => void;
+  /** Only `false` rejects an edit; other callback return values are ignored. */
+  onChange: (v: string) => unknown;
   onSubmit?: (v: string) => void;
   onCancel?: () => void;
   onUpArrow?: () => void;
   onDownArrow?: () => void;
+  onPageUp?: () => void;
+  onPageDown?: () => void;
   isActive?: boolean;
   /** Display width in terminal cells. The controlled value remains unmodified. */
   width?: number;
@@ -61,6 +65,8 @@ export function TextInput({
   onCancel,
   onUpArrow,
   onDownArrow,
+  onPageUp,
+  onPageDown,
   isActive = true,
   width,
 }: Props) {
@@ -81,10 +87,15 @@ export function TextInput({
   };
 
   const setValue = (v: string, nextCursor: number) => {
+    const previousValue = currentValue.current;
+    const previousCursor = cursor.current;
     currentValue.current = v;
     cursor.current = characterBoundaryAtOrBefore(v, Math.max(0, Math.min(v.length, nextCursor)));
+    if (onChange(v) === false) {
+      currentValue.current = previousValue;
+      cursor.current = previousCursor;
+    }
     rerender((version) => version + 1);
-    onChange(v);
   };
 
   useInput(
@@ -105,6 +116,16 @@ export function TextInput({
       }
       if (key.downArrow) {
         onDownArrow?.();
+        return;
+      }
+      if (key.home) return moveCursor(0);
+      if (key.end) return moveCursor(current.length);
+      if (key.pageUp) {
+        onPageUp?.();
+        return;
+      }
+      if (key.pageDown) {
+        onPageDown?.();
         return;
       }
 
@@ -160,7 +181,7 @@ export function TextInput({
         setValue(current.slice(0, previous) + current.slice(safeCursor), previous);
         return;
       }
-      if (key.delete) {
+      if (key.delete || (key.ctrl && input === "d")) {
         if (safeCursor >= current.length) return;
         setValue(
           current.slice(0, safeCursor) + current.slice(nextCharacterBoundary(current, safeCursor)),
@@ -171,7 +192,7 @@ export function TextInput({
 
       if (key.ctrl || key.meta) return;
 
-      if (input && !key.tab && !key.pageUp && !key.pageDown) {
+      if (input && !key.tab) {
         // Intentionally strip ASCII control chars from keyboard input.
         // oxlint-disable-next-line no-control-regex
         const cleaned = input.replaceAll(/[\x00-\x1f\x7f]/g, "");
@@ -184,9 +205,7 @@ export function TextInput({
     { isActive },
   );
 
-  const showPlaceholder = value.length === 0 && placeholder;
-
-  if (showPlaceholder) {
+  if (value.length === 0 && placeholder) {
     const placeholderWidth = width === undefined ? undefined : Math.max(0, width - 1);
     return (
       <Box {...(width === undefined ? {} : { width, height: 1, overflow: "hidden" as const })}>

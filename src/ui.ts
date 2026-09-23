@@ -240,7 +240,12 @@ export function bg(color: string | undefined): { backgroundColor: string } | Rec
 }
 
 export function errorMessage(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
+  return normalizeMessage(e instanceof Error ? e.message : String(e));
+}
+
+/** Keep server reasons readable in one terminal paragraph. */
+export function normalizeMessage(message: string): string {
+  return message.replaceAll(/\s+/g, " ").trim();
 }
 
 export async function copyToClipboard(text: string): Promise<void> {

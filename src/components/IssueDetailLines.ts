@@ -55,15 +55,15 @@ export function renderDetailLines(detail: IssueDetail, mainWidth: number): Detai
   };
   const pushSection = (label: string) => {
     push("");
-    push(label.toUpperCase(), theme.accent, true);
+    push(label, theme.accent, true);
     push("─".repeat(Math.min(mainWidth, label.length + 6)), theme.divider);
   };
 
-  pushSection("description");
+  pushSection("Description");
   for (const ln of (detail.description || "—").split(/\n/)) pushLine(ln);
 
   if (detail.subtasks.length > 0) {
-    pushSection(`sub-tasks (${detail.subtasks.length})`);
+    pushSection(`Sub-tasks (${detail.subtasks.length})`);
     for (const s of detail.subtasks)
       push(
         `${s.key} · ${s.statusName} · ${truncate(s.summary, mainWidth - s.key.length - 16)}`,
@@ -72,7 +72,7 @@ export function renderDetailLines(detail: IssueDetail, mainWidth: number): Detai
   }
 
   if (detail.links.length > 0) {
-    pushSection(`linked issues (${detail.links.length})`);
+    pushSection(`Linked issues (${detail.links.length})`);
     for (const l of detail.links)
       push(
         `${l.direction} ${l.key} · ${l.statusName} · ${truncate(l.summary, mainWidth - l.key.length - l.direction.length - 16)}`,
@@ -80,9 +80,9 @@ export function renderDetailLines(detail: IssueDetail, mainWidth: number): Detai
       );
   }
 
-  pushSection(`comments (${detail.comments.length})`);
+  pushSection(`Comments (${detail.comments.length})`);
   if (detail.comments.length === 0) {
-    push("no comments yet", theme.muted);
+    push("No comments yet.", theme.muted);
   }
   detail.comments.forEach((c, i) => {
     if (i > 0) push("·".repeat(Math.min(mainWidth, 20)), theme.divider, false, i);

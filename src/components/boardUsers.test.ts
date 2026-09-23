@@ -13,7 +13,7 @@ test("deduplicates one project without reusing it for a different project", asyn
     return projectKey === "OLD" ? oldProject.promise : newProject.promise;
   });
 
-  expect(await load("")).toEqual([]);
+  expect(await load("")).toEqual({ users: [] });
   const firstOld = load("OLD");
   const secondOld = load("OLD");
   const fresh = load("NEW");
@@ -22,8 +22,10 @@ test("deduplicates one project without reusing it for a different project", asyn
 
   newProject.resolve([{ accountId: "new", displayName: "New User" }]);
   oldProject.resolve([{ accountId: "old", displayName: "Old User" }]);
-  expect(await fresh).toEqual([{ accountId: "new", displayName: "New User" }]);
-  expect(await load("NEW")).toEqual([{ accountId: "new", displayName: "New User" }]);
+  expect(await fresh).toEqual({ users: [{ accountId: "new", displayName: "New User" }] });
+  expect(await load("NEW")).toEqual({
+    users: [{ accountId: "new", displayName: "New User" }],
+  });
 });
 
 test("retries a failed project request", async () => {
@@ -34,7 +36,12 @@ test("retries a failed project request", async () => {
     return [{ accountId: "ok", displayName: "Recovered" }];
   });
 
-  expect(await load("PROJ")).toEqual([]);
-  expect(await load("PROJ")).toEqual([{ accountId: "ok", displayName: "Recovered" }]);
+  expect(await load("PROJ")).toEqual({
+    users: [],
+    warning: "Mention suggestions could not load: temporary. Plain @text is not a Jira mention.",
+  });
+  expect(await load("PROJ")).toEqual({
+    users: [{ accountId: "ok", displayName: "Recovered" }],
+  });
   expect(calls).toBe(2);
 });

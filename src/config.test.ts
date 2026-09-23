@@ -22,12 +22,15 @@ async function runConfigCase(
 }
 
 describe("settings validation", () => {
-  test("rejects partial and fractional column counts instead of accepting a prefix", async () => {
+  test("explains accepted theme and column override values", async () => {
     const result = await runConfigCase(
       "strict-columns",
       `
         const { loadSettings } = await import(${JSON.stringify(configUrl)});
         const errors = [];
+        process.env.IFHJ_THEME = "blue";
+        try { await loadSettings(); } catch (error) { errors.push(String(error.message)); }
+        delete process.env.IFHJ_THEME;
         for (const value of ["4junk", "2.5"]) {
           process.env.IFHJ_MAX_COLUMNS = value;
           try { await loadSettings(); } catch (error) { errors.push(String(error.message)); }
@@ -35,7 +38,11 @@ describe("settings validation", () => {
         console.log(JSON.stringify(errors));
       `,
     );
-    expect(result).toEqual(['Invalid IFHJ_MAX_COLUMNS "4junk"', 'Invalid IFHJ_MAX_COLUMNS "2.5"']);
+    expect(result).toEqual([
+      'Invalid IFHJ_THEME. Use "synthwave" or "terminal".',
+      "Invalid IFHJ_MAX_COLUMNS. Use a positive whole integer.",
+      "Invalid IFHJ_MAX_COLUMNS. Use a positive whole integer.",
+    ]);
   });
 
   test("falls back from invalid file values in an isolated home", async () => {
@@ -100,13 +107,13 @@ describe("Jira config validation", () => {
         process.env.JIRA_SERVER = "https://env.example.test";
         await writeFile(path, "login:\\nother: wrong@example.test\\n");
         try { await loadConfig(); } catch (error) { errors.push(error.message); }
-        console.log(JSON.stringify(errors));
+        console.log(JSON.stringify(errors.map((error) => error.replace(process.env.HOME, "<home>"))));
       `,
       { JIRA_API_TOKEN: "token" },
     );
     expect(result).toEqual([
-      "Missing Jira server (set JIRA_SERVER or ~/.config/.jira/.config.yml)",
-      "Missing Jira login email (set JIRA_LOGIN or ~/.config/.jira/.config.yml)",
+      'Missing Jira server: set JIRA_SERVER or add "server" to <home>/.config/.jira/.config.yml',
+      'Missing Jira login: set JIRA_LOGIN or JIRA_EMAIL, or add "login" to <home>/.config/.jira/.config.yml',
     ]);
   });
 
@@ -123,6 +130,7 @@ describe("Jira config validation", () => {
         const errors = [];
         for (const yaml of [
           "",
+          "server: [unterminated\\nlogin: hidden@example.test\\n",
           "scalar\\n",
           "- list\\n",
           "server: 42\\nlogin: user@example.test\\n",
@@ -138,7 +146,8 @@ describe("Jira config validation", () => {
       { JIRA_API_TOKEN: "token" },
     );
     expect(result).toEqual([
-      "Missing Jira server (set JIRA_SERVER or ~/.config/.jira/.config.yml)",
+      'Missing Jira server: set JIRA_SERVER or add "server" to <path>',
+      "Invalid Jira config <path>: YAML could not be parsed",
       "Invalid Jira config <path>: expected a YAML mapping",
       "Invalid Jira config <path>: expected a YAML mapping",
       "Invalid Jira config <path>: server must be a string",
@@ -261,9 +270,29 @@ describe("Jira config validation", () => {
       { JIRA_LOGIN: "user@example.test", JIRA_API_TOKEN: "token" },
     );
     expect(result).toEqual([
-      'Invalid Jira server URL "jira.example.test"',
+      "Invalid Jira server URL from JIRA_SERVER",
       "Jira server URL must not contain credentials, a query, or a fragment",
       'Invalid Jira server URL protocol "file:"',
     ]);
+  });
+
+  test("identifies a malformed YAML server by path without repeating its value", async () => {
+    const result = await runConfigCase(
+      "yaml-server-source",
+      `
+        const { mkdir, writeFile } = await import("node:fs/promises");
+        const { join } = await import("node:path");
+        const dir = join(process.env.HOME, ".config", ".jira");
+        const path = join(dir, ".config.yml");
+        await mkdir(dir, { recursive: true });
+        await writeFile(path, "server: not-a-url-with-secret-text\\nlogin: user@example.test\\n");
+        const { loadConfig } = await import(${JSON.stringify(configUrl)});
+        try { await loadConfig(); } catch (error) {
+          console.log(JSON.stringify(error.message.replace(path, "<path>")));
+        }
+      `,
+      { JIRA_API_TOKEN: "token" },
+    );
+    expect(result).toBe('Invalid Jira server URL from "server" in <path>');
   });
 });

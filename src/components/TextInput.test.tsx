@@ -4,6 +4,7 @@ import { PassThrough } from "node:stream";
 import { render } from "ink";
 import { useState } from "react";
 
+import { InputScope } from "../input";
 import { createTerminal } from "../test/utils";
 import { TextInput } from "./TextInput";
 
@@ -151,5 +152,102 @@ describe("TextInput Unicode editing", () => {
     input.stdin.write("\r");
     expect(await submitted).toBe(value);
     expect(input.value()).toBe(value);
+  });
+
+  test("supports Home and End without losing the full controlled value", async () => {
+    let submitted = "";
+    const input = await renderInput("A🙂B", (value) => {
+      submitted = value;
+    });
+    await input.act(() => input.stdin.write("\x1b[H"));
+    await input.act(() => input.stdin.write("X"));
+    await input.act(() => input.stdin.write("\x1b[F"));
+    await input.act(() => input.stdin.write("Y"));
+    input.stdin.write("\r");
+    await input.flush();
+    expect(input.value()).toBe("XA🙂BY");
+    expect(submitted).toBe("XA🙂BY");
+  });
+
+  test("Ctrl+D deletes one complete joined emoji", async () => {
+    const input = await renderInput("A👨‍👩‍👧‍👦B");
+    await input.act(() => input.stdin.write("\x1b[H"));
+    await input.act(() => input.stdin.write("\x1b[C"));
+    await input.act(() => input.stdin.write("\x04"));
+    expect(input.value()).toBe("AB");
+  });
+
+  test("rejects an edit synchronously and accepts callbacks with other return values", async () => {
+    const terminal = createTerminal(80, 20);
+    const accepted: string[] = [];
+    let submit!: (value: string) => void;
+    const submitted = new Promise<string>((resolve) => {
+      submit = resolve;
+    });
+    function ControlledInput() {
+      const [value, setValue] = useState("A🙂B");
+      return (
+        <TextInput
+          value={value}
+          onChange={(next) => {
+            if (next.includes("!")) return false;
+            setValue(next);
+            return accepted.push(next);
+          }}
+          onSubmit={submit}
+        />
+      );
+    }
+    const app = render(<ControlledInput />, {
+      interactive: true,
+      stdin: terminal.stdin as unknown as typeof process.stdin,
+      stdout: terminal.stdout as unknown as typeof process.stdout,
+      stderr: new PassThrough() as unknown as typeof process.stderr,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    apps.push(app);
+    await app.waitUntilRenderFlush();
+    for (const input of ["!", "X", "\r"]) {
+      terminal.stdin.write(input);
+      terminal.stdin.emit("readable");
+    }
+    expect(await submitted).toBe("A🙂BX");
+    expect(accepted).toEqual(["A🙂BX"]);
+  });
+
+  test("does not edit while its InputScope is disabled", async () => {
+    const terminal = createTerminal(80, 20);
+    let enabled = false;
+    let value = "start";
+    const node = () => (
+      <InputScope enabled={enabled}>
+        <TextInput
+          value={value}
+          onChange={(next) => {
+            value = next;
+          }}
+        />
+      </InputScope>
+    );
+    const app = render(node(), {
+      interactive: true,
+      stdin: terminal.stdin as unknown as typeof process.stdin,
+      stdout: terminal.stdout as unknown as typeof process.stdout,
+      stderr: new PassThrough() as unknown as typeof process.stderr,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    apps.push(app);
+    await app.waitUntilRenderFlush();
+    terminal.stdin.write("X");
+    await Bun.sleep(20);
+    expect(value).toBe("start");
+    enabled = true;
+    app.rerender(node());
+    await app.waitUntilRenderFlush();
+    terminal.stdin.write("X");
+    await Bun.sleep(20);
+    expect(value).toBe("startX");
   });
 });

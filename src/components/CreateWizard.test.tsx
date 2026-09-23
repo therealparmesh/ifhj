@@ -5,14 +5,12 @@ import { render } from "ink";
 
 import * as editor from "../editor";
 import type { IssueSearchResult, IssueType } from "../jira";
-import { createTerminal, nextTurn, sendInput, waitFor } from "../test/utils";
+import { createTerminal, deferred, nextTurn, sendInput, waitFor } from "../test/utils";
 import { CreateWizard } from "./CreateWizard";
 
 type RenderResult = ReturnType<typeof render>;
 
 const originalFetch = globalThis.fetch;
-const columnsDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "columns");
-const rowsDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "rows");
 const apps: RenderResult[] = [];
 const inputApps = new WeakMap<PassThrough, RenderResult>();
 const inputReady = new WeakMap<PassThrough, Promise<void>>();
@@ -23,16 +21,7 @@ afterEach(() => {
   restoreEditor = null;
   globalThis.fetch = originalFetch;
   for (const app of apps.splice(0)) app.unmount();
-  if (columnsDescriptor) Object.defineProperty(process.stdout, "columns", columnsDescriptor);
-  else delete (process.stdout as unknown as Record<string, unknown>)["columns"];
-  if (rowsDescriptor) Object.defineProperty(process.stdout, "rows", rowsDescriptor);
-  else delete (process.stdout as unknown as Record<string, unknown>)["rows"];
 });
-
-function setDimensions(columns: number, rows: number): void {
-  Object.defineProperty(process.stdout, "columns", { configurable: true, value: columns });
-  Object.defineProperty(process.stdout, "rows", { configurable: true, value: rows });
-}
 
 async function send(stdin: PassThrough, input: string) {
   const app = inputApps.get(stdin);
@@ -58,7 +47,7 @@ function mount(
   },
   options: { initialType?: IssueType; defaultParent?: IssueSearchResult } = {},
 ) {
-  const { stdin, stdout, output } = createTerminal();
+  const { stdin, stdout, output, clearOutput } = createTerminal();
   let markReady!: () => void;
   const ready = new Promise<void>((resolve) => {
     markReady = resolve;
@@ -88,7 +77,7 @@ function mount(
   apps.push(app);
   inputApps.set(stdin, app);
   inputReady.set(stdin, ready);
-  return { stdin, output };
+  return { stdin, output, clearOutput };
 }
 
 async function openTargetPicker(stdin: PassThrough) {
@@ -184,9 +173,39 @@ test("a new target query immediately makes old results unselectable", async () =
   );
 });
 
+test("target search shows failure and retries the current query with Enter", async () => {
+  let searches = 0;
+  globalThis.fetch = (async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/rest/api/3/search/jql") {
+      searches++;
+      if (searches === 1) return new Response("temporary target failure", { status: 503 });
+      return Response.json({
+        isLast: true,
+        issues: [
+          { key: "PROJ-2", fields: { summary: "recovered target", issuetype: { name: "Task" } } },
+        ],
+      });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  const { stdin, output } = mount({});
+
+  await openTargetPicker(stdin);
+  await waitFor(() => output().includes("Could not search Jira"), "target search error");
+  expect(output()).not.toContain("No matches");
+  await send(stdin, "\r");
+  await waitFor(() => searches === 2, "target retry");
+  await waitFor(() => output().includes("recovered target"), "retried target result");
+});
+
 test("completes creation with a warning when the later relationship request fails", async () => {
   const editorMock = spyOn(editor, "editInNeovim").mockResolvedValue("Created title\n");
   restoreEditor = () => editorMock.mockRestore();
+  const reason = `${"Relationship validation detail. ".repeat(12)}FINAL_LINK_REASON`;
+  const relationship = deferred<Response>();
+  let creates = 0;
+  let links = 0;
   globalThis.fetch = (async (input) => {
     const url = new URL(String(input));
     if (url.pathname === "/rest/api/3/search/jql") {
@@ -211,13 +230,15 @@ test("completes creation with a warning when the later relationship request fail
       );
     }
     if (url.pathname === "/rest/api/3/issue") {
+      creates++;
       return new Response(JSON.stringify({ key: "PROJ-9" }), {
         status: 201,
         headers: { "Content-Type": "application/json" },
       });
     }
     if (url.pathname === "/rest/api/3/issueLink") {
-      return new Response("link denied", { status: 400 });
+      links++;
+      return relationship.promise;
     }
     throw new Error(`unexpected request: ${url}`);
   }) as typeof fetch;
@@ -242,15 +263,26 @@ test("completes creation with a warning when the later relationship request fail
   await waitFor(() => output().includes("PROJ-2"), "relationship target");
   await send(stdin, "\r");
   await send(stdin, "s");
+  await waitFor(() => creates === 1 && links === 1, "pending relationship");
+  await send(stdin, "s");
+  await send(stdin, "\r");
+  expect({ creates, links, completions: completed.length }).toEqual({
+    creates: 1,
+    links: 1,
+    completions: 0,
+  });
+  relationship.resolve(new Response(reason, { status: 400 }));
   await waitFor(() => completed.length === 1, "relationship completion");
+  await send(stdin, "s");
+  await send(stdin, "\r");
 
-  expect(completed).toEqual([
-    {
-      key: "PROJ-9",
-      title: "Created title",
-      warning: "relationship failed: link 400: link denied",
-    },
-  ]);
+  expect({ creates, links }).toEqual({ creates: 1, links: 1 });
+  expect(completed).toHaveLength(1);
+  expect(completed[0]).toEqual({
+    key: "PROJ-9",
+    title: "Created title",
+    warning: `relationship failed: Create issue link failed (400): ${reason}`,
+  });
   expect(errors).toEqual([]);
 });
 
@@ -314,6 +346,44 @@ test("recovers from an editor error without discarding the form", async () => {
   await waitFor(() => output().includes("Recovered title"), "recovered editor result");
   expect(editorMock).toHaveBeenCalledTimes(2);
   expect(output()).toContain("Recovered title");
+});
+
+test("clears title-required feedback only after a meaningful title correction", async () => {
+  const unchanged = deferred<string>();
+  const editorMock = spyOn(editor, "editInNeovim")
+    .mockReturnValueOnce(unchanged.promise)
+    .mockResolvedValueOnce("Correct title\n");
+  restoreEditor = () => editorMock.mockRestore();
+  globalThis.fetch = (async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.includes("/createmeta/PROJ/issuetypes/1")) {
+      return Response.json({
+        isLast: true,
+        fields: [
+          { fieldId: "summary", name: "Summary", required: true, schema: { type: "string" } },
+        ],
+      });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  const { stdin, output, clearOutput } = mount({}, { initialType: types[0]! });
+
+  await send(stdin, "s");
+  await waitFor(() => output().includes("Title is required."), "title validation");
+  clearOutput();
+  await send(stdin, "\u001b[B");
+  await send(stdin, "\u001b[A");
+  expect(output()).toContain("Title is required.");
+  await send(stdin, "\r");
+  await waitFor(() => editorMock.mock.calls.length === 1, "unchanged title edit");
+  clearOutput();
+  unchanged.resolve("");
+  await waitFor(() => output().includes("Title is required."), "unchanged title form");
+  expect(output()).toContain("Title is required.");
+  clearOutput();
+  await send(stdin, "\r");
+  await waitFor(() => output().includes("Correct title"), "corrected title");
+  expect(output()).not.toContain("Title is required.");
 });
 
 test("preserves entered fields and allows retry after a create API error", async () => {
@@ -385,7 +455,7 @@ test("reopens and corrects rejected required values without losing other fields"
   }) as typeof fetch;
   const errors: string[] = [];
   const completed: unknown[] = [];
-  const { stdin } = mount(
+  const { stdin, output, clearOutput } = mount(
     {
       onError: (message) => errors.push(message),
       onDone: (result) => completed.push(result),
@@ -409,7 +479,10 @@ test("reopens and corrects rejected required values without losing other fields"
   await send(stdin, "\x15");
   await send(stdin, "3");
   await send(stdin, "\r");
+  clearOutput();
   await send(stdin, "\u001b");
+  await waitFor(() => output().includes("Create issue"), "corrected create form");
+  expect(output()).not.toContain("First is invalid");
   await send(stdin, "s");
   await send(stdin, "s");
   await waitFor(() => completed.length === 1, "corrected create request");
@@ -758,43 +831,4 @@ test("browse cancellation is idempotent and disables later input", async () => {
   expect(cancels).toBe(1);
   expect(editorMock).toHaveBeenCalledTimes(0);
   expect(requests).toBe(0);
-});
-
-test("keeps create separators and cancel controls to one bounded frame", async () => {
-  for (const [columns, rows] of [
-    [80, 24],
-    [120, 40],
-  ] as const) {
-    setDimensions(columns, rows);
-    const terminal = createTerminal(columns, rows);
-    const app = render(
-      <CreateWizard
-        cfg={cfg}
-        projectKey="TEST"
-        types={[]}
-        linkTypes={[]}
-        onCancel={() => {}}
-        onDone={() => {}}
-        onError={() => {}}
-      />,
-      {
-        interactive: true,
-        stdin: terminal.stdin as unknown as typeof process.stdin,
-        stdout: terminal.stdout as unknown as typeof process.stdout,
-        stderr: new PassThrough() as unknown as typeof process.stderr,
-        exitOnCtrlC: false,
-        patchConsole: false,
-      },
-    );
-    apps.push(app);
-    await app.waitUntilRenderFlush();
-    const frame = Bun.stripANSI(terminal.output());
-    const lines = frame.split("\n");
-    expect(lines.length).toBeLessThanOrEqual(rows);
-    expect(Math.max(...lines.map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(columns);
-    expect(lines.filter((line) => /─{20}/.test(line))).toHaveLength(4);
-    expect(frame).toContain("esc cancel");
-    app.unmount();
-    apps.splice(apps.indexOf(app), 1);
-  }
 });

@@ -3,6 +3,9 @@ import type { JiraConfig } from "./config";
 import { type CustomField, normalizeCustomField } from "./customFields";
 export type { CustomField } from "./customFields";
 
+export const ISSUE_SEARCH_LIMIT = 25;
+export const JQL_SEARCH_LIMIT = 50;
+
 /**
  * Jira Cloud's default custom-field IDs — the fallback when field discovery
  * fails or a tenant exposes no matching field. Tenants can remap these, so we
@@ -38,7 +41,7 @@ async function resolveFieldIds(cfg: JiraConfig): Promise<FieldIds> {
   if (cached) return cached;
 
   const discovery = (async () => {
-    const data = await jget(cfg, `/rest/api/3/field`);
+    const data = await jget(cfg, `/rest/api/3/field`, "Load fields");
     if (!Array.isArray(data)) throw new Error("field discovery returned a malformed response");
     const fields: any[] = data;
     const byCustom = (key: string) =>
@@ -271,25 +274,113 @@ export type IssueDetail = Issue & {
   /** Full parsed editmeta — keyed by Jira field id. Lets the UI gate
    *  editability for any field generically, not just custom ones. */
   editmeta: Map<string, EditableField>;
+  /** Present only when the issue loaded but Jira's edit metadata did not. */
+  editmetaError?: string;
   /** Raw fields object from the issue GET — needed to seed FieldEditor
    *  with the current value for standard fields (assignee, priority, etc). */
   rawFields: Record<string, any>;
 };
 
-async function jf(cfg: JiraConfig, path: string, init: RequestInit = {}): Promise<Response> {
-  return fetch(`${cfg.server}${path}`, {
+function normalizeText(value: string): string {
+  return value
+    .replace(/https?:\/\/\S+/gi, "[URL omitted]")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeHtml(value: string): string {
+  return normalizeText(
+    value
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replaceAll("&nbsp;", " ")
+      .replaceAll("&amp;", "&")
+      .replaceAll("&lt;", "<")
+      .replaceAll("&gt;", ">")
+      .replaceAll("&quot;", '"')
+      .replaceAll("&#39;", "'"),
+  );
+}
+
+async function throwJiraError(operation: string, res: Response): Promise<never> {
+  let raw: string;
+  try {
+    raw = await res.text();
+  } catch {
+    throw new Error(
+      `${operation} failed (${res.status}): Jira returned an unreadable error response; retry the operation`,
+    );
+  }
+  const reasons: string[] = [];
+  if (raw.trim()) {
+    try {
+      const body: unknown = JSON.parse(raw);
+      if (typeof body === "string") {
+        const reason = normalizeText(body);
+        if (reason) reasons.push(reason);
+      } else if (body && typeof body === "object" && !Array.isArray(body)) {
+        const record = body as Record<string, unknown>;
+        if (Array.isArray(record["errorMessages"])) {
+          for (const reason of record["errorMessages"]) {
+            if (typeof reason !== "string") continue;
+            const normalized = normalizeText(reason);
+            if (normalized) reasons.push(normalized);
+          }
+        }
+        const fieldErrors = record["errors"];
+        if (fieldErrors && typeof fieldErrors === "object" && !Array.isArray(fieldErrors)) {
+          for (const [field, reason] of Object.entries(fieldErrors)) {
+            if (typeof reason !== "string") continue;
+            const normalized = normalizeText(reason);
+            if (normalized) reasons.push(`${field}: ${normalized}`);
+          }
+        }
+        for (const key of ["message", "errorMessage"] as const) {
+          const reason = record[key];
+          if (typeof reason !== "string") continue;
+          const normalized = normalizeText(reason);
+          if (normalized) reasons.push(normalized);
+        }
+      }
+    } catch {
+      const trimmed = raw.trim();
+      if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
+        const isHtml =
+          res.headers.get("content-type")?.includes("text/html") ||
+          /<(?:!doctype|html|head|body|title|h[1-6]|p|div|span|br|script|style)\b/i.test(trimmed);
+        const reason = isHtml ? normalizeHtml(trimmed) : normalizeText(trimmed);
+        if (reason) reasons.push(reason);
+      }
+    }
+  }
+  const unique = [...new Set(reasons)];
+  const reason =
+    unique.join("; ") || normalizeText(res.statusText) || "Jira returned no error details";
+  throw new Error(`${operation} failed (${res.status}): ${reason}`);
+}
+
+async function jrequest(
+  cfg: JiraConfig,
+  path: string,
+  operation: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const res = await fetch(`${cfg.server}${path}`, {
     ...init,
+    ...(init.signal || cfg.signal ? { signal: init.signal ?? cfg.signal } : {}),
     headers: {
       Authorization: cfg.authHeader,
       Accept: "application/json",
       "Content-Type": "application/json",
     },
   });
+  if (!res.ok) await throwJiraError(operation, res);
+  return res;
 }
 
-async function jget(cfg: JiraConfig, path: string): Promise<any> {
-  const res = await jf(cfg, path);
-  if (!res.ok) throw new Error(`GET ${path} ${res.status}: ${await res.text()}`);
+async function jget(cfg: JiraConfig, path: string, operation: string): Promise<any> {
+  const res = await jrequest(cfg, path, operation);
   return res.json();
 }
 
@@ -319,7 +410,11 @@ export async function listBoards(cfg: JiraConfig): Promise<Board[]> {
   let startAt = 0;
   const pageSize = 50;
   while (true) {
-    const data = await jget(cfg, `/rest/agile/1.0/board?startAt=${startAt}&maxResults=${pageSize}`);
+    const data = await jget(
+      cfg,
+      `/rest/agile/1.0/board?startAt=${startAt}&maxResults=${pageSize}`,
+      "Load boards",
+    );
     const values: any[] = Array.isArray(data.values) ? data.values : [];
     for (const b of values) {
       if (seen.has(b.id)) continue;
@@ -340,7 +435,11 @@ export async function listBoards(cfg: JiraConfig): Promise<Board[]> {
 }
 
 export async function getBoardConfig(cfg: JiraConfig, boardId: number): Promise<BoardConfig> {
-  const data = await jget(cfg, `/rest/agile/1.0/board/${boardId}/configuration`);
+  const data = await jget(
+    cfg,
+    `/rest/agile/1.0/board/${boardId}/configuration`,
+    "Load board configuration",
+  );
   const columns: BoardColumn[] = (data.columnConfig?.columns ?? []).map((c: any) => {
     const out: BoardColumn = {
       name: c.name,
@@ -410,7 +509,11 @@ export async function getBoardSwimlanes(
   const none: BoardSwimlanes = { strategy: "none", lanes: [], laneByKey: {} };
   let data: any;
   try {
-    data = await jget(cfg, `/rest/greenhopper/1.0/xboard/work/allData.json?rapidViewId=${boardId}`);
+    data = await jget(
+      cfg,
+      `/rest/greenhopper/1.0/xboard/work/allData.json?rapidViewId=${boardId}`,
+      "Load swimlanes",
+    );
   } catch {
     return none;
   }
@@ -474,6 +577,7 @@ export async function getBoardIssues(
     const data = await jget(
       cfg,
       `/rest/agile/1.0/board/${boardId}/issue?startAt=${startAt}&maxResults=100&fields=${fields}&jql=${encodeURIComponent("ORDER BY Rank ASC")}`,
+      "Load board issues",
     );
     for (const it of data.issues ?? []) {
       if (seen.has(it.key)) continue;
@@ -531,14 +635,26 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
   // Editmeta tells us which custom fields Jira considers part of this
   // project + issue type — we use it as a filter so we don't surface
   // internal / deprecated customfield_* that show up in the main GET.
-  // Empty on failure, which just means no custom fields render.
+  // A metadata failure does not hide the issue. It is returned separately so
+  // the UI can explain why fields are read-only.
+  let editmetaError: string | undefined;
   const [data, commentsData, editMetaData] = await Promise.all([
-    jget(cfg, `/rest/api/3/issue/${issueKey}?fields=${fields}`),
+    jget(cfg, `/rest/api/3/issue/${issueKey}?fields=${fields}`, "Load issue"),
     // Newest-first + no pagination: on an issue with >100 comments we want
     // the most recent 100 to survive the cap, not the oldest. We reverse
     // below so the display stays chronological (oldest → newest).
-    jget(cfg, `/rest/api/3/issue/${issueKey}/comment?orderBy=-created&maxResults=100`),
-    jget(cfg, `/rest/api/3/issue/${issueKey}/editmeta`).catch(() => ({ fields: {} })),
+    jget(
+      cfg,
+      `/rest/api/3/issue/${issueKey}/comment?orderBy=-created&maxResults=100`,
+      "Load comments",
+    ),
+    jget(cfg, `/rest/api/3/issue/${issueKey}/editmeta`, "Load edit metadata").catch((error) => {
+      const message = (error instanceof Error ? error.message : String(error)).trim();
+      editmetaError = message.startsWith("Load edit metadata failed")
+        ? message
+        : `Load edit metadata failed: ${message || "Jira request failed before a response was received"}`;
+      return { fields: {} };
+    }),
   ]);
   const f = data.fields ?? {};
   const descRaw = f.description;
@@ -552,6 +668,21 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
       created: c.created,
     }))
     .toReversed();
+  const metaFields = editMetaData?.fields ?? {};
+  const editmeta = new Map<string, EditableField>();
+  for (const field of parseEditableFields(metaFields)) editmeta.set(field.id, field);
+  const customFields = Object.keys(metaFields)
+    .filter((id) => id.startsWith("customfield_"))
+    .flatMap((id) => {
+      const normalized = normalizeCustomField(
+        id,
+        metaFields[id],
+        f[id],
+        editmeta.get(id),
+        cf.epicLink,
+      );
+      return normalized ? [normalized] : [];
+    });
   const detail: IssueDetail = {
     key: data.key,
     id: Number(data.id),
@@ -608,24 +739,8 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
     // main GET carries (non-editable internals, deprecated remnants). They
     // render in editmeta's key order.
     rawFields: f,
-    ...(() => {
-      const metaFields = editMetaData?.fields ?? {};
-      const editable = new Map<string, EditableField>();
-      for (const ef of parseEditableFields(metaFields)) editable.set(ef.id, ef);
-      const customFields = Object.keys(metaFields)
-        .filter((id) => id.startsWith("customfield_"))
-        .flatMap((id) => {
-          const normalized = normalizeCustomField(
-            id,
-            metaFields[id],
-            f[id],
-            editable.get(id),
-            cf.epicLink,
-          );
-          return normalized ? [normalized] : [];
-        });
-      return { customFields, editmeta: editable };
-    })(),
+    customFields,
+    editmeta,
   };
   if (f.assignee?.displayName) detail.assignee = f.assignee.displayName;
   if (f.priority?.name) detail.priority = f.priority.name;
@@ -635,6 +750,7 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
   if (typeof f[cf.storyPoints] === "number") detail.storyPoints = f[cf.storyPoints];
   if (f.duedate) detail.dueDate = f.duedate;
   if (f.parent?.key) detail.parentKey = f.parent.key;
+  if (editmetaError !== undefined) detail.editmetaError = editmetaError;
   return detail;
 }
 
@@ -644,7 +760,7 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
  * transition to get there.
  */
 export async function getIssueStatusId(cfg: JiraConfig, issueKey: string): Promise<string> {
-  const data = await jget(cfg, `/rest/api/3/issue/${issueKey}?fields=status`);
+  const data = await jget(cfg, `/rest/api/3/issue/${issueKey}?fields=status`, "Load issue status");
   return String(data.fields?.status?.id ?? "");
 }
 
@@ -655,6 +771,7 @@ export async function getTransitions(cfg: JiraConfig, issueKey: string): Promise
   const data = await jget(
     cfg,
     `/rest/api/3/issue/${issueKey}/transitions?expand=transitions.fields`,
+    "Load transitions",
   );
   return (data.transitions ?? []).map((t: any) => ({
     id: String(t.id),
@@ -757,11 +874,10 @@ export async function transitionIssue(
     transition: { id: transitionId },
   };
   if (fields && Object.keys(fields).length > 0) body.fields = fields;
-  const res = await jf(cfg, `/rest/api/3/issue/${issueKey}/transitions`, {
+  await jrequest(cfg, `/rest/api/3/issue/${issueKey}/transitions`, "Save transition", {
     method: "POST",
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`transition failed ${res.status}: ${await res.text()}`);
 }
 
 export async function updateSummary(
@@ -769,11 +885,10 @@ export async function updateSummary(
   issueKey: string,
   summary: string,
 ): Promise<void> {
-  const res = await jf(cfg, `/rest/api/3/issue/${issueKey}`, {
+  await jrequest(cfg, `/rest/api/3/issue/${issueKey}`, "Save title", {
     method: "PUT",
     body: JSON.stringify({ fields: { summary } }),
   });
-  if (!res.ok) throw new Error(`update summary ${res.status}: ${await res.text()}`);
 }
 
 export async function updateDescription(
@@ -781,11 +896,10 @@ export async function updateDescription(
   issueKey: string,
   description: string,
 ): Promise<void> {
-  const res = await jf(cfg, `/rest/api/3/issue/${issueKey}`, {
+  await jrequest(cfg, `/rest/api/3/issue/${issueKey}`, "Save description", {
     method: "PUT",
     body: JSON.stringify({ fields: { description: textToAdf(description) } }),
   });
-  if (!res.ok) throw new Error(`update description ${res.status}: ${await res.text()}`);
 }
 
 export async function getIssueTypes(cfg: JiraConfig, projectKey: string): Promise<IssueType[]> {
@@ -793,7 +907,7 @@ export async function getIssueTypes(cfg: JiraConfig, projectKey: string): Promis
   const all: any[] = [];
   let startAt = 0;
   while (true) {
-    const data = await jget(cfg, `${base}?startAt=${startAt}&maxResults=100`);
+    const data = await jget(cfg, `${base}?startAt=${startAt}&maxResults=100`, "Load issue types");
     const values: any[] = Array.isArray(data.values)
       ? data.values
       : Array.isArray(data.issueTypes)
@@ -826,7 +940,7 @@ export async function getCreateFields(
   const all: any[] = [];
   let startAt = 0;
   while (true) {
-    const data = await jget(cfg, `${base}?startAt=${startAt}&maxResults=100`);
+    const data = await jget(cfg, `${base}?startAt=${startAt}&maxResults=100`, "Load create fields");
     const fields: any[] = Array.isArray(data.fields) ? data.fields : [];
     all.push(...fields);
     const next = nextPageStart(
@@ -855,7 +969,7 @@ export type IssueLinkType = {
 };
 
 export async function getIssueLinkTypes(cfg: JiraConfig): Promise<IssueLinkType[]> {
-  const data = await jget(cfg, `/rest/api/3/issueLinkType`);
+  const data = await jget(cfg, `/rest/api/3/issueLinkType`, "Load issue link types");
   return (data.issueLinkTypes ?? []).map((t: any) => ({
     id: String(t.id),
     name: t.name,
@@ -900,13 +1014,13 @@ export async function searchIssues(
     match ? (opts.projectKey ? `(${match})` : match) : "",
   ].filter(Boolean);
   const jql = `${clauses.join(" AND ")} ORDER BY updated DESC`;
-  return searchByJql(cfg, jql, opts.limit ?? 25);
+  return searchByJql(cfg, jql, opts.limit ?? ISSUE_SEARCH_LIMIT);
 }
 
 /**
- * Link two issues. `direction` picks which side of the link-type the new
- * issue sits on — for "blocks" (outward) / "is blocked by" (inward),
- * outwardIssue blocks inwardIssue.
+ * Link the new issue to a target using the selected display direction. Jira
+ * displays the outward label for an `outwardIssue` entry in the new issue's
+ * GET response, so the target occupies that endpoint for an outward choice.
  */
 export async function createIssueLink(
   cfg: JiraConfig,
@@ -916,8 +1030,8 @@ export async function createIssueLink(
   direction: "outward" | "inward",
 ): Promise<void> {
   const [outward, inward] =
-    direction === "outward" ? [newIssueKey, targetKey] : [targetKey, newIssueKey];
-  const res = await jf(cfg, `/rest/api/3/issueLink`, {
+    direction === "outward" ? [targetKey, newIssueKey] : [newIssueKey, targetKey];
+  await jrequest(cfg, `/rest/api/3/issueLink`, "Create issue link", {
     method: "POST",
     body: JSON.stringify({
       type: { name: linkTypeName },
@@ -925,7 +1039,6 @@ export async function createIssueLink(
       inwardIssue: { key: inward },
     }),
   });
-  if (!res.ok) throw new Error(`link ${res.status}: ${await res.text()}`);
 }
 
 export type JiraUser = { accountId: string; displayName: string };
@@ -938,6 +1051,7 @@ export async function getAssignableUsers(cfg: JiraConfig, projectKey: string): P
   const data = await jget(
     cfg,
     `/rest/api/3/user/assignable/search?project=${proj}&startAt=0&maxResults=1000`,
+    "Load assignable users",
   );
   const users: any[] = Array.isArray(data) ? data : [];
   return users.map((u) => ({
@@ -951,19 +1065,17 @@ export async function updateIssueField(
   issueKey: string,
   fields: Record<string, any>,
 ): Promise<void> {
-  const res = await jf(cfg, `/rest/api/3/issue/${issueKey}`, {
+  await jrequest(cfg, `/rest/api/3/issue/${issueKey}`, "Save issue field", {
     method: "PUT",
     body: JSON.stringify({ fields }),
   });
-  if (!res.ok) throw new Error(`update ${res.status}: ${await res.text()}`);
 }
 
 export async function addComment(cfg: JiraConfig, issueKey: string, body: string): Promise<void> {
-  const res = await jf(cfg, `/rest/api/3/issue/${issueKey}/comment`, {
+  await jrequest(cfg, `/rest/api/3/issue/${issueKey}/comment`, "Add comment", {
     method: "POST",
     body: JSON.stringify({ body: textToAdf(body) }),
   });
-  if (!res.ok) throw new Error(`add comment ${res.status}: ${await res.text()}`);
 }
 
 export async function updateComment(
@@ -972,17 +1084,16 @@ export async function updateComment(
   commentId: string,
   body: string,
 ): Promise<void> {
-  const res = await jf(cfg, `/rest/api/3/issue/${issueKey}/comment/${commentId}`, {
+  await jrequest(cfg, `/rest/api/3/issue/${issueKey}/comment/${commentId}`, "Save comment", {
     method: "PUT",
     body: JSON.stringify({ body: textToAdf(body) }),
   });
-  if (!res.ok) throw new Error(`update comment ${res.status}: ${await res.text()}`);
 }
 
 export async function fetchCurrentUser(
   cfg: JiraConfig,
 ): Promise<{ accountId: string; displayName: string }> {
-  const data = await jget(cfg, `/rest/api/3/myself`);
+  const data = await jget(cfg, `/rest/api/3/myself`, "Load current user");
   return {
     accountId: data.accountId ?? "",
     displayName: data.displayName ?? data.emailAddress ?? "unknown",
@@ -990,24 +1101,23 @@ export async function fetchCurrentUser(
 }
 
 export async function watchIssue(cfg: JiraConfig, issueKey: string): Promise<void> {
-  const res = await jf(cfg, `/rest/api/3/issue/${issueKey}/watchers`, { method: "POST" });
-  if (!res.ok) throw new Error(`watch ${res.status}: ${await res.text()}`);
+  await jrequest(cfg, `/rest/api/3/issue/${issueKey}/watchers`, "Watch issue", { method: "POST" });
 }
 
 export async function unwatchIssue(cfg: JiraConfig, issueKey: string): Promise<void> {
   const me = await fetchCurrentUser(cfg);
-  const res = await jf(
+  await jrequest(
     cfg,
     `/rest/api/3/issue/${issueKey}/watchers?accountId=${encodeURIComponent(me.accountId)}`,
+    "Unwatch issue",
     { method: "DELETE" },
   );
-  if (!res.ok) throw new Error(`unwatch ${res.status}: ${await res.text()}`);
 }
 
 export async function searchByJql(
   cfg: JiraConfig,
   jql: string,
-  limit = 50,
+  limit = JQL_SEARCH_LIMIT,
 ): Promise<IssueSearchResult[]> {
   const wanted = Math.max(0, Math.floor(limit));
   if (wanted === 0) return [];
@@ -1022,11 +1132,10 @@ export async function searchByJql(
       maxResults: Math.min(100, wanted - all.length),
     };
     if (nextPageToken) body["nextPageToken"] = nextPageToken;
-    const res = await jf(cfg, `/rest/api/3/search/jql`, {
+    const res = await jrequest(cfg, `/rest/api/3/search/jql`, "Search issues", {
       method: "POST",
       body: JSON.stringify(body),
     });
-    if (!res.ok) throw new Error(`jql search ${res.status}: ${await res.text()}`);
     const data = (await res.json()) as any;
     const issues: any[] = Array.isArray(data.issues) ? data.issues : [];
     for (const i of issues) {
@@ -1062,20 +1171,18 @@ export async function rankIssue(
     "before" in target
       ? { issues: [issueKey], rankBeforeIssue: target.before }
       : { issues: [issueKey], rankAfterIssue: target.after };
-  const res = await jf(cfg, `/rest/agile/1.0/issue/rank`, {
+  await jrequest(cfg, `/rest/agile/1.0/issue/rank`, "Rank issue", {
     method: "PUT",
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`rank ${res.status}: ${await res.text()}`);
 }
 
 export async function assignIssueToMe(cfg: JiraConfig, issueKey: string): Promise<void> {
   const me = await fetchCurrentUser(cfg);
-  const res = await jf(cfg, `/rest/api/3/issue/${issueKey}`, {
+  await jrequest(cfg, `/rest/api/3/issue/${issueKey}`, "Assign issue", {
     method: "PUT",
     body: JSON.stringify({ fields: { assignee: { accountId: me.accountId } } }),
   });
-  if (!res.ok) throw new Error(`assign ${res.status}: ${await res.text()}`);
 }
 
 export async function createIssue(
@@ -1102,10 +1209,9 @@ export async function createIssue(
    * team-managed projects reject it with "cannot be set on this issue type".
    */
   if (parentKey) fields["parent"] = { key: parentKey };
-  const res = await jf(cfg, `/rest/api/3/issue`, {
+  const res = await jrequest(cfg, `/rest/api/3/issue`, "Create issue", {
     method: "POST",
     body: JSON.stringify({ fields }),
   });
-  if (!res.ok) throw new Error(`create ${res.status}: ${await res.text()}`);
   return (await res.json()) as { key: string };
 }

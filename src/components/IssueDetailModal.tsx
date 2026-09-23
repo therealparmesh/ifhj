@@ -1,10 +1,12 @@
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { JiraConfig } from "../config";
 import { coerceFieldValue } from "../customFields";
 import { editInNeovim, editorLabel } from "../editor";
 import { useDimensions, useLoading } from "../hooks";
+import { useInput } from "../input";
+import { InputScope } from "../input";
 import {
   type Comment,
   type CustomField,
@@ -12,7 +14,6 @@ import {
   type EditableFieldValue,
   type IssueDetail,
   type IssueSearchResult,
-  type JiraUser,
   addComment,
   fetchCurrentUser,
   getIssueDetail,
@@ -36,6 +37,9 @@ import {
   typeColor,
   typeGlyph,
 } from "../ui";
+import type { MentionUsersResult } from "./boardUsers";
+import { waitForMentionWarningDisplay } from "./boardUsers";
+import { ErrorMessage } from "./ErrorMessage";
 import { FieldEditor } from "./FieldEditor";
 import { Hint } from "./Hint";
 import { formatShortDate, renderDetailLines } from "./IssueDetailLines";
@@ -44,7 +48,8 @@ import { ListPicker } from "./ListPicker";
 import { LoadingLine } from "./LoadingLine";
 import { NvimBanner } from "./NvimBanner";
 import { ProgressBar } from "./ProgressBar";
-import { ToastStack, useToasts } from "./Toasts";
+import { boundedToasts, ToastStack, toastRowCount, useToasts } from "./Toasts";
+import type { Toast } from "./Toasts";
 
 type Pane = "body" | "fields";
 
@@ -109,10 +114,21 @@ const SYSTEM_FIELDS: Set<FieldId> = new Set(["status", "created", "updated"]);
 
 type Overlay =
   | { kind: "none" }
-  | { kind: "nvim" }
-  | { kind: "inline-input"; field: string; value: string }
-  | { kind: "field-edit"; fieldId: string; meta: EditableField; current?: EditableFieldValue }
+  | { kind: "nvim"; warning?: string | undefined }
+  | { kind: "inline-input"; field: string; value: string; error?: string | undefined }
+  | {
+      kind: "field-edit";
+      fieldId: string;
+      meta: EditableField;
+      current?: EditableFieldValue | null;
+      error?: string | undefined;
+    }
   | { kind: "pick-comment-action"; comment: Comment };
+
+type SaveResult =
+  | { status: "saved" }
+  | { status: "failed"; error: string }
+  | { status: "busy" | "abandoned" };
 
 export function IssueDetailModal({
   cfg,
@@ -124,24 +140,38 @@ export function IssueDetailModal({
   onTransition,
   onCreateSubtask,
   onRefresh,
+  onLocalAction,
+  externalBusy = false,
+  externalToasts = [],
+  onDismissExternalToasts,
 }: {
   cfg: JiraConfig;
   projectKey: string;
   issueKey: string;
   /** Warmed assignable-users provider (shared with the board so `@`-mention
    *  completion is fetched once per board, not per surface). */
-  ensureUsers: (projectKey: string) => Promise<JiraUser[]>;
+  ensureUsers: (projectKey: string) => Promise<MentionUsersResult>;
   onClose: () => void;
   onMove: (issue: IssueDetail) => void;
   onTransition: (projectKey: string) => void;
   onCreateSubtask: (parent: IssueSearchResult) => void;
   onRefresh: () => void;
+  onLocalAction?: () => void;
+  externalBusy?: boolean;
+  externalToasts?: Toast[];
+  onDismissExternalToasts?: () => void;
 }) {
   const { cols: termCols, rows: termRows } = useDimensions();
 
   const [detail, setDetail] = useState<IssueDetail | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const { toasts, flash: showFlash } = useToasts();
+  const { toasts, flash: showFlash, dismiss: dismissLocalToasts } = useToasts();
+  const notificationsDismissible =
+    externalToasts.length === 0 || onDismissExternalToasts !== undefined;
+  const dismissNotifications = useCallback(() => {
+    dismissLocalToasts();
+    onDismissExternalToasts?.();
+  }, [dismissLocalToasts, onDismissExternalToasts]);
   // Progress line for background detail (re)loads — the `r` refresh and the
   // re-fetch after a field save, which otherwise gave no signal.
   const { busy, track } = useLoading();
@@ -155,6 +185,11 @@ export function IssueDetailModal({
   const fieldScrollRef = useRef(0);
   const [overlay, setOverlay] = useState<Overlay>({ kind: "none" });
   const [saving, setSaving] = useState(false);
+  const savePending = useRef(false);
+  const saveToken = useRef(0);
+  const descriptionDraft = useRef<string | null>(null);
+  const newCommentDraft = useRef("");
+  const commentDrafts = useRef(new Map<string, string>());
 
   const [myAccountId, setMyAccountId] = useState<string | null>(null);
 
@@ -219,7 +254,12 @@ export function IssueDetailModal({
     fieldScrollRef.current = 0;
     setOverlay({ kind: "none" });
     setSaving(false);
+    saveToken.current++;
+    savePending.current = false;
     setMyAccountId(null);
+    descriptionDraft.current = null;
+    newCommentDraft.current = "";
+    commentDrafts.current.clear();
   }, [lifetime]);
 
   useEffect(() => {
@@ -243,25 +283,36 @@ export function IssueDetailModal({
   }, [cfg, lifetime, myAccountId]);
 
   const doSave = useCallback(
-    async (fn: () => Promise<void>, successMsg: string) => {
-      if (!activeRef.current || lifetime !== lifetimeRef.current) return;
+    async (fn: () => Promise<void>, successMsg: string): Promise<SaveResult> => {
+      if (savePending.current) return { status: "busy" };
+      if (!activeRef.current || lifetime !== lifetimeRef.current) return { status: "abandoned" };
+      const token = ++saveToken.current;
       // `saving` gates input during the write (you can't fire another edit
       // mid-save); the animated progress line is the only *visual* — the whole
       // save (mutation + the fetchDetail refresh) runs through `track` so the
       // bar stays lit continuously across both.
       setSaving(true);
+      savePending.current = true;
       try {
         await track(fn());
-        if (!activeRef.current || lifetime !== lifetimeRef.current) return;
+        if (!activeRef.current || lifetime !== lifetimeRef.current) return { status: "abandoned" };
         showFlash(successMsg, "ok");
         await fetchDetail();
-        if (!activeRef.current || lifetime !== lifetimeRef.current) return;
+        if (!activeRef.current || lifetime !== lifetimeRef.current) return { status: "abandoned" };
         onRefresh();
+        return { status: "saved" };
       } catch (e) {
-        if (activeRef.current && lifetime === lifetimeRef.current)
-          showFlash(errorMessage(e), "err");
+        if (!activeRef.current || lifetime !== lifetimeRef.current) {
+          return { status: "abandoned" };
+        }
+        const message = errorMessage(e);
+        showFlash(message, "err");
+        return { status: "failed", error: message };
       } finally {
-        if (activeRef.current && lifetime === lifetimeRef.current) setSaving(false);
+        if (token === saveToken.current) {
+          savePending.current = false;
+          if (activeRef.current && lifetime === lifetimeRef.current) setSaving(false);
+        }
       }
     },
     [fetchDetail, lifetime, showFlash, onRefresh, track],
@@ -271,15 +322,19 @@ export function IssueDetailModal({
   const innerHeight = Math.max(10, termRows - 4);
   const innerWidth = Math.max(60, termCols - 4);
   const paddedWidth = Math.max(1, innerWidth - 2);
+  const visibleToasts = boundedToasts([...externalToasts, ...toasts]);
   const sideWidth = Math.min(Math.max(26, Math.floor(innerWidth * 0.34)), innerWidth - 30);
   const mainWidth = innerWidth - sideWidth;
   // The fixed rows + body fill the modal box exactly, so the body yields a
   // row per visible toast — otherwise the ToastStack (last child) overflows the
   // fixed-height box and Ink clips it, and toasts never appear in the modal.
-  const bodyHeight = Math.max(3, innerHeight - 6 - toasts.length);
+  const bodyHeight = Math.max(
+    3,
+    innerHeight - 6 - toastRowCount(visibleToasts, innerWidth, notificationsDismissible),
+  );
 
   const mainLines = useMemo(
-    () => (detail ? renderDetailLines(detail, mainWidth) : []),
+    () => (detail ? renderDetailLines(detail, Math.max(1, mainWidth - 2)) : []),
     [detail, mainWidth],
   );
   const issueProjectKey = detail?.projectKey || projectKey || issueKey.split("-")[0] || "";
@@ -316,11 +371,13 @@ export function IssueDetailModal({
    * indexes into this.
    */
   type FieldRow = { kind: "baked"; id: FieldId } | { kind: "custom"; field: CustomField };
-  const fieldRows: FieldRow[] = useMemo(() => {
-    const out: FieldRow[] = ALL_FIELDS.map((id) => ({ kind: "baked", id }));
-    for (const cf of detail?.customFields ?? []) out.push({ kind: "custom", field: cf });
-    return out;
-  }, [detail]);
+  const fieldRows: FieldRow[] = useMemo(
+    () => [
+      ...ALL_FIELDS.map((id): FieldRow => ({ kind: "baked", id })),
+      ...(detail?.customFields ?? []).map((field): FieldRow => ({ kind: "custom", field })),
+    ],
+    [detail],
+  );
   const currentRow = fieldRows[clamp(fieldIdx, 0, fieldRows.length - 1)]!;
 
   /** Resolve the EditableField metadata for the current row, if editmeta
@@ -390,78 +447,126 @@ export function IssueDetailModal({
 
   const doEditTitle = useCallback(() => {
     if (!detail) return;
-    setOverlay({ kind: "inline-input", field: "title", value: detail.summary });
-  }, [detail]);
+    onLocalAction?.();
+    setOverlay({ kind: "inline-input", field: "Title", value: detail.summary });
+  }, [detail, onLocalAction]);
+
+  const prepareEditor = useCallback(async () => {
+    const mention = await ensureUsers(issueProjectKey);
+    if (!activeRef.current || lifetime !== lifetimeRef.current) return null;
+    if (mention.warning) {
+      setOverlay({ kind: "nvim", warning: mention.warning });
+      await waitForMentionWarningDisplay(mention);
+      if (!activeRef.current || lifetime !== lifetimeRef.current) return null;
+    }
+    return mention;
+  }, [ensureUsers, issueProjectKey, lifetime]);
 
   const doEditDesc = useCallback(async () => {
     if (!detail) return;
+    onLocalAction?.();
     setOverlay({ kind: "nvim" });
     try {
-      const mentionUsers = await ensureUsers(issueProjectKey);
-      if (!activeRef.current || lifetime !== lifetimeRef.current) return;
-      const raw = await editInNeovim(detail.description, `${detail.key}-desc.md`, { mentionUsers });
+      const mention = await prepareEditor();
+      if (!mention || !activeRef.current || lifetime !== lifetimeRef.current) return;
+      const raw = await editInNeovim(
+        descriptionDraft.current ?? detail.description,
+        `${detail.key}-desc.md`,
+        { mentionUsers: mention.users },
+      );
       if (!activeRef.current || lifetime !== lifetimeRef.current) return;
       if (raw.trim() === detail.description.trim()) {
-        showFlash("no change");
+        descriptionDraft.current = null;
+        showFlash("No description change.");
         setOverlay({ kind: "none" });
         return;
       }
+      descriptionDraft.current = raw;
       setOverlay({ kind: "none" });
-      await doSave(() => updateDescription(cfg, detail.key, raw), "description updated");
+      if (mention.warning) showFlash(mention.warning, "info");
+      const result = await doSave(
+        () => updateDescription(cfg, detail.key, raw),
+        "Description updated.",
+      );
+      if (result.status === "saved") descriptionDraft.current = null;
+      else if (result.status === "failed")
+        showFlash(`Description not saved. Press E to edit your draft.`, "err");
     } catch (e) {
       if (!activeRef.current || lifetime !== lifetimeRef.current) return;
       showFlash(errorMessage(e), "err");
       setOverlay({ kind: "none" });
     }
-  }, [detail, cfg, issueProjectKey, lifetime, showFlash, doSave, ensureUsers]);
+  }, [detail, cfg, lifetime, showFlash, doSave, prepareEditor, onLocalAction]);
 
   const doAddComment = useCallback(async () => {
     if (!detail) return;
+    onLocalAction?.();
     setOverlay({ kind: "nvim" });
     try {
-      const mentionUsers = await ensureUsers(issueProjectKey);
-      if (!activeRef.current || lifetime !== lifetimeRef.current) return;
-      const raw = await editInNeovim("", `${detail.key}-comment.md`, { mentionUsers });
+      const mention = await prepareEditor();
+      if (!mention || !activeRef.current || lifetime !== lifetimeRef.current) return;
+      const raw = await editInNeovim(newCommentDraft.current, `${detail.key}-comment.md`, {
+        mentionUsers: mention.users,
+      });
       if (!activeRef.current || lifetime !== lifetimeRef.current) return;
       if (!raw.trim()) {
-        showFlash("empty comment, not saved");
+        newCommentDraft.current = "";
+        showFlash("Comment is empty and was not saved.");
         setOverlay({ kind: "none" });
         return;
       }
+      newCommentDraft.current = raw;
       setOverlay({ kind: "none" });
-      await doSave(() => addComment(cfg, detail.key, raw), "comment added");
+      if (mention.warning) showFlash(mention.warning, "info");
+      const result = await doSave(() => addComment(cfg, detail.key, raw), "Comment added.");
+      if (result.status === "saved") newCommentDraft.current = "";
+      else if (result.status === "failed")
+        showFlash(`Comment not saved. Press c to edit your draft.`, "err");
     } catch (e) {
       if (!activeRef.current || lifetime !== lifetimeRef.current) return;
       showFlash(errorMessage(e), "err");
       setOverlay({ kind: "none" });
     }
-  }, [detail, cfg, issueProjectKey, lifetime, showFlash, doSave, ensureUsers]);
+  }, [detail, cfg, lifetime, showFlash, doSave, prepareEditor, onLocalAction]);
 
   const doEditComment = useCallback(
     async (comment: Comment) => {
       if (!detail) return;
       setOverlay({ kind: "nvim" });
       try {
-        const mentionUsers = await ensureUsers(issueProjectKey);
-        if (!activeRef.current || lifetime !== lifetimeRef.current) return;
-        const raw = await editInNeovim(comment.body, `${detail.key}-comment-${comment.id}.md`, {
-          mentionUsers,
-        });
+        const mention = await prepareEditor();
+        if (!mention || !activeRef.current || lifetime !== lifetimeRef.current) return;
+        const raw = await editInNeovim(
+          commentDrafts.current.get(comment.id) ?? comment.body,
+          `${detail.key}-comment-${comment.id}.md`,
+          {
+            mentionUsers: mention.users,
+          },
+        );
         if (!activeRef.current || lifetime !== lifetimeRef.current) return;
         if (raw.trim() === comment.body.trim()) {
-          showFlash("no change");
+          commentDrafts.current.delete(comment.id);
+          showFlash("No comment change.");
           setOverlay({ kind: "none" });
           return;
         }
+        commentDrafts.current.set(comment.id, raw);
         setOverlay({ kind: "none" });
-        await doSave(() => updateComment(cfg, detail.key, comment.id, raw), "comment updated");
+        if (mention.warning) showFlash(mention.warning, "info");
+        const result = await doSave(
+          () => updateComment(cfg, detail.key, comment.id, raw),
+          "Comment updated.",
+        );
+        if (result.status === "saved") commentDrafts.current.delete(comment.id);
+        else if (result.status === "failed")
+          showFlash(`Comment not saved. Reopen it to edit your draft.`, "err");
       } catch (e) {
         if (!activeRef.current || lifetime !== lifetimeRef.current) return;
         showFlash(errorMessage(e), "err");
         setOverlay({ kind: "none" });
       }
     },
-    [detail, cfg, issueProjectKey, lifetime, showFlash, doSave, ensureUsers],
+    [detail, cfg, lifetime, showFlash, doSave, prepareEditor],
   );
 
   /** Resolve the current value from rawFields for seeding FieldEditor.
@@ -481,15 +586,23 @@ export function IssueDetailModal({
 
   const openFieldEditor = useCallback(() => {
     if (!detail || !currentRow) return;
+    onLocalAction?.();
     const meta = resolveEditable(currentRow);
     if (!meta) {
+      if (detail.editmetaError) {
+        showFlash(
+          `Field information could not load: ${detail.editmetaError}. Press r to retry.`,
+          "err",
+        );
+        return;
+      }
       if (currentRow.kind === "baked" && SYSTEM_FIELDS.has(currentRow.id)) {
-        if (currentRow.id === "status") showFlash("use t to transition");
+        if (currentRow.id === "status") showFlash("Use t to choose a transition.");
         else showFlash(`${FIELD_LABELS[currentRow.id]} is read-only`);
       } else if (currentRow.kind === "custom" && currentRow.field.meta.kind === "unsupported") {
         showFlash(`${currentRow.field.name}: not editable from TUI`);
       } else {
-        showFlash("not editable on this issue");
+        showFlash("Not editable on this issue.");
       }
       return;
     }
@@ -502,13 +615,21 @@ export function IssueDetailModal({
       meta,
       ...(current !== undefined ? { current } : {}),
     });
-  }, [detail, currentRow, resolveEditable, resolveCurrentValue, showFlash]);
+  }, [detail, currentRow, resolveEditable, resolveCurrentValue, showFlash, onLocalAction]);
 
   const clearField = useCallback(async () => {
     if (!detail || !currentRow) return;
+    onLocalAction?.();
     const meta = resolveEditable(currentRow);
     if (!meta) {
-      showFlash("not editable on this issue");
+      if (detail.editmetaError) {
+        showFlash(
+          `Field information could not load: ${detail.editmetaError}. Press r to retry.`,
+          "err",
+        );
+        return;
+      }
+      showFlash("Not editable on this issue.");
       return;
     }
     const fieldId =
@@ -529,11 +650,15 @@ export function IssueDetailModal({
       () => updateIssueField(cfg, detail.key, { [fieldId]: cleared }),
       `${label} cleared`,
     );
-  }, [detail, currentRow, resolveEditable, cfg, doSave, showFlash]);
+  }, [detail, currentRow, resolveEditable, cfg, doSave, showFlash, onLocalAction]);
 
   // Main input handler
   useInput(
     (input, key) => {
+      if (key.ctrl && input.toLowerCase() === "g") {
+        if (notificationsDismissible) dismissNotifications();
+        return;
+      }
       if (key.escape || input === "q" || (key.ctrl && input === "c")) return onClose();
       if (input === "e") return void doEditTitle();
       if (input === "E") return void doEditDesc();
@@ -545,14 +670,14 @@ export function IssueDetailModal({
       }
       if (input === "m") {
         if (!detail) {
-          showFlash("wait for issue details", "info");
+          showFlash("Wait for issue details.", "info");
           return;
         }
         return onMove(detail);
       }
       if (input === "t") {
         if (!detail) {
-          showFlash("wait for issue details", "info");
+          showFlash("Wait for issue details.", "info");
           return;
         }
         return onTransition(issueProjectKey);
@@ -560,11 +685,11 @@ export function IssueDetailModal({
       if (input === "c") return void doAddComment();
       if (input === "C") {
         if (!detail) {
-          showFlash("wait for issue details", "info");
+          showFlash("Wait for issue details.", "info");
           return;
         }
         if (detail.subtask) {
-          showFlash("a subtask cannot be a parent", "err");
+          showFlash("A subtask cannot be a parent.", "err");
           return;
         }
         return onCreateSubtask({
@@ -588,11 +713,12 @@ export function IssueDetailModal({
       if (input === "Y") {
         const url = `${cfg.server}/browse/${issueKey}`;
         copyToClipboard(url)
-          .then(() => showFlash("copied URL", "ok"))
+          .then(() => showFlash("Copied URL.", "ok"))
           .catch((err) => showFlash(errorMessage(err), "err"));
         return;
       }
       if (input === "w" && detail) {
+        onLocalAction?.();
         const watching = detail.watching;
         const fn = watching ? () => unwatchIssue(cfg, issueKey) : () => watchIssue(cfg, issueKey);
         void doSave(fn, watching ? "unwatched" : "watching");
@@ -600,7 +726,7 @@ export function IssueDetailModal({
       }
       if (input === "r") {
         void fetchDetail();
-        showFlash("refreshing…");
+        showFlash("Refreshing…");
         return;
       }
       if (key.tab) {
@@ -624,6 +750,7 @@ export function IssueDetailModal({
         } else if (key.return && detail) {
           const ci = focusedCommentIdx;
           if (ci >= 0 && ci < detail.comments.length) {
+            onLocalAction?.();
             const comment = detail.comments[ci]!;
             const isMine = myAccountId ? comment.authorAccountId === myAccountId : false;
             if (isMine) {
@@ -648,51 +775,77 @@ export function IssueDetailModal({
   );
 
   // Overlays
-  if (overlay.kind === "nvim") return <NvimBanner />;
+  if (overlay.kind === "nvim") return <NvimBanner warning={overlay.warning} />;
 
   if (overlay.kind === "inline-input") {
     return (
       <InlineFieldInput
         field={overlay.field}
         initial={overlay.value}
+        busy={saving}
+        error={overlay.error}
+        onChange={() => setOverlay({ ...overlay, error: undefined })}
+        submitLabel="save"
         onCancel={() => setOverlay({ kind: "none" })}
         onSubmit={async (val) => {
-          setOverlay({ kind: "none" });
           if (!detail) return;
           const next = val.trim();
           if (!next) {
-            showFlash("summary empty, not saved");
+            setOverlay({ ...overlay, error: "Title is required." });
             return;
           }
           if (next === detail.summary.trim()) {
-            showFlash("no change");
+            showFlash("No title change.");
+            setOverlay({ kind: "none" });
             return;
           }
-          await doSave(() => updateSummary(cfg, detail.key, next), "title updated");
+          const result = await doSave(() => updateSummary(cfg, detail.key, next), "Title updated.");
+          if (result.status === "saved") setOverlay({ kind: "none" });
+          else if (result.status === "failed")
+            setOverlay({
+              ...overlay,
+              error: `Could not save title: ${result.error}`,
+            });
         }}
       />
     );
   }
 
   if (overlay.kind === "field-edit" && detail) {
+    const saveField = async (value: EditableFieldValue | null) => {
+      const cleared = value === null || (Array.isArray(value) && value.length === 0);
+      setOverlay({ ...overlay, current: value, error: undefined });
+      const result = await doSave(
+        () => updateIssueField(cfg, detail.key, { [overlay.fieldId]: value }),
+        `${overlay.meta.name} ${cleared ? "cleared" : "updated"}.`,
+      );
+      if (result.status === "saved") setOverlay({ kind: "none" });
+      else if (result.status === "failed")
+        setOverlay({
+          ...overlay,
+          current: value,
+          error: `Could not save ${overlay.meta.name}: ${result.error}`,
+        });
+    };
     return (
-      <FieldEditor
-        cfg={cfg}
-        projectKey={issueProjectKey}
-        field={overlay.meta}
-        {...(overlay.current !== undefined ? { current: overlay.current } : {})}
-        onCancel={() => setOverlay({ kind: "none" })}
-        onSubmit={async (value: EditableFieldValue | null) => {
-          setOverlay({ kind: "none" });
-          // A list field clears with `[]`, a scalar with `null` — both read as
-          // "cleared" to the user; anything else is an update.
-          const cleared = value === null || (Array.isArray(value) && value.length === 0);
-          await doSave(
-            () => updateIssueField(cfg, detail.key, { [overlay.fieldId]: value }),
-            `${overlay.meta.name} ${cleared ? "cleared" : "updated"}`,
-          );
-        }}
-      />
+      <InputScope enabled={!saving}>
+        <FieldEditor
+          cfg={cfg}
+          projectKey={issueProjectKey}
+          field={overlay.meta}
+          {...(overlay.current !== undefined && overlay.current !== null
+            ? { current: overlay.current }
+            : {})}
+          error={overlay.error}
+          onEdit={() => setOverlay({ ...overlay, error: undefined })}
+          submitLabel="save"
+          busy={saving}
+          busyLabel={`Saving ${overlay.meta.name}…`}
+          onRetry={() => void saveField(overlay.current ?? null)}
+          onCancel={() => setOverlay({ kind: "none" })}
+          onSubmit={(value) => void saveField(value)}
+        />
+      </InputScope>
     );
   }
 
@@ -725,13 +878,13 @@ export function IssueDetailModal({
         padding={1}
       >
         <Text color={theme.error} bold>
-          failed to load {issueKey}
+          Failed to load {issueKey}
         </Text>
         <Box marginTop={1}>
-          <Text {...fg(theme.fg)}>{loadError}</Text>
+          <ErrorMessage message={loadError} width={Math.max(1, innerWidth - 2)} rows={3} />
         </Box>
         <Box marginTop={1}>
-          <Text color={theme.muted}>esc / q close</Text>
+          <Text color={theme.muted}>r retry · esc/q close</Text>
         </Box>
       </Box>
     );
@@ -748,7 +901,7 @@ export function IssueDetailModal({
         borderColor={theme.accent}
         padding={1}
       >
-        <LoadingLine label={`loading ${issueKey}…`} />
+        <LoadingLine label={`Loading ${issueKey}…`} />
       </Box>
     );
   }
@@ -858,8 +1011,12 @@ export function IssueDetailModal({
       {/* The header divider doubles as the background-load progress line —
           same row, so it animates during a refresh without shifting layout. */}
       <Box paddingX={1}>
-        {busy ? (
+        {busy || externalBusy ? (
           <ProgressBar width={paddedWidth} active />
+        ) : detail.editmetaError ? (
+          <Text color={theme.error} wrap="truncate">
+            Field information could not load. Press r to retry.
+          </Text>
         ) : (
           <Text color={theme.divider}>{"─".repeat(paddedWidth)}</Text>
         )}
@@ -921,39 +1078,52 @@ export function IssueDetailModal({
         <Text color={theme.divider}>{"─".repeat(paddedWidth)}</Text>
       </Box>
       <Box paddingX={1} flexDirection="column">
-        <Box>
-          <Hint k="tab" label="pane" />
-          <Hint k="↑↓" label="nav" />
-          {pane === "body" ? (
-            <>
-              <Hint k="[ ]" label="comment" />
-              <Hint k="c" label="add" />
-            </>
-          ) : (
-            <>
-              <Hint k="⏎" label="edit" />
-              <Hint k="x" label="clear" />
-            </>
-          )}
-          <Hint k="e/E" label="title/desc" />
-        </Box>
-        <Box justifyContent="space-between">
-          <Box>
-            <Hint k="t" label="status" />
-            <Hint k="m" label="move" />
-            <Hint k="C" label="subtask" />
-            <Hint k="w" label={detail.watching ? "unwatch" : "watch"} />
-            <Hint k="y" label="yank" />
-            <Hint k="esc" label="close" />
-          </Box>
-          <Text color={theme.muted}>
-            {pane === "fields"
-              ? `${fieldCursor + 1}/${fieldRows.length}`
-              : `${clampedScroll + 1}-${Math.min(clampedScroll + bodyHeight, mainLines.length)}/${mainLines.length}`}
-          </Text>
-        </Box>
+        {saving ? (
+          <>
+            <Text color={theme.muted}>Saving changes. Please wait.</Text>
+            <Text color={theme.muted}>Inputs resume when the save finishes.</Text>
+          </>
+        ) : (
+          <>
+            <Box>
+              <Hint k="tab" label="pane" />
+              <Hint k="↑↓" label="nav" />
+              {pane === "body" ? (
+                <>
+                  <Hint k="[ ]" label="comment" />
+                  <Hint k="c" label="add" />
+                </>
+              ) : (
+                <>
+                  <Hint k="⏎" label="edit" />
+                  <Hint k="x" label="clear" />
+                </>
+              )}
+              <Hint k="e/E" label="title/desc" />
+            </Box>
+            <Box justifyContent="space-between">
+              <Box>
+                <Hint k="t" label="status" />
+                <Hint k="m" label="move" />
+                <Hint k="C" label="subtask" />
+                <Hint k="w" label={detail.watching ? "unwatch" : "watch"} />
+                <Hint k="y" label="copy key" />
+                <Hint k="esc" label="close" />
+              </Box>
+              <Text color={theme.muted}>
+                {pane === "fields"
+                  ? `${fieldCursor + 1}/${fieldRows.length}`
+                  : `${clampedScroll + 1}-${Math.min(clampedScroll + bodyHeight, mainLines.length)}/${mainLines.length}`}
+              </Text>
+            </Box>
+          </>
+        )}
       </Box>
-      <ToastStack toasts={toasts} maxWidth={innerWidth} />
+      <ToastStack
+        toasts={visibleToasts}
+        maxWidth={innerWidth}
+        {...(notificationsDismissible ? { onDismiss: dismissNotifications } : {})}
+      />
     </Box>
   );
 }

@@ -1,10 +1,13 @@
-import { Box, Text, useInput } from "ink";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Box, Text } from "ink";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { JiraConfig } from "../config";
 import { useDimensions } from "../hooks";
+import { useInput } from "../input";
 import { type Board, listBoards } from "../jira";
+import { useSelectionIndex } from "../selection";
 import { clamp, errorMessage, fg, stickyScroll, theme, truncate } from "../ui";
+import { ErrorMessage } from "./ErrorMessage";
 import { LoadingLine } from "./LoadingLine";
 import { TextInput } from "./TextInput";
 
@@ -33,7 +36,10 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
     error: string | null;
   }>({ cfg, boards: null, error: null });
   const [query, setQuery] = useState("");
-  const [index, setIndex] = useState(0);
+  const [index, setIndex, getIndex] = useSelectionIndex();
+  const queryRef = useRef("");
+  const selectionQueryRef = useRef("");
+  const [attempt, setAttempt] = useState(0);
   // Scroll is derived from the cursor at render time via a ref anchor. No
   // useState for scroll means cursor/scroll can't disagree on a frame.
   const scrollRef = useRef(0);
@@ -53,7 +59,9 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [cfg]);
+  }, [cfg, attempt]);
+
+  const retry = useCallback(() => setAttempt((value) => value + 1), []);
 
   const boards = loaded.cfg === cfg ? loaded.boards : null;
   const error = loaded.cfg === cfg ? loaded.error : null;
@@ -62,16 +70,24 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
 
   const viewportHeight = Math.max(5, rows - 8);
 
-  useEffect(() => {
+  const changeQuery = (next: string) => {
+    queryRef.current = next;
+    selectionQueryRef.current = next.trim().toLowerCase();
     setIndex(0);
     scrollRef.current = 0;
-  }, [query]);
+    setQuery(next);
+  };
+  const moveSelection = (delta: number) => {
+    const current = filterBoards(boards ?? [], queryRef.current);
+    const next = clamp(getIndex() + delta, 0, Math.max(0, current.length - 1));
+    selectionQueryRef.current = queryRef.current.trim().toLowerCase();
+    setIndex(next);
+  };
 
   // `cursor` is the clamped, always-in-bounds view of `index` — the single
   // source of truth for which row is selected / submitted. Referenced by
   // both the PgUp/PgDn handler and the TextInput arrow handlers below.
   const cursor = clamp(index, 0, Math.max(0, filtered.length - 1));
-  const clampedLen = Math.max(0, filtered.length - 1);
 
   /**
    * Page up/down is outside TextInput so the text field's own arrow keys
@@ -79,28 +95,29 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
    * <TextInput/>.
    */
   useInput((_input, key) => {
-    if (key.pageUp) setIndex(clamp(cursor - viewportHeight, 0, clampedLen));
-    else if (key.pageDown) setIndex(clamp(cursor + viewportHeight, 0, clampedLen));
+    if (key.pageUp) moveSelection(-viewportHeight);
+    else if (key.pageDown) moveSelection(viewportHeight);
   });
 
   useInput(
-    (_input, key) => {
-      if (key.escape) onQuit();
+    (input, key) => {
+      if (key.escape || input === "q") onQuit();
+      else if (error && input === "r") retry();
     },
-    { isActive: !!error },
+    { isActive: boards === null },
   );
 
   if (error) {
     return (
-      <Box flexDirection="column" padding={1}>
+      <Box flexDirection="column" padding={1} width={cols} height={rows}>
         <Text color={theme.accent} bold>
           ifhj
         </Text>
         <Box marginTop={1}>
-          <Text color={theme.error}>{error}</Text>
+          <ErrorMessage message={error} width={Math.max(1, cols - 2)} rows={3} />
         </Box>
         <Box marginTop={1}>
-          <Text color={theme.muted}>press esc or ⌃c to quit</Text>
+          <Text color={theme.muted}>r retry · esc/q quit</Text>
         </Box>
       </Box>
     );
@@ -108,12 +125,15 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
 
   if (!boards) {
     return (
-      <Box flexDirection="column" padding={1}>
+      <Box flexDirection="column" padding={1} width={cols} height={rows}>
         <Text color={theme.accent} bold>
           ifhj
         </Text>
         <Box marginTop={1}>
-          <LoadingLine label="loading boards…" />
+          <LoadingLine label="Loading boards…" />
+        </Box>
+        <Box marginTop={1}>
+          <Text color={theme.muted}>esc/q quit</Text>
         </Box>
       </Box>
     );
@@ -127,27 +147,29 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
   const rowWidth = cols - 4;
 
   return (
-    <Box flexDirection="column" padding={1}>
+    <Box flexDirection="column" padding={1} width={cols} height={rows}>
       <Box>
         <Text color={theme.accent} bold>
           ifhj{" "}
         </Text>
-        <Text color={theme.muted}>— pick a board</Text>
+        <Text color={theme.muted}>— Pick a board</Text>
       </Box>
 
       <Box marginTop={1}>
-        <Text color={theme.muted}>search ▸ </Text>
+        <Text color={theme.muted}>Search ▸ </Text>
         <TextInput
           value={query}
-          placeholder="filter by name / key / type…"
-          onChange={setQuery}
-          onUpArrow={() => setIndex(clamp(cursor - 1, 0, clampedLen))}
-          onDownArrow={() => setIndex(clamp(cursor + 1, 0, clampedLen))}
+          placeholder="Filter by name / key / type…"
+          width={Math.max(1, cols - 13)}
+          onChange={changeQuery}
+          onUpArrow={() => moveSelection(-1)}
+          onDownArrow={() => moveSelection(1)}
           onSubmit={(submittedQuery) => {
             const submitted = filterBoards(boards, submittedQuery);
+            const normalized = submittedQuery.trim().toLowerCase();
             const submittedCursor =
-              submittedQuery.trim().toLowerCase() === query.trim().toLowerCase()
-                ? clamp(index, 0, Math.max(0, submitted.length - 1))
+              selectionQueryRef.current === normalized
+                ? clamp(getIndex(), 0, Math.max(0, submitted.length - 1))
                 : 0;
             const b = submitted[submittedCursor];
             if (b) onPick(b);
@@ -158,7 +180,9 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
 
       <Box marginTop={1} flexDirection="column">
         {filtered.length === 0 ? (
-          <Text color={theme.muted}>no boards match</Text>
+          <Text color={theme.muted}>
+            {boards.length === 0 ? "No boards available." : "No boards match."}
+          </Text>
         ) : (
           <>
             {scroll > 0 ? <Text color={theme.muted}> ^ {scroll} more above</Text> : null}
@@ -195,7 +219,7 @@ export function BoardPicker({ cfg, onPick, onQuit }: Props) {
 
       <Box marginTop={1}>
         <Text color={theme.muted}>
-          {filtered.length} of {boards.length} · ↑↓ nav · ⏎ pick · esc quit
+          {filtered.length} of {boards.length} · ↑↓ navigate · ⏎ select · esc quit
         </Text>
       </Box>
     </Box>

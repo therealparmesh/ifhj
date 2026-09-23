@@ -88,7 +88,7 @@ test("an older issue request cannot replace a newer issue", async () => {
   const props = {
     cfg,
     projectKey: "PROJ",
-    ensureUsers: async () => [],
+    ensureUsers: async () => ({ users: [] }),
     onClose: () => {},
     onMove: () => {},
     onTransition: () => {},
@@ -152,7 +152,7 @@ test("same-issue refreshes keep only the latest reverse-order result", async () 
     cfg,
     projectKey: "PROJ",
     issueKey: "PROJ-1",
-    ensureUsers: async () => [],
+    ensureUsers: async () => ({ users: [] }),
     onClose: () => {},
     onMove: () => {},
     onTransition: () => {},
@@ -205,8 +205,9 @@ test("same-issue refreshes keep only the latest reverse-order result", async () 
   expect(output()).not.toContain("old failure");
 });
 
-test("a save from a previous issue cannot refresh or publish into the current issue", async () => {
+test("changed-issue and post-write unmount saves cannot refresh or publish", async () => {
   const oldSave = deferred<Response>();
+  const currentSave = deferred<Response>();
   let oldIssueGets = 0;
   let currentIssueGets = 0;
   let watchRequests = 0;
@@ -220,7 +221,7 @@ test("a save from a previous issue cannot refresh or publish into the current is
     if (url.pathname.endsWith("/editmeta")) return json({ fields: {} });
     if (url.pathname.endsWith("/watchers") && init?.method === "POST") {
       watchRequests++;
-      return oldSave.promise;
+      return url.pathname.includes("PROJ-2") ? currentSave.promise : oldSave.promise;
     }
     if (url.pathname === "/rest/api/3/issue/PROJ-1") {
       oldIssueGets++;
@@ -241,7 +242,7 @@ test("a save from a previous issue cannot refresh or publish into the current is
   const props = {
     cfg,
     projectKey: "PROJ",
-    ensureUsers: async () => [],
+    ensureUsers: async () => ({ users: [] }),
     onClose: () => {},
     onMove: () => {},
     onTransition: () => {},
@@ -281,6 +282,90 @@ test("a save from a previous issue cannot refresh or publish into the current is
   expect(oldIssueGets).toBe(1);
   expect(refreshes).toBe(0);
   expect(output()).not.toContain("old issue");
+
+  stdin.write("w");
+  await waitFor(() => watchRequests === 2, "current issue watch request");
+  const getsBeforeUnmount = currentIssueGets;
+  app.unmount();
+  apps.splice(apps.indexOf(app), 1);
+  currentSave.resolve(new Response(null, { status: 204 }));
+  await nextTurn();
+  await nextTurn();
+  expect(currentIssueGets).toBe(getsBeforeUnmount);
+  expect(refreshes).toBe(0);
+});
+
+test("an obsolete title rejection cannot replace a new issue field editor", async () => {
+  const oldSave = deferred<Response>();
+  const writes: { key: string; body: unknown }[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/rest/api/3/field") return json([]);
+    if (url.pathname === "/rest/api/3/myself") return json({ accountId: "me" });
+    if (url.pathname.endsWith("/comment")) return json({ comments: [] });
+    if (url.pathname.endsWith("/editmeta")) {
+      return json({
+        fields: {
+          customfield_1: {
+            name: "New choice",
+            required: false,
+            schema: { type: "option" },
+            allowedValues: [{ id: "a", value: "Alpha choice" }],
+          },
+        },
+      });
+    }
+    const key = url.pathname.endsWith("PROJ-2") ? "PROJ-2" : "PROJ-1";
+    if (init?.method === "PUT") {
+      writes.push({ key, body: JSON.parse(String(init.body)) });
+      return key === "PROJ-1" ? oldSave.promise : new Response(null, { status: 204 });
+    }
+    if (url.pathname.endsWith(key)) return json(issue(key, key === "PROJ-1" ? "Old" : "New"));
+    throw new Error(`unexpected request: ${init?.method ?? "GET"} ${url}`);
+  }) as typeof fetch;
+  const terminal = createTerminal();
+  const props = {
+    cfg: { server: "https://obsolete-save.invalid", authHeader: "Basic test" },
+    projectKey: "PROJ",
+    ensureUsers: async () => ({ users: [] }),
+    onClose: () => {},
+    onMove: () => {},
+    onTransition: () => {},
+    onCreateSubtask: () => {},
+    onRefresh: () => {},
+  };
+  const app = render(<IssueDetailModal {...props} issueKey="PROJ-1" />, {
+    interactive: true,
+    stdin: terminal.stdin as unknown as typeof process.stdin,
+    stdout: terminal.stdout as unknown as typeof process.stdout,
+    stderr: new PassThrough() as unknown as typeof process.stderr,
+    exitOnCtrlC: false,
+    patchConsole: false,
+  });
+  apps.push(app);
+  await waitFor(() => terminal.output().includes("Old"), "old issue");
+  await sendInput(app, terminal.stdin, "e");
+  await sendInput(app, terminal.stdin, " changed");
+  await sendInput(app, terminal.stdin, "\r");
+  await waitFor(() => writes.length === 1, "old title save");
+
+  app.rerender(<IssueDetailModal {...props} issueKey="PROJ-2" />);
+  await waitFor(() => terminal.output().includes("New"), "new issue");
+  await sendInput(app, terminal.stdin, "\t");
+  await sendInput(app, terminal.stdin, "G");
+  await sendInput(app, terminal.stdin, "\r");
+  await waitFor(() => terminal.output().includes("Alpha choice"), "new field editor");
+  terminal.clearOutput();
+  oldSave.resolve(new Response("old title rejected", { status: 400 }));
+  await nextTurn();
+  await app.waitUntilRenderFlush();
+  expect(terminal.output()).not.toContain("Could not save title");
+  await sendInput(app, terminal.stdin, "\r");
+  await waitFor(() => writes.length === 2, "new field save");
+  expect(writes).toEqual([
+    { key: "PROJ-1", body: { fields: { summary: "Old changed" } } },
+    { key: "PROJ-2", body: { fields: { customfield_1: { id: "a" } } } },
+  ]);
 });
 
 test("a subtask cannot open another subtask flow beneath itself", async () => {
@@ -304,7 +389,7 @@ test("a subtask cannot open another subtask flow beneath itself", async () => {
       cfg={{ server: "https://subtask-parent.invalid", authHeader: "Basic test" }}
       projectKey="PROJ"
       issueKey="PROJ-2"
-      ensureUsers={async () => []}
+      ensureUsers={async () => ({ users: [] })}
       onClose={() => {}}
       onMove={() => {}}
       onTransition={() => {}}
@@ -324,9 +409,9 @@ test("a subtask cannot open another subtask flow beneath itself", async () => {
   await waitFor(() => output().includes("child issue"), "subtask detail");
 
   stdin.write("C");
-  await waitFor(() => output().includes("a subtask cannot be a parent"), "subtask rejection");
+  await waitFor(() => output().includes("A subtask cannot be a parent"), "subtask rejection");
   expect(subtaskFlows).toBe(0);
-  expect(output()).toContain("a subtask cannot be a parent");
+  expect(output()).toContain("A subtask cannot be a parent");
 });
 
 test("parent and transition actions wait for loaded issue metadata", async () => {
@@ -355,7 +440,7 @@ test("parent and transition actions wait for loaded issue metadata", async () =>
       cfg={{ server: "https://pending-parent.invalid", authHeader: "Basic test" }}
       projectKey=""
       issueKey="OTHER-7"
-      ensureUsers={async () => []}
+      ensureUsers={async () => ({ users: [] })}
       onClose={() => {}}
       onMove={(detail) => moves.push(detail)}
       onTransition={(projectKey) => transitionProjects.push(projectKey)}
@@ -420,61 +505,6 @@ test("parent and transition actions wait for loaded issue metadata", async () =>
   );
 });
 
-test("an unmounted detail cannot refresh after an old save completes", async () => {
-  const save = deferred<Response>();
-  let issueGets = 0;
-  let saves = 0;
-  let refreshes = 0;
-  globalThis.fetch = (async (input, init) => {
-    const url = new URL(String(input));
-    if (url.pathname === "/rest/api/3/field") return json([]);
-    if (url.pathname === "/rest/api/3/myself") return json({ accountId: "me" });
-    if (url.pathname.endsWith("/comment")) return json({ comments: [] });
-    if (url.pathname.endsWith("/editmeta")) return json({ fields: {} });
-    if (url.pathname.endsWith("/watchers") && init?.method === "POST") {
-      saves++;
-      return save.promise;
-    }
-    if (url.pathname === "/rest/api/3/issue/PROJ-1") {
-      issueGets++;
-      return json(issue("PROJ-1", "save lifetime"));
-    }
-    throw new Error(`unexpected request: ${init?.method ?? "GET"} ${url}`);
-  }) as typeof fetch;
-  const terminal = createTerminal();
-  const app = render(
-    <IssueDetailModal
-      cfg={{ server: "https://unmount-save.invalid", authHeader: "Basic test" }}
-      projectKey="PROJ"
-      issueKey="PROJ-1"
-      ensureUsers={async () => []}
-      onClose={() => {}}
-      onMove={() => {}}
-      onTransition={() => {}}
-      onCreateSubtask={() => {}}
-      onRefresh={() => refreshes++}
-    />,
-    {
-      interactive: true,
-      stdin: terminal.stdin as unknown as typeof process.stdin,
-      stdout: terminal.stdout as unknown as typeof process.stdout,
-      stderr: new PassThrough() as unknown as typeof process.stderr,
-      exitOnCtrlC: false,
-      patchConsole: false,
-    },
-  );
-  await waitFor(() => terminal.output().includes("save lifetime"), "loaded save detail");
-  terminal.stdin.write("w");
-  await waitFor(() => saves === 1, "pending save");
-  app.unmount();
-  save.resolve(new Response(null, { status: 204 }));
-  await nextTurn();
-  await nextTurn();
-
-  expect(issueGets).toBe(1);
-  expect(refreshes).toBe(0);
-});
-
 test("an editor result after detail unmount cannot start a write", async () => {
   const edit = deferred<string>();
   const editorMock = spyOn(editor, "editInNeovim").mockReturnValue(edit.promise);
@@ -502,7 +532,7 @@ test("an editor result after detail unmount cannot start a write", async () => {
       cfg={{ server: "https://unmount-editor.invalid", authHeader: "Basic test" }}
       projectKey="PROJ"
       issueKey="PROJ-1"
-      ensureUsers={async () => []}
+      ensureUsers={async () => ({ users: [] })}
       onClose={() => {}}
       onMove={() => {}}
       onTransition={() => {}}
@@ -528,6 +558,625 @@ test("an editor result after detail unmount cannot start a write", async () => {
 
   expect(updates).toBe(0);
   expect(refreshes).toBe(0);
+});
+
+test("a failed description draft does not leak to a different issue", async () => {
+  const seeds: string[] = [];
+  const editorMock = spyOn(editor, "editInNeovim").mockImplementation(async (initial) => {
+    seeds.push(initial);
+    return seeds.length === 1 ? "Issue one draft" : initial;
+  });
+  restoreEditor = () => editorMock.mockRestore();
+  globalThis.fetch = (async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/rest/api/3/field") return json([]);
+    if (url.pathname === "/rest/api/3/myself") return json({ accountId: "me" });
+    if (url.pathname.endsWith("/comment")) return json({ comments: [] });
+    if (url.pathname.endsWith("/editmeta")) return json({ fields: {} });
+    if (url.pathname === "/rest/api/3/issue/PROJ-1" && init?.method === "PUT")
+      return new Response("rejected", { status: 400 });
+    if (url.pathname === "/rest/api/3/issue/PROJ-1") {
+      const value = issue("PROJ-1", "First issue");
+      (value.fields as { description: string | null }).description = "First saved description";
+      return json(value);
+    }
+    if (url.pathname === "/rest/api/3/issue/PROJ-2") {
+      const value = issue("PROJ-2", "Second issue");
+      (value.fields as { description: string | null }).description = "Second saved description";
+      return json(value);
+    }
+    throw new Error(`unexpected request: ${init?.method ?? "GET"} ${url}`);
+  }) as typeof fetch;
+  const terminal = createTerminal();
+  const props = {
+    cfg: { server: "https://draft-identity.invalid", authHeader: "Basic test" },
+    projectKey: "PROJ",
+    ensureUsers: async () => ({ users: [] }),
+    onClose: () => {},
+    onMove: () => {},
+    onTransition: () => {},
+    onCreateSubtask: () => {},
+    onRefresh: () => {},
+  };
+  const app = render(<IssueDetailModal {...props} issueKey="PROJ-1" />, {
+    interactive: true,
+    stdin: terminal.stdin as unknown as typeof process.stdin,
+    stdout: terminal.stdout as unknown as typeof process.stdout,
+    stderr: new PassThrough() as unknown as typeof process.stderr,
+    exitOnCtrlC: false,
+    patchConsole: false,
+  });
+  apps.push(app);
+  await waitFor(() => terminal.output().includes("First issue"), "first issue");
+  terminal.stdin.write("E");
+  await waitFor(() => terminal.output().includes("Description not saved"), "failed description");
+
+  app.rerender(<IssueDetailModal {...props} issueKey="PROJ-2" />);
+  await waitFor(() => terminal.output().includes("Second issue"), "second issue");
+  terminal.stdin.write("E");
+  await waitFor(() => seeds.length === 2, "second editor");
+  expect(seeds).toEqual(["First saved description", "Second saved description"]);
+});
+
+for (const mode of ["description", "new-comment", "existing-comment"] as const) {
+  test(`discarded ${mode} draft does not return after a failed save`, async () => {
+    const stored =
+      mode === "description"
+        ? "Stored description"
+        : mode === "new-comment"
+          ? ""
+          : "Stored comment";
+    const rejected = `${mode} rejected draft`;
+    const seeds: string[] = [];
+    const finalEditor = deferred<string>();
+    const editorMock = spyOn(editor, "editInNeovim").mockImplementation(async (initial) => {
+      seeds.push(initial);
+      if (seeds.length === 1) return rejected;
+      if (seeds.length === 2) return stored;
+      return finalEditor.promise;
+    });
+    restoreEditor = () => editorMock.mockRestore();
+    let writes = 0;
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/rest/api/3/field") return json([]);
+      if (url.pathname === "/rest/api/3/myself") return json({ accountId: "me" });
+      if (url.pathname.endsWith("/editmeta")) return json({ fields: {} });
+      if (url.pathname.endsWith("/comment") && !init?.method) {
+        return json({
+          comments: [
+            {
+              id: "comment-1",
+              author: { accountId: "me", displayName: "Me" },
+              body: "Stored comment",
+              created: "2026-01-01T00:00:00.000Z",
+            },
+          ],
+        });
+      }
+      if (init?.method === "PUT" || init?.method === "POST") {
+        writes++;
+        return new Response("rejected", { status: 400 });
+      }
+      if (url.pathname === "/rest/api/3/issue/PROJ-1") {
+        const value = issue("PROJ-1", "Draft disposal");
+        (value.fields as { description: string | null }).description = "Stored description";
+        return json(value);
+      }
+      throw new Error(`unexpected request: ${init?.method ?? "GET"} ${url}`);
+    }) as typeof fetch;
+    const terminal = createTerminal();
+    const app = render(
+      <IssueDetailModal
+        cfg={{ server: "https://discard-draft.invalid", authHeader: "Basic test" }}
+        projectKey="PROJ"
+        issueKey="PROJ-1"
+        ensureUsers={async () => ({ users: [] })}
+        onClose={() => {}}
+        onMove={() => {}}
+        onTransition={() => {}}
+        onCreateSubtask={() => {}}
+        onRefresh={() => {}}
+      />,
+      {
+        interactive: true,
+        stdin: terminal.stdin as unknown as typeof process.stdin,
+        stdout: terminal.stdout as unknown as typeof process.stdout,
+        stderr: new PassThrough() as unknown as typeof process.stderr,
+        exitOnCtrlC: false,
+        patchConsole: false,
+      },
+    );
+    apps.push(app);
+    await waitFor(() => terminal.output().includes("Draft disposal"), "draft detail");
+    const openEditor = async () => {
+      if (mode === "description") await sendInput(app, terminal.stdin, "E");
+      else if (mode === "new-comment") await sendInput(app, terminal.stdin, "c");
+      else {
+        await sendInput(app, terminal.stdin, "\r");
+        await waitFor(() => terminal.output().includes("edit comment"), "comment action");
+        await sendInput(app, terminal.stdin, "\r");
+      }
+    };
+    await openEditor();
+    await waitFor(() => writes === 1 && terminal.output().includes("not saved"), "failed draft");
+    await openEditor();
+    const discardMessage =
+      mode === "description"
+        ? "No description change"
+        : mode === "new-comment"
+          ? "Comment is empty"
+          : "No comment change";
+    await waitFor(() => terminal.output().includes(discardMessage), "discarded draft");
+    expect(writes).toBe(1);
+    await openEditor();
+    await waitFor(() => seeds.length === 3, "reopened editor");
+    expect(seeds).toEqual([stored, rejected, stored]);
+  });
+}
+
+test("mention lookup failure is visible before nonfatal editor handoff", async () => {
+  const editorMock = spyOn(editor, "editInNeovim").mockResolvedValue("saved description");
+  restoreEditor = () => editorMock.mockRestore();
+  globalThis.fetch = (async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/rest/api/3/field") return json([]);
+    if (url.pathname === "/rest/api/3/myself") return json({ accountId: "me" });
+    if (url.pathname.endsWith("/comment")) return json({ comments: [] });
+    if (url.pathname.endsWith("/editmeta")) return json({ fields: {} });
+    if (url.pathname === "/rest/api/3/issue/PROJ-1") return json(issue("PROJ-1", "Mention"));
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  const terminal = createTerminal();
+  const app = render(
+    <IssueDetailModal
+      cfg={{ server: "https://mention-warning.invalid", authHeader: "Basic test" }}
+      projectKey="PROJ"
+      issueKey="PROJ-1"
+      ensureUsers={async () => ({
+        users: [],
+        warning:
+          "Mention suggestions could not load: temporary. Plain @text is not a Jira mention.",
+      })}
+      onClose={() => {}}
+      onMove={() => {}}
+      onTransition={() => {}}
+      onCreateSubtask={() => {}}
+      onRefresh={() => {}}
+    />,
+    {
+      interactive: true,
+      stdin: terminal.stdin as unknown as typeof process.stdin,
+      stdout: terminal.stdout as unknown as typeof process.stdout,
+      stderr: new PassThrough() as unknown as typeof process.stderr,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    },
+  );
+  apps.push(app);
+  await waitFor(() => terminal.output().includes("Mention"), "detail");
+  terminal.stdin.write("E");
+  await waitFor(() => terminal.output().includes("Plain @text"), "mention warning");
+  expect(editorMock).toHaveBeenCalledTimes(0);
+  await waitFor(() => editorMock.mock.calls.length === 1, "nonfatal editor handoff", 1_500);
+  expect(editorMock.mock.calls[0]?.[2]).toEqual({ mentionUsers: [] });
+});
+
+test("detail scalar save shows pending state and keeps its draft for retry", async () => {
+  const saves = [deferred<Response>(), deferred<Response>()];
+  const bodies: unknown[] = [];
+  let puts = 0;
+  let refreshes = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/rest/api/3/field") return json([]);
+    if (url.pathname === "/rest/api/3/myself") return json({ accountId: "me" });
+    if (url.pathname.endsWith("/comment")) return json({ comments: [] });
+    if (url.pathname.endsWith("/editmeta")) {
+      return json({
+        fields: {
+          customfield_1: {
+            name: "Estimate",
+            required: false,
+            schema: { type: "number" },
+          },
+        },
+      });
+    }
+    if (url.pathname === "/rest/api/3/issue/PROJ-1" && init?.method === "PUT") {
+      bodies.push(JSON.parse(String(init.body)));
+      const pending = saves[puts++];
+      if (!pending) throw new Error("duplicate save");
+      return pending.promise;
+    }
+    if (url.pathname === "/rest/api/3/issue/PROJ-1") {
+      const value = issue("PROJ-1", "Scalar field");
+      Object.assign(value.fields, { customfield_1: null });
+      return json(value);
+    }
+    throw new Error(`unexpected request: ${init?.method ?? "GET"} ${url}`);
+  }) as typeof fetch;
+  const terminal = createTerminal();
+  const app = render(
+    <IssueDetailModal
+      cfg={{ server: "https://field-save.invalid", authHeader: "Basic test" }}
+      projectKey="PROJ"
+      issueKey="PROJ-1"
+      ensureUsers={async () => ({ users: [] })}
+      onClose={() => {}}
+      onMove={() => {}}
+      onTransition={() => {}}
+      onCreateSubtask={() => {}}
+      onRefresh={() => refreshes++}
+    />,
+    {
+      interactive: true,
+      stdin: terminal.stdin as unknown as typeof process.stdin,
+      stdout: terminal.stdout as unknown as typeof process.stdout,
+      stderr: new PassThrough() as unknown as typeof process.stderr,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    },
+  );
+  apps.push(app);
+  await waitFor(() => terminal.output().includes("Scalar field"), "detail");
+  await sendInput(app, terminal.stdin, "\t");
+  await sendInput(app, terminal.stdin, "G");
+  await sendInput(app, terminal.stdin, "\r");
+  await waitFor(() => terminal.output().includes("Estimate"), "number editor");
+  await sendInput(app, terminal.stdin, "5");
+  terminal.clearOutput();
+  await sendInput(app, terminal.stdin, "\r");
+  await waitFor(() => puts === 1, "first field save");
+  await waitFor(() => terminal.output().includes("Saving Estimate"), "field pending state");
+  expect(bodies[0]).toEqual({ fields: { customfield_1: 5 } });
+  await sendInput(app, terminal.stdin, "\r");
+  expect(puts).toBe(1);
+  terminal.clearOutput();
+  saves[0]!.resolve(new Response("field rejected", { status: 400 }));
+  await waitFor(() => terminal.output().includes("Could not save Estimate"), "field error");
+  expect(Bun.stripANSI(terminal.output())).toMatch(/›\s+5/);
+  await sendInput(app, terminal.stdin, "e");
+  await sendInput(app, terminal.stdin, "\x15");
+  await sendInput(app, terminal.stdin, "6");
+  await sendInput(app, terminal.stdin, "\r");
+  await waitFor(() => puts === 2, "field retry");
+  expect(bodies[1]).toEqual({ fields: { customfield_1: 6 } });
+  terminal.clearOutput();
+  saves[1]!.resolve(new Response(null, { status: 204 }));
+  await waitFor(() => refreshes === 1, "saved field completion");
+  await app.waitUntilRenderFlush();
+  expect(terminal.output()).not.toContain("Estimate was not saved");
+});
+
+test("detail option save preserves filtered picker query and selection after failure", async () => {
+  const saves = [deferred<Response>(), deferred<Response>()];
+  const bodies: unknown[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/rest/api/3/field") return json([]);
+    if (url.pathname === "/rest/api/3/myself") return json({ accountId: "me" });
+    if (url.pathname.endsWith("/comment")) return json({ comments: [] });
+    if (url.pathname.endsWith("/editmeta")) {
+      return json({
+        fields: {
+          customfield_2: {
+            name: "Choice",
+            required: false,
+            schema: { type: "option" },
+            allowedValues: [
+              { id: "a", value: "Alpha" },
+              { id: "b", value: "Beta" },
+              { id: "g", value: "Gamma" },
+            ],
+          },
+        },
+      });
+    }
+    if (url.pathname === "/rest/api/3/issue/PROJ-1" && init?.method === "PUT") {
+      bodies.push(JSON.parse(String(init.body)));
+      return saves[bodies.length - 1]!.promise;
+    }
+    if (url.pathname === "/rest/api/3/issue/PROJ-1") {
+      const value = issue("PROJ-1", "Option field");
+      Object.assign(value.fields, { customfield_2: null });
+      return json(value);
+    }
+    throw new Error(`unexpected request: ${init?.method ?? "GET"} ${url}`);
+  }) as typeof fetch;
+  const terminal = createTerminal();
+  const app = render(
+    <IssueDetailModal
+      cfg={{ server: "https://option-save.invalid", authHeader: "Basic test" }}
+      projectKey="PROJ"
+      issueKey="PROJ-1"
+      ensureUsers={async () => ({ users: [] })}
+      onClose={() => {}}
+      onMove={() => {}}
+      onTransition={() => {}}
+      onCreateSubtask={() => {}}
+      onRefresh={() => {}}
+    />,
+    {
+      interactive: true,
+      stdin: terminal.stdin as unknown as typeof process.stdin,
+      stdout: terminal.stdout as unknown as typeof process.stdout,
+      stderr: new PassThrough() as unknown as typeof process.stderr,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    },
+  );
+  apps.push(app);
+  await waitFor(() => terminal.output().includes("Option field"), "detail");
+  await sendInput(app, terminal.stdin, "\t");
+  await sendInput(app, terminal.stdin, "G");
+  await sendInput(app, terminal.stdin, "\r");
+  await waitFor(() => terminal.output().includes("Gamma"), "option picker");
+  await sendInput(app, terminal.stdin, "ga");
+  terminal.clearOutput();
+  await sendInput(app, terminal.stdin, "\r");
+  await waitFor(() => bodies.length === 1, "option save");
+  await waitFor(
+    () => terminal.output().includes("Please wait for the save to finish"),
+    "option pending copy",
+  );
+  expect(terminal.output()).not.toContain("esc cancel");
+  expect(terminal.output()).toContain("Please wait for the save to finish");
+  saves[0]!.resolve(new Response("option rejected", { status: 400 }));
+  await waitFor(() => terminal.output().includes("Choice was not saved"), "option error");
+  await sendInput(app, terminal.stdin, "e");
+  await waitFor(() => terminal.output().includes("ga"), "restored option query");
+  expect(terminal.output()).toContain("> Gamma");
+  await sendInput(app, terminal.stdin, "\r");
+  await waitFor(() => bodies.length === 2, "option retry");
+  expect(bodies).toEqual([
+    { fields: { customfield_2: { id: "g" } } },
+    { fields: { customfield_2: { id: "g" } } },
+  ]);
+  saves[1]!.resolve(new Response(null, { status: 204 }));
+});
+
+test("80x24 detail pane preserves characters across padded body wrapping", async () => {
+  setDimensions(80, 24);
+  const description = `${"a".repeat(47)}XYZ0123456789`;
+  const detailResponse = deferred<Response>();
+  globalThis.fetch = (async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/rest/api/3/field") return json([]);
+    if (url.pathname === "/rest/api/3/myself") return json({ accountId: "me" });
+    if (url.pathname.endsWith("/comment")) return json({ comments: [] });
+    if (url.pathname.endsWith("/editmeta")) return json({ fields: {} });
+    if (url.pathname === "/rest/api/3/issue/PROJ-1") {
+      return detailResponse.promise;
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  const terminal = createTerminal(80, 24);
+  const app = render(
+    <IssueDetailModal
+      cfg={{ server: "https://wrap-detail.invalid", authHeader: "Basic test" }}
+      projectKey="PROJ"
+      issueKey="PROJ-1"
+      ensureUsers={async () => ({ users: [] })}
+      onClose={() => {}}
+      onMove={() => {}}
+      onTransition={() => {}}
+      onCreateSubtask={() => {}}
+      onRefresh={() => {}}
+    />,
+    {
+      interactive: true,
+      stdin: terminal.stdin as unknown as typeof process.stdin,
+      stdout: terminal.stdout as unknown as typeof process.stdout,
+      stderr: new PassThrough() as unknown as typeof process.stderr,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    },
+  );
+  apps.push(app);
+  await nextTurn();
+  terminal.clearOutput();
+  const value = issue("PROJ-1", "Wrapped detail");
+  (value.fields as { description: string | null }).description = description;
+  detailResponse.resolve(json(value));
+  await waitFor(() => terminal.output().includes("Wrapped detail"), "wrapped detail");
+  const frame = Bun.stripANSI(terminal.output());
+  expect(frame).toContain(`${"a".repeat(47)}X`);
+  expect(frame).toContain("YZ0123456789");
+  expect(frame).toContain("0123456789");
+});
+
+test("older issue save completion cannot clear a newer issue pending state", async () => {
+  const oldSave = deferred<Response>();
+  const newSaves = [deferred<Response>(), deferred<Response>()];
+  const writes: { key: string; body: unknown }[] = [];
+  let newSaveIndex = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/rest/api/3/field") return json([]);
+    if (url.pathname === "/rest/api/3/myself") return json({ accountId: "me" });
+    if (url.pathname.endsWith("/comment")) return json({ comments: [] });
+    if (url.pathname.endsWith("/editmeta")) return json({ fields: {} });
+    const key = url.pathname.endsWith("PROJ-2") ? "PROJ-2" : "PROJ-1";
+    if (init?.method === "PUT") {
+      writes.push({ key, body: JSON.parse(String(init.body)) });
+      if (key === "PROJ-1") return oldSave.promise;
+      return newSaves[newSaveIndex++]!.promise;
+    }
+    if (url.pathname.endsWith(key)) return json(issue(key, `Issue ${key}`));
+    throw new Error(`unexpected request: ${init?.method ?? "GET"} ${url}`);
+  }) as typeof fetch;
+  const terminal = createTerminal();
+  const props = {
+    cfg: { server: "https://save-lifetime.invalid", authHeader: "Basic test" },
+    projectKey: "PROJ",
+    ensureUsers: async () => ({ users: [] }),
+    onClose: () => {},
+    onMove: () => {},
+    onTransition: () => {},
+    onCreateSubtask: () => {},
+    onRefresh: () => {},
+  };
+  const app = render(<IssueDetailModal {...props} issueKey="PROJ-1" />, {
+    interactive: true,
+    stdin: terminal.stdin as unknown as typeof process.stdin,
+    stdout: terminal.stdout as unknown as typeof process.stdout,
+    stderr: new PassThrough() as unknown as typeof process.stderr,
+    exitOnCtrlC: false,
+    patchConsole: false,
+  });
+  apps.push(app);
+  await waitFor(() => terminal.output().includes("Issue PROJ-1"), "first issue");
+  await sendInput(app, terminal.stdin, "e");
+  await sendInput(app, terminal.stdin, " changed");
+  await sendInput(app, terminal.stdin, "\r");
+  await waitFor(() => writes.length === 1, "first save");
+
+  app.rerender(<IssueDetailModal {...props} issueKey="PROJ-2" />);
+  await waitFor(() => terminal.output().includes("Issue PROJ-2"), "second issue");
+  await sendInput(app, terminal.stdin, "e");
+  await sendInput(app, terminal.stdin, " changed");
+  await sendInput(app, terminal.stdin, "\r");
+  await waitFor(() => writes.length === 2, "second save");
+  oldSave.resolve(new Response(null, { status: 204 }));
+  await nextTurn();
+  await nextTurn();
+  await sendInput(app, terminal.stdin, " foreground sentinel");
+  await sendInput(app, terminal.stdin, "\r");
+  expect(writes).toHaveLength(2);
+
+  terminal.clearOutput();
+  newSaves[0]!.resolve(new Response("new save rejected", { status: 400 }));
+  await waitFor(() => terminal.output().includes("Could not save title"), "new save failure");
+  const failedFrame = Bun.stripANSI(terminal.output());
+  expect(failedFrame).toMatch(/›\s+Issue PROJ-2 changed/);
+  expect(failedFrame).not.toContain("foreground sentinel");
+
+  await sendInput(app, terminal.stdin, "\x15");
+  await sendInput(app, terminal.stdin, "Retry PROJ-2 title");
+  await sendInput(app, terminal.stdin, "\r");
+  await waitFor(() => writes.length === 3, "new save retry");
+  expect(writes).toEqual([
+    { key: "PROJ-1", body: { fields: { summary: "Issue PROJ-1 changed" } } },
+    { key: "PROJ-2", body: { fields: { summary: "Issue PROJ-2 changed" } } },
+    { key: "PROJ-2", body: { fields: { summary: "Retry PROJ-2 title" } } },
+  ]);
+  newSaves[1]!.resolve(new Response(null, { status: 204 }));
+});
+
+for (const metadataFails of [true, false]) {
+  test(
+    metadataFails
+      ? "clear explains an edit metadata failure and retry path"
+      : "clear keeps genuine read-only metadata feedback",
+    async () => {
+      globalThis.fetch = (async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/rest/api/3/field") return json([]);
+        if (url.pathname === "/rest/api/3/myself") return json({ accountId: "me" });
+        if (url.pathname.endsWith("/comment")) return json({ comments: [] });
+        if (url.pathname.endsWith("/editmeta")) {
+          return metadataFails
+            ? new Response("metadata denied", { status: 403 })
+            : json({ fields: {} });
+        }
+        if (url.pathname === "/rest/api/3/issue/PROJ-1") return json(issue("PROJ-1", "Metadata"));
+        throw new Error(`unexpected request: ${url}`);
+      }) as typeof fetch;
+      const terminal = createTerminal();
+      const app = render(
+        <IssueDetailModal
+          cfg={{ server: "https://metadata-clear.invalid", authHeader: "Basic test" }}
+          projectKey="PROJ"
+          issueKey="PROJ-1"
+          ensureUsers={async () => ({ users: [] })}
+          onClose={() => {}}
+          onMove={() => {}}
+          onTransition={() => {}}
+          onCreateSubtask={() => {}}
+          onRefresh={() => {}}
+        />,
+        {
+          interactive: true,
+          stdin: terminal.stdin as unknown as typeof process.stdin,
+          stdout: terminal.stdout as unknown as typeof process.stdout,
+          stderr: new PassThrough() as unknown as typeof process.stderr,
+          exitOnCtrlC: false,
+          patchConsole: false,
+        },
+      );
+      apps.push(app);
+      await waitFor(() => terminal.output().includes("Metadata"), "metadata detail");
+      await sendInput(app, terminal.stdin, "\t");
+      await sendInput(app, terminal.stdin, "\x1b[B");
+      terminal.clearOutput();
+      await sendInput(app, terminal.stdin, "x");
+      if (metadataFails) {
+        await waitFor(() => terminal.output().includes("metadata denied"), "metadata clear error");
+        expect(terminal.output()).toContain("Press r to retry");
+        expect(terminal.output()).not.toContain("Not editable on this issue");
+      } else {
+        await waitFor(
+          () => terminal.output().includes("Not editable on this issue"),
+          "read-only clear feedback",
+        );
+        expect(terminal.output()).not.toContain("Field information could not load");
+      }
+    },
+  );
+}
+
+test("80x24 detail bounds one combined long-error queue and keeps controls visible", async () => {
+  setDimensions(80, 24);
+  const detailResponse = deferred<Response>();
+  globalThis.fetch = (async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/rest/api/3/field") return json([]);
+    if (url.pathname === "/rest/api/3/myself") return json({ accountId: "me" });
+    if (url.pathname.endsWith("/comment")) return json({ comments: [] });
+    if (url.pathname.endsWith("/editmeta")) return json({ fields: {} });
+    if (url.pathname === "/rest/api/3/issue/PROJ-1") return detailResponse.promise;
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  const terminal = createTerminal(80, 24);
+  const externalToasts = Array.from({ length: 6 }, (_, index) => ({
+    id: index + 1,
+    tone: "err" as const,
+    text: `${`longerror${index + 1}`.repeat(20)} END_${index + 1}`,
+  }));
+  const app = render(
+    <IssueDetailModal
+      cfg={{ server: "https://detail-errors.invalid", authHeader: "Basic test" }}
+      projectKey="PROJ"
+      issueKey="PROJ-1"
+      ensureUsers={async () => ({ users: [] })}
+      onClose={() => {}}
+      onMove={() => {}}
+      onTransition={() => {}}
+      onCreateSubtask={() => {}}
+      onRefresh={() => {}}
+      externalToasts={externalToasts}
+    />,
+    {
+      interactive: true,
+      stdin: terminal.stdin as unknown as typeof process.stdin,
+      stdout: terminal.stdout as unknown as typeof process.stdout,
+      stderr: new PassThrough() as unknown as typeof process.stderr,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    },
+  );
+  apps.push(app);
+  await nextTurn();
+  terminal.clearOutput();
+  detailResponse.resolve(json(issue("PROJ-1", "Errors")));
+  await waitFor(() => terminal.output().includes("Errors"), "detail errors");
+  const frame = Bun.stripANSI(terminal.output());
+  expect(frame.split("\n").length).toBeLessThanOrEqual(24);
+  expect(frame).toContain("esc close");
+  expect(frame).not.toContain("longerror1");
+  for (let page = 0; page < 20; page++) await sendInput(app, terminal.stdin, "\x10");
+  expect(terminal.output()).toContain("END_6");
 });
 
 test("a nondefault estimate remains visible through actual detail field metadata", async () => {
@@ -560,7 +1209,7 @@ test("a nondefault estimate remains visible through actual detail field metadata
       cfg={{ server: "https://detail-estimate.invalid", authHeader: "Basic test" }}
       projectKey="PROJ"
       issueKey="PROJ-1"
-      ensureUsers={async () => []}
+      ensureUsers={async () => ({ users: [] })}
       onClose={() => {}}
       onMove={() => {}}
       onTransition={() => {}}
@@ -611,12 +1260,13 @@ test("keeps separators, two-row footer, and the selected last field visible", as
         cfg={{ server: "https://detail-layout.invalid", authHeader: "Basic test" }}
         projectKey="TEST"
         issueKey="TEST-1"
-        ensureUsers={async () => []}
+        ensureUsers={async () => ({ users: [] })}
         onClose={() => {}}
         onMove={() => {}}
         onTransition={() => {}}
         onCreateSubtask={() => {}}
         onRefresh={() => {}}
+        externalToasts={[{ id: 1, tone: "err", text: "Nondismissible external feedback" }]}
       />,
       {
         interactive: true,
@@ -668,6 +1318,26 @@ test("keeps separators, two-row footer, and the selected last field visible", as
     expect(selected).toContain("custom 17");
     expect(selected).toContain("29/29");
     expect(selected).toContain("esc close");
+    expect(selected).toContain("Nondismissible external feedback");
+    expect(selected).not.toContain("Ctrl+G dismiss");
+
+    await sendInput(app, terminal.stdin, "\x07");
+    setDimensions(finalColumns + 1, finalRows);
+    terminal.stdout.columns = finalColumns + 1;
+    process.stdout.emit("resize");
+    await nextTurn();
+    await app.waitUntilRenderFlush();
+    terminal.clearOutput();
+    setDimensions(finalColumns, finalRows);
+    terminal.stdout.columns = finalColumns;
+    process.stdout.emit("resize");
+    await nextTurn();
+    await app.waitUntilRenderFlush();
+    const afterCtrlG = Bun.stripANSI(terminal.output());
+    expect(afterCtrlG).toContain("custom 17");
+    expect(afterCtrlG).toContain("29/29");
+    expect(afterCtrlG).toContain("Nondismissible external feedback");
+    expect(afterCtrlG).not.toContain("Ctrl+G dismiss");
 
     app.unmount();
     apps.splice(apps.indexOf(app), 1);

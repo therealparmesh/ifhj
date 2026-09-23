@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import { PassThrough } from "node:stream";
 
 import { Box, render } from "ink";
@@ -8,6 +8,12 @@ import { createTerminal } from "../test/utils";
 import { BoardHeader } from "./BoardHeader";
 import { ColumnView } from "./Kanban";
 import { SwimlaneHeader } from "./SwimlaneHeader";
+
+const apps: ReturnType<typeof render>[] = [];
+
+afterEach(() => {
+  for (const app of apps.splice(0)) app.unmount();
+});
 
 function issue(key: string, estimate: number): Issue {
   return {
@@ -45,7 +51,7 @@ function headers(display: "points" | "time") {
       />
       <ColumnView
         column={{
-          name: "Flat",
+          name: "Flat Mixed",
           statusIds: ["1"],
           issues: [issue("PROJ-1", display === "time" ? 60 : 3)],
         }}
@@ -62,7 +68,11 @@ function headers(display: "points" | "time") {
       />
       <SwimlaneHeader
         columns={[
-          { name: "Swim", statusIds: ["1"], issues: [issue("PROJ-2", display === "time" ? 1 : 4)] },
+          {
+            name: "Swim Mixed",
+            statusIds: ["1"],
+            issues: [issue("PROJ-2", display === "time" ? 1 : 4)],
+          },
         ]}
         colWindowStart={0}
         visibleColCount={1}
@@ -78,6 +88,7 @@ function headers(display: "points" | "time") {
       patchConsole: false,
     },
   );
+  apps.push(app);
   return { app, output: terminal.output };
 }
 
@@ -97,5 +108,14 @@ test("custom numeric estimates preserve point formatting in every header", async
   expect(view.output()).toContain("2.5p");
   expect(view.output()).toContain("3p · 1");
   expect(view.output()).toContain("4p · 1");
+  view.app.unmount();
+});
+
+test("column headers preserve Jira-provided name case", async () => {
+  const view = headers("points");
+  await view.app.waitUntilRenderFlush();
+  expect(view.output()).toContain("Flat Mixed");
+  expect(view.output()).toContain("Swim Mixed");
+  expect(view.output()).not.toContain("FLAT MIXED");
   view.app.unmount();
 });

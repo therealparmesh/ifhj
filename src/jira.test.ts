@@ -2,15 +2,22 @@ import { afterEach, describe, expect, test } from "bun:test";
 
 import type { JiraConfig } from "./config";
 import {
+  ISSUE_SEARCH_LIMIT,
+  JQL_SEARCH_LIMIT,
   createIssue,
+  createIssueLink,
   getAssignableUsers,
   getBoardConfig,
   getBoardIssues,
   getCreateFields,
+  getIssueDetail,
   getIssueTypes,
   getTransitions,
   listBoards,
   searchByJql,
+  searchIssues,
+  transitionIssue,
+  updateSummary,
 } from "./jira";
 import { deferred } from "./test/utils";
 
@@ -38,6 +45,27 @@ function rawIssue(id: number): Record<string, unknown> {
       updated: "2026-01-01T00:00:00.000Z",
       issuetype: { name: "Task" },
       labels: [],
+    },
+  };
+}
+
+function rawDetailIssue(key: string, issuelinks: unknown[] = []): Record<string, unknown> {
+  return {
+    id: key.replace(/\D/g, "") || "1",
+    key,
+    fields: {
+      summary: `Issue ${key}`,
+      description: "Synthetic description",
+      status: { id: "1", name: "To Do", statusCategory: { key: "new" } },
+      updated: "2026-01-02T00:00:00.000Z",
+      created: "2026-01-01T00:00:00.000Z",
+      issuetype: { id: "100", name: "Task", subtask: false },
+      project: { key: key.split("-")[0] },
+      labels: ["synthetic"],
+      components: [],
+      fixVersions: [],
+      subtasks: [],
+      issuelinks,
     },
   };
 }
@@ -444,5 +472,289 @@ describe("Jira field metadata", () => {
     expect(body.fields.parent).toEqual({ key: "PROJ-1" });
     expect(body.fields.customfield_1).toBe(0);
     expect(body.fields.description).toEqual(expect.objectContaining({ type: "doc", version: 1 }));
+  });
+});
+
+describe("Jira issue details", () => {
+  test("keeps issue fields and comments when edit metadata fails", async () => {
+    globalThis.fetch = (async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/rest/api/3/field") return json([]);
+      if (url.pathname === "/rest/api/3/issue/PROJ-1") {
+        return json(rawDetailIssue("PROJ-1"));
+      }
+      if (url.pathname.endsWith("/comment")) {
+        return json({
+          comments: [
+            {
+              id: "7",
+              author: { accountId: "synthetic-user", displayName: "Synthetic User" },
+              body: "Synthetic comment",
+              created: "2026-01-03T00:00:00.000Z",
+            },
+          ],
+        });
+      }
+      if (url.pathname.endsWith("/editmeta")) {
+        return json({ errorMessages: ["Metadata permission denied"] }, 403);
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }) as typeof fetch;
+
+    const detail = await getIssueDetail(cfg("detail-editmeta-failure"), "PROJ-1");
+    expect(detail.summary).toBe("Issue PROJ-1");
+    expect(detail.labels).toEqual(["synthetic"]);
+    expect(detail.comments).toEqual([
+      {
+        id: "7",
+        author: "Synthetic User",
+        authorAccountId: "synthetic-user",
+        body: "Synthetic comment",
+        created: "2026-01-03T00:00:00.000Z",
+      },
+    ]);
+    expect(detail.customFields).toEqual([]);
+    expect(detail.editmeta.size).toBe(0);
+    expect(detail.editmetaError).toBe(
+      "Load edit metadata failed (403): Metadata permission denied",
+    );
+  });
+
+  test("does not set editmetaError for successful empty metadata", async () => {
+    globalThis.fetch = (async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/rest/api/3/field") return json([]);
+      if (url.pathname === "/rest/api/3/issue/PROJ-2") {
+        return json(rawDetailIssue("PROJ-2"));
+      }
+      if (url.pathname.endsWith("/comment")) return json({ comments: [] });
+      if (url.pathname.endsWith("/editmeta")) return json({ fields: {} });
+      throw new Error(`unexpected request: ${url}`);
+    }) as typeof fetch;
+
+    const detail = await getIssueDetail(cfg("detail-empty-editmeta"), "PROJ-2");
+    expect(detail.editmeta.size).toBe(0);
+    expect("editmetaError" in detail).toBe(false);
+  });
+
+  test("sets useful editmetaError context when metadata rejects with an empty message", async () => {
+    globalThis.fetch = (async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/rest/api/3/field") return json([]);
+      if (url.pathname === "/rest/api/3/issue/PROJ-3") {
+        return json(rawDetailIssue("PROJ-3"));
+      }
+      if (url.pathname.endsWith("/comment")) return json({ comments: [] });
+      if (url.pathname.endsWith("/editmeta")) throw new Error("");
+      throw new Error(`unexpected request: ${url}`);
+    }) as typeof fetch;
+
+    const detail = await getIssueDetail(cfg("detail-empty-editmeta-error"), "PROJ-3");
+    expect(detail.summary).toBe("Issue PROJ-3");
+    expect(detail.editmetaError).toBe(
+      "Load edit metadata failed: Jira request failed before a response was received",
+    );
+  });
+});
+
+describe("Jira issue link directions", () => {
+  test("round-trips outward and inward labels from both linked issues", async () => {
+    type LinkBody = {
+      type: { name: string };
+      outwardIssue: { key: string };
+      inwardIssue: { key: string };
+    };
+    const links: LinkBody[] = [];
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/rest/api/3/issueLink" && init?.method === "POST") {
+        links.push(JSON.parse(String(init.body)) as LinkBody);
+        return new Response(null, { status: 201 });
+      }
+      if (url.pathname === "/rest/api/3/field") return json([]);
+      const issueMatch = url.pathname.match(/^\/rest\/api\/3\/issue\/([^/]+)$/);
+      if (issueMatch) {
+        const key = issueMatch[1]!;
+        const issueLinks: Record<string, unknown>[] = [];
+        for (const link of links) {
+          const type = {
+            name: link.type.name,
+            outward: "blocks",
+            inward: "is blocked by",
+          };
+          if (key === link.inwardIssue.key) {
+            issueLinks.push({
+              type,
+              outwardIssue: {
+                key: link.outwardIssue.key,
+                fields: {
+                  summary: "Linked issue",
+                  status: { name: "To Do" },
+                  issuetype: { name: "Task" },
+                },
+              },
+            });
+          } else if (key === link.outwardIssue.key) {
+            issueLinks.push({
+              type,
+              inwardIssue: {
+                key: link.inwardIssue.key,
+                fields: {
+                  summary: "Linked issue",
+                  status: { name: "To Do" },
+                  issuetype: { name: "Task" },
+                },
+              },
+            });
+          }
+        }
+        return json(rawDetailIssue(key, issueLinks));
+      }
+      if (url.pathname.endsWith("/comment")) return json({ comments: [] });
+      if (url.pathname.endsWith("/editmeta")) return json({ fields: {} });
+      throw new Error(`unexpected request: ${init?.method ?? "GET"} ${url}`);
+    }) as typeof fetch;
+
+    const config = cfg("link-directions");
+    await createIssueLink(config, "Blocks", "NEW-1", "TARGET-2", "outward");
+    await createIssueLink(config, "Blocks", "NEW-3", "TARGET-4", "inward");
+
+    expect(links).toEqual([
+      {
+        type: { name: "Blocks" },
+        outwardIssue: { key: "TARGET-2" },
+        inwardIssue: { key: "NEW-1" },
+      },
+      {
+        type: { name: "Blocks" },
+        outwardIssue: { key: "NEW-3" },
+        inwardIssue: { key: "TARGET-4" },
+      },
+    ]);
+    expect((await getIssueDetail(config, "NEW-1")).links).toEqual([
+      expect.objectContaining({ key: "TARGET-2", direction: "blocks" }),
+    ]);
+    expect((await getIssueDetail(config, "TARGET-2")).links).toEqual([
+      expect.objectContaining({ key: "NEW-1", direction: "is blocked by" }),
+    ]);
+    expect((await getIssueDetail(config, "NEW-3")).links).toEqual([
+      expect.objectContaining({ key: "TARGET-4", direction: "is blocked by" }),
+    ]);
+    expect((await getIssueDetail(config, "TARGET-4")).links).toEqual([
+      expect.objectContaining({ key: "NEW-3", direction: "blocks" }),
+    ]);
+  });
+});
+
+describe("Jira API errors", () => {
+  test("reports structured validation and permission reasons without URLs or raw JSON", async () => {
+    let response = json(
+      {
+        errorMessages: ["Validation failed at https://jira.example.test/secure/path"],
+        errors: {
+          summary: "  Summary is required  ",
+          assignee: "User cannot be assigned",
+          estimate: "Value must be < 10 and > 0",
+        },
+      },
+      400,
+    );
+    globalThis.fetch = (async () => response) as unknown as typeof fetch;
+
+    await expect(updateSummary(cfg("error-validation"), "PROJ-1", "Bad")).rejects.toThrow(
+      "Save title failed (400): Validation failed at [URL omitted]; summary: Summary is required; assignee: User cannot be assigned; estimate: Value must be < 10 and > 0",
+    );
+
+    response = json({ message: "You do not have permission to browse this project" }, 403);
+    await expect(listBoards(cfg("error-permission"))).rejects.toThrow(
+      "Load boards failed (403): You do not have permission to browse this project",
+    );
+  });
+
+  test("normalizes HTML and text and handles empty or malformed error bodies", async () => {
+    const responses = [
+      new Response("<html><body><h1>Gateway error</h1> Try &amp; retry.</body></html>", {
+        status: 502,
+      }),
+      new Response("  Link service   unavailable\nplease retry  ", { status: 503 }),
+      new Response(JSON.stringify("Issue link type is not available"), { status: 400 }),
+      new Response("", { status: 504, statusText: "Gateway Timeout" }),
+      new Response('{"errorMessages":[broken', {
+        status: 500,
+        statusText: "Internal Server Error",
+      }),
+    ];
+    globalThis.fetch = (async () => responses.shift()!) as unknown as typeof fetch;
+
+    await expect(transitionIssue(cfg("error-html"), "PROJ-1", "2")).rejects.toThrow(
+      "Save transition failed (502): Gateway error Try & retry.",
+    );
+    await expect(
+      createIssueLink(cfg("error-text"), "Blocks", "PROJ-1", "PROJ-2", "outward"),
+    ).rejects.toThrow("Create issue link failed (503): Link service unavailable please retry");
+    await expect(
+      createIssueLink(cfg("error-json-string"), "Blocks", "PROJ-1", "PROJ-2", "outward"),
+    ).rejects.toThrow("Create issue link failed (400): Issue link type is not available");
+    await expect(searchByJql(cfg("error-empty"), "project = PROJ")).rejects.toThrow(
+      "Search issues failed (504): Gateway Timeout",
+    );
+    await expect(getIssueTypes(cfg("error-malformed"), "PROJ")).rejects.toThrow(
+      "Load issue types failed (500): Internal Server Error",
+    );
+  });
+
+  test("retains every structured field reason when validation guidance exceeds 300 characters", async () => {
+    const errors = {
+      summary:
+        "Enter a clear summary that identifies the affected workflow, observed result, expected result, and user impact.",
+      description:
+        "Describe the reproduction steps, relevant conditions, prior troubleshooting, and the exact result shown to the user.",
+      environment:
+        "List the operating system, terminal, project configuration, issue type, and workflow state used for this request.",
+      finalField:
+        "Keep this final validation reason because it tells the user to select an approved release before saving.",
+    };
+    globalThis.fetch = (async () => json({ errors }, 400)) as unknown as typeof fetch;
+
+    let message = "";
+    try {
+      await updateSummary(cfg("long-validation"), "PROJ-1", "Invalid");
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message.length).toBeGreaterThan(300);
+    expect(message).toContain(`finalField: ${errors.finalField}`);
+  });
+
+  test("keeps operation and status when the error response body cannot be read", async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.error(new Error("synthetic stream failure"));
+          },
+        }),
+        { status: 503, statusText: "Service Unavailable" },
+      )) as unknown as typeof fetch;
+
+    await expect(listBoards(cfg("error-stream"))).rejects.toThrow(
+      "Load boards failed (503): Jira returned an unreadable error response; retry the operation",
+    );
+  });
+});
+
+describe("Jira search defaults", () => {
+  test("exports and sends the distinct issue and JQL search limits", async () => {
+    const maxResults: number[] = [];
+    globalThis.fetch = (async (_input, init) => {
+      maxResults.push(JSON.parse(String(init?.body)).maxResults);
+      return json({ isLast: true, issues: [] });
+    }) as typeof fetch;
+
+    expect(ISSUE_SEARCH_LIMIT).toBe(25);
+    expect(JQL_SEARCH_LIMIT).toBe(50);
+    await searchIssues(cfg("issue-search-limit"), "synthetic");
+    await searchByJql(cfg("jql-search-limit"), "project = PROJ");
+    expect(maxResults).toEqual([25, 50]);
   });
 });

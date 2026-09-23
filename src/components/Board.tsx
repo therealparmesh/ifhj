@@ -1,5 +1,13 @@
-import { Box, Text, useInput } from "ink";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Box, Text } from "ink";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import {
   type RecentIssue,
@@ -11,6 +19,7 @@ import {
 import type { JiraConfig } from "../config";
 import { editInNeovim, editorLabel } from "../editor";
 import { useDimensions, useLoading } from "../hooks";
+import { InputScope, useInput } from "../input";
 import {
   type BoardConfig,
   type BoardSwimlanes,
@@ -19,7 +28,6 @@ import {
   type IssueLinkType,
   type IssueSearchResult,
   type IssueType,
-  type JiraUser,
   type Transition,
   type EditableFieldValue,
   assignIssueToMe,
@@ -40,6 +48,7 @@ import {
 } from "../jira";
 import {
   type Lane,
+  type LaneColumn,
   type SwimCursor,
   buildColumns,
   buildLanes,
@@ -50,12 +59,14 @@ import {
 } from "../swimlanes";
 import { clamp, copyToClipboard, errorMessage, openInBrowser, stickyScroll, theme } from "../ui";
 import { BoardHeader } from "./BoardHeader";
-import { createBoardUsersLoader } from "./boardUsers";
+import { createBoardUsersLoader, waitForMentionWarningDisplay } from "./boardUsers";
 import { CreateWizard } from "./CreateWizard";
+import { ErrorMessage } from "./ErrorMessage";
 import { FilterPicker } from "./FilterPicker";
 import { FilterPickerModal } from "./FilterPickerModal";
-import { Footer } from "./Footer";
+import { Footer, footerRowCount } from "./Footer";
 import { HelpModal } from "./HelpModal";
+import { Hint } from "./Hint";
 import { IssueDetailModal } from "./IssueDetailModal";
 import { JqlView } from "./JqlView";
 import { ColumnView, PagingArrow } from "./Kanban";
@@ -68,7 +79,7 @@ import { QuickOpen } from "./QuickOpen";
 import { SwimlaneGrid } from "./SwimlaneGrid";
 import { SwimlaneHeader } from "./SwimlaneHeader";
 import { TitleEditModal } from "./TitleEditModal";
-import { ToastStack, useToasts } from "./Toasts";
+import { ToastStack, toastRowCount, useToasts } from "./Toasts";
 import { TransitionScreenModal } from "./TransitionScreenModal";
 
 type Board = { id: number; name: string };
@@ -80,19 +91,40 @@ type Props = {
   onExit: () => void;
 };
 
+type DetailReturn = { kind: "board" } | { kind: "detail"; issueKey: string };
+type MovePickerReturn = {
+  kind: "move-picker";
+  issue: Issue;
+  returnTo: DetailReturn;
+  busy?: boolean | undefined;
+  error?: string | undefined;
+  drafts?: Record<string, Record<string, EditableFieldValue>> | undefined;
+};
+type TransitionPickerReturn = {
+  kind: "transition-picker";
+  transitions: Transition[];
+  issueKey: string;
+  projectKey: string;
+  returnTo: DetailReturn;
+  drafts?: Record<string, Record<string, EditableFieldValue>> | undefined;
+};
 type Modal =
   | { kind: "none" }
   | { kind: "help" }
   | { kind: "search" }
-  | { kind: "card-action" }
-  | { kind: "move-picker"; issue: Issue }
-  | { kind: "transition-picker"; transitions: Transition[]; issueKey: string; projectKey: string }
+  | { kind: "card-action"; issue: Issue }
+  | MovePickerReturn
+  | TransitionPickerReturn
   | {
       kind: "transition-screen";
       transition: Transition;
       issueKey: string;
       projectKey: string;
       targetColIdx?: number;
+      returnTo: DetailReturn | TransitionPickerReturn | MovePickerReturn;
+      initialValues?: Record<string, EditableFieldValue> | undefined;
+      busy?: boolean | undefined;
+      error?: string | undefined;
     }
   | { kind: "filter-menu" }
   | { kind: "filter-assignee"; names: string[] }
@@ -107,13 +139,56 @@ type Modal =
       linkTypes: IssueLinkType[];
       parent?: IssueSearchResult;
       initialType?: IssueType;
+      returnTo: DetailReturn;
     }
-  | { kind: "quick-add"; colIdx: number; type: IssueType; value: string }
+  | {
+      kind: "quick-add";
+      colIdx: number;
+      type: IssueType;
+      value: string;
+      busy?: boolean | undefined;
+      error?: string | undefined;
+    }
   | { kind: "detail"; issueKey: string }
-  | { kind: "title-edit"; issueKey: string; current: string }
-  | { kind: "nvim" }
+  | {
+      kind: "title-edit";
+      issueKey: string;
+      original: string;
+      current: string;
+      busy?: boolean | undefined;
+      error?: string | undefined;
+    }
+  | {
+      kind: "description-save";
+      issue: Issue;
+      draft: string;
+      busy: boolean;
+      error?: string | undefined;
+    }
+  | { kind: "nvim"; warning?: string | undefined }
   | { kind: "quick-open" }
   | { kind: "jql" };
+
+function retainedDetailKey(modal: Modal): string | null {
+  if (modal.kind === "detail") return modal.issueKey;
+  if (
+    modal.kind === "move-picker" ||
+    modal.kind === "transition-picker" ||
+    modal.kind === "transition-screen" ||
+    modal.kind === "create"
+  ) {
+    return detailKeyFromReturn(modal.returnTo);
+  }
+  return null;
+}
+
+function isTransitionScreen(modal: Modal, issueKey: string, transitionId: string): boolean {
+  return (
+    modal.kind === "transition-screen" &&
+    modal.issueKey === issueKey &&
+    modal.transition.id === transitionId
+  );
+}
 
 type Filters = {
   assignee: string | null;
@@ -122,6 +197,14 @@ type Filters = {
   label: string | null;
   epic: string | null;
 };
+
+function detailKeyFromReturn(
+  target: DetailReturn | TransitionPickerReturn | MovePickerReturn,
+): string | null {
+  if (target.kind === "detail") return target.issueKey;
+  if (target.kind === "board") return null;
+  return detailKeyFromReturn(target.returnTo);
+}
 
 const EMPTY_FILTERS: Filters = {
   assignee: null,
@@ -133,6 +216,46 @@ const EMPTY_FILTERS: Filters = {
 
 function activeFilterCount(f: Filters): number {
   return Object.values(f).filter(Boolean).length;
+}
+
+function DescriptionSaveModal({
+  issueKey,
+  busy,
+  error,
+  onRetry,
+  onEdit,
+  onCancel,
+}: {
+  issueKey: string;
+  busy: boolean;
+  error?: string | undefined;
+  onRetry: () => void;
+  onEdit: () => void;
+  onCancel: () => void;
+}) {
+  const { cols } = useDimensions();
+  useInput((input, key) => {
+    if (busy) return;
+    if (key.escape) onCancel();
+    else if (key.return) onRetry();
+    else if (input === "E") onEdit();
+  });
+  return (
+    <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.accent}>
+      <Text color={theme.accent} bold>
+        Description · {issueKey}
+      </Text>
+      {busy ? <LoadingLine label="Saving description…" /> : null}
+      {error ? <ErrorMessage message={error} width={Math.max(1, cols - 6)} /> : null}
+      {!busy ? (
+        <Box marginTop={1}>
+          <Hint k="⏎" label="retry save" />
+          <Hint k="E" label="edit draft" />
+          <Hint k="esc" label="board" />
+        </Box>
+      ) : null}
+    </Box>
+  );
 }
 
 function needsMoreThanTitle(fields: EditableField[]): boolean {
@@ -176,6 +299,18 @@ function issueMatches(issue: Issue, q: string): boolean {
   );
 }
 
+function findMatches(columns: LaneColumn[], query: string): CellRef[] {
+  if (!query.trim()) return [];
+  const normalized = query.trim().toLowerCase();
+  const matches: CellRef[] = [];
+  columns.forEach((column, col) => {
+    column.issues.forEach((issue, row) => {
+      if (issueMatches(issue, normalized)) matches.push({ col, row });
+    });
+  });
+  return matches;
+}
+
 export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   const { cols: termCols, rows: termRows } = useDimensions();
 
@@ -190,6 +325,11 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   // so cursor and scroll can't disagree on a frame. (See scrollFor below.)
   const [activeCol, setActiveCol] = useState(0);
   const [activeRows, setActiveRows] = useState<number[]>([]);
+  const [selectedIssueKey, setSelectedIssueKey] = useState<string | null>(null);
+  const activeColRef = useRef(activeCol);
+  const activeRowsRef = useRef(activeRows);
+  activeColRef.current = activeCol;
+  activeRowsRef.current = activeRows;
   const scrollsRef = useRef<number[]>([]);
 
   // Swimlane view. Off by default (flat board); toggled with `s` only when
@@ -197,17 +337,31 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   // sticky scroll anchor, distinct from the flat board's per-column state.
   const [swimView, setSwimView] = useState(false);
   const [swimCursor, setSwimCursor] = useState<SwimCursor>({ lane: 0, col: 0, row: 0 });
+  const swimViewRef = useRef(swimView);
+  const swimCursorRef = useRef(swimCursor);
+  swimViewRef.current = swimView;
+  swimCursorRef.current = swimCursor;
   const swimScrollRef = useRef(0);
 
   // UI state
-  const { toasts, flash } = useToasts();
+  const { toasts, flash, dismiss } = useToasts();
   // Background-work indicator. `track` wraps any async load so the thin
   // progress line under the header animates while it's in flight — reloads,
   // the swimlane fetch, and one-off actions that don't own a modal spinner.
   const { busy, track } = useLoading();
   const [query, setQuery] = useState("");
   const [matchIdx, setMatchIdx] = useState(0);
+  const queryRef = useRef(query);
+  const matchIdxRef = useRef(matchIdx);
+  queryRef.current = query;
+  matchIdxRef.current = matchIdx;
   const [modal, setModal] = useState<Modal>({ kind: "none" });
+  const modalRef = useRef<Modal>(modal);
+  modalRef.current = modal;
+  const modalLaunchSeq = useRef(0);
+  const modalSubmitPending = useRef(false);
+  const descriptionDrafts = useRef(new Map<string, string>());
+  const descriptionWrites = useRef(new Set<string>());
   const [searchBuffer, setSearchBuffer] = useState("");
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
 
@@ -236,6 +390,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   const dispose = useCallback(() => {
     activeRef.current = false;
     loadSeq.current++;
+    modalLaunchSeq.current++;
     reloadAgain.current = false;
   }, []);
 
@@ -316,15 +471,40 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     for (const k of pendingMove.keys()) s.add(k);
     return s;
   }, [busyKeys, pendingMove]);
+  const rejectPending = useCallback(
+    (issue: Issue): boolean => {
+      if (!pendingKeys.has(issue.key)) return false;
+      flash(`${issue.key} is updating…`, "info");
+      return true;
+    },
+    [pendingKeys, flash],
+  );
 
-  const setActiveRowAt = useCallback((col: number, row: number) => {
-    setActiveRows((prev) => {
-      const arr = prev.slice();
-      arr[col] = row;
-      return arr;
-    });
+  const setActiveColumn = useCallback((col: number) => {
+    activeColRef.current = col;
+    setActiveCol(col);
   }, []);
-  const closeModal = useCallback(() => setModal({ kind: "none" }), []);
+  const setSwimPosition = useCallback((cursor: SwimCursor) => {
+    swimCursorRef.current = cursor;
+    setSwimCursor(cursor);
+  }, []);
+  const setActiveRowAt = useCallback((col: number, row: number) => {
+    const arr = activeRowsRef.current.slice();
+    arr[col] = row;
+    activeRowsRef.current = arr;
+    setActiveRows(arr);
+  }, []);
+  const showModal = useCallback((next: Modal) => {
+    modalLaunchSeq.current++;
+    setModal(next);
+  }, []);
+  const closeModal = useCallback(() => showModal({ kind: "none" }), [showModal]);
+  const restore = useCallback(
+    (target: DetailReturn | TransitionPickerReturn | MovePickerReturn) => {
+      showModal(target.kind === "board" ? { kind: "none" } : target);
+    },
+    [showModal],
+  );
 
   const filteredIssues = useMemo(() => {
     let list = issues;
@@ -397,7 +577,9 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     boardDataVersion.current++;
     setConf(c);
     setIssues(is);
-    setActiveRows((prev) => c.columns.map((_, i) => prev[i] ?? 0));
+    const rows = c.columns.map((_, i) => activeRowsRef.current[i] ?? 0);
+    activeRowsRef.current = rows;
+    setActiveRows(rows);
     scrollsRef.current = c.columns.map((_, i) => scrollsRef.current[i] ?? 0);
   }, []);
 
@@ -539,15 +721,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
    */
   const liveQuery = modal.kind === "search" ? searchBuffer : query;
   const matches = useMemo(() => {
-    if (!liveQuery.trim()) return [] as CellRef[];
-    const q = liveQuery.trim().toLowerCase();
-    const out: CellRef[] = [];
-    columns.forEach((c, ci) => {
-      c.issues.forEach((issue, ri) => {
-        if (issueMatches(issue, q)) out.push({ col: ci, row: ri });
-      });
-    });
-    return out;
+    return findMatches(columns, liveQuery);
   }, [columns, liveQuery]);
 
   const matchSet = useMemo(() => new Set(matches.map((m) => `${m.col}:${m.row}`)), [matches]);
@@ -570,46 +744,52 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   // issue sits in an off-board / dropped lane, we leave the cursor put.
   const focusMatch = useCallback(
     (m: CellRef) => {
-      if (swimView) {
+      if (swimViewRef.current) {
         const key = columns[m.col]?.issues[m.row]?.key;
         const sc = key ? findCursor(lanes, key) : null;
-        if (sc) setSwimCursor(sc);
+        if (sc) {
+          setSwimPosition(sc);
+          setSelectedIssueKey(key ?? null);
+        }
         return;
       }
-      setActiveCol(m.col);
+      setActiveColumn(m.col);
       setActiveRowAt(m.col, m.row);
+      setSelectedIssueKey(columns[m.col]?.issues[m.row]?.key ?? null);
     },
-    [swimView, columns, lanes, setActiveRowAt],
+    [columns, lanes, setActiveColumn, setActiveRowAt, setSwimPosition],
   );
-
-  const jumpToFirstMatch = useCallback(() => {
-    const first = matches[0];
-    if (!first) return false;
-    focusMatch(first);
-    return true;
-  }, [matches, focusMatch]);
 
   const commitQuery = useCallback(
     (q: string) => {
+      const submittedMatches = findMatches(columns, q);
+      queryRef.current = q;
       setQuery(q);
+      matchIdxRef.current = 0;
       setMatchIdx(0);
       if (!q.trim()) return;
-      if (!jumpToFirstMatch()) flash("no matches", "info");
+      const first = submittedMatches[0];
+      if (first) focusMatch(first);
+      else flash("No matches.", "info");
     },
-    [jumpToFirstMatch, flash],
+    [columns, flash, focusMatch],
   );
 
   const jumpToMatch = useCallback(
     (delta: number) => {
-      if (matches.length === 0) {
-        flash(query.trim() ? "no matches" : "no active search", "info");
+      const currentMatches = findMatches(columns, queryRef.current);
+      if (currentMatches.length === 0) {
+        flash(queryRef.current.trim() ? "No matches." : "No active highlight.", "info");
         return;
       }
-      const next = (((matchIdx + delta) % matches.length) + matches.length) % matches.length;
+      const next =
+        (((matchIdxRef.current + delta) % currentMatches.length) + currentMatches.length) %
+        currentMatches.length;
+      matchIdxRef.current = next;
       setMatchIdx(next);
-      focusMatch(matches[next]!);
+      focusMatch(currentMatches[next]!);
     },
-    [matches, matchIdx, flash, query, focusMatch],
+    [columns, flash, focusMatch],
   );
 
   // Layout math — columns beyond `maxColumns` require ←/→ paging. Header +
@@ -618,8 +798,17 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   // toasts would overflow and Ink would clip all but the first — the grid
   // yields a row for each toast beyond the first. One toast (the common case)
   // costs nothing; the shrink is transient and reverts when they clear.
-  const footerRows = modal.kind === "search" ? 5 : 3;
-  const columnHeight = Math.max(6, termRows - 3 - footerRows - Math.max(0, toasts.length - 1));
+  const footerRows = footerRowCount(termCols, modal.kind === "search" ? "search" : "normal", {
+    hasIssue: displayIssues.length > 0,
+    filterCount: activeFilterCount(filters),
+    hasSwimlanes,
+    swimActive: swimView,
+    query,
+    matches: matches.length,
+    matchIdx,
+  });
+  const toastRows = toastRowCount(toasts, termCols, true);
+  const columnHeight = Math.max(9, termRows - 3 - footerRows - toastRows);
   // Each card uses three content rows plus one margin row. Inside the column
   // border, reserve one row for the header and up to two scroll indicators.
   const columnInnerHeight = columnHeight - 2;
@@ -651,22 +840,23 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
    * board configuration changes the column count.
    */
   useEffect(() => {
-    setActiveCol((current) => clamp(current, 0, Math.max(0, columns.length - 1)));
+    setActiveColumn(clamp(activeColRef.current, 0, Math.max(0, columns.length - 1)));
     if (columns.length === 0) return;
-    setActiveRows((prev) => {
-      let changed = false;
-      const arr = prev.slice();
-      columns.forEach((c, i) => {
-        const max = Math.max(0, c.issues.length - 1);
-        const cur = arr[i] ?? 0;
-        if (cur > max) {
-          arr[i] = max;
-          changed = true;
-        }
-      });
-      return changed ? arr : prev;
+    let changed = false;
+    const rows = activeRowsRef.current.slice();
+    columns.forEach((column, index) => {
+      const max = Math.max(0, column.issues.length - 1);
+      const current = rows[index] ?? 0;
+      if (current > max) {
+        rows[index] = max;
+        changed = true;
+      }
     });
-  }, [columns]);
+    if (changed) {
+      activeRowsRef.current = rows;
+      setActiveRows(rows);
+    }
+  }, [columns, setActiveColumn]);
 
   /**
    * Keep the swimlane cursor in bounds when lanes change under it (filter
@@ -675,8 +865,8 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
    */
   useEffect(() => {
     if (!swimView || lanes.length === 0) return;
-    setSwimCursor((cursor) => reconcileCursor(lanes, cursor));
-  }, [lanes, swimView]);
+    setSwimPosition(reconcileCursor(lanes, swimCursorRef.current));
+  }, [lanes, swimView, setSwimPosition]);
 
   /**
    * Per-column scroll is derived at render from activeRow + a ref anchor.
@@ -699,6 +889,50 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     if (!col) return null;
     return col.issues[activeRows[activeCol] ?? 0] ?? null;
   }, [swimView, lanes, swimCursor, columns, activeCol, activeRows]);
+  const currentIssueNow = useCallback((): Issue | null => {
+    if (swimViewRef.current) {
+      const cursor = swimCursorRef.current;
+      return lanes[cursor.lane]?.columns[cursor.col]?.issues[cursor.row] ?? null;
+    }
+    const col = activeColRef.current;
+    return columns[col]?.issues[activeRowsRef.current[col] ?? 0] ?? null;
+  }, [columns, lanes]);
+
+  useLayoutEffect(() => {
+    if (displayIssues.length === 0) {
+      setSelectedIssueKey(null);
+      return;
+    }
+    if (selectedIssueKey) {
+      if (swimViewRef.current) {
+        const cursor = findCursor(lanes, selectedIssueKey);
+        if (cursor) {
+          setSwimPosition(cursor);
+          return;
+        }
+      } else {
+        for (let col = 0; col < columns.length; col++) {
+          const row = columns[col]!.issues.findIndex((issue) => issue.key === selectedIssueKey);
+          if (row >= 0) {
+            setActiveColumn(col);
+            setActiveRowAt(col, row);
+            return;
+          }
+        }
+      }
+    }
+    if (currentIssue) setSelectedIssueKey(currentIssue.key);
+  }, [
+    columns,
+    lanes,
+    displayIssues.length,
+    swimView,
+    selectedIssueKey,
+    currentIssue,
+    setActiveColumn,
+    setActiveRowAt,
+    setSwimPosition,
+  ]);
 
   const projectForIssue = useCallback(
     (issueKey: string): string =>
@@ -725,17 +959,22 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         targetColIdx?: number;
         fields?: Record<string, EditableFieldValue>;
         projectKey?: string;
+        returnTo?: DetailReturn | TransitionPickerReturn | MovePickerReturn;
+        initialValues?: Record<string, EditableFieldValue>;
+        onError?: (message: string) => void;
       } = {},
-    ) => {
+    ): Promise<boolean> => {
       if (transition.requiredFields.length > 0 && !opts.fields) {
-        setModal({
+        showModal({
           kind: "transition-screen",
           transition,
           issueKey,
           projectKey: opts.projectKey || projectForIssue(issueKey),
+          returnTo: opts.returnTo ?? { kind: "board" },
+          initialValues: opts.initialValues,
           ...(opts.targetColIdx !== undefined ? { targetColIdx: opts.targetColIdx } : {}),
         });
-        return;
+        return false;
       }
       // Optimistic overlay: the card jumps to the target status immediately
       // (rendered in "pending" style via pendingKeys) and the cursor follows
@@ -766,8 +1005,9 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         markBusy(issueKey, true);
       }
       if (opts.targetColIdx !== undefined) {
-        setActiveCol(opts.targetColIdx);
-        setSwimCursor((c) => ({ ...c, col: opts.targetColIdx! }));
+        setActiveColumn(opts.targetColIdx);
+        setSwimPosition({ ...swimCursorRef.current, col: opts.targetColIdx });
+        setSelectedIssueKey(issueKey);
       }
       try {
         await transitionIssue(cfg, issueKey, transition.id, opts.fields);
@@ -775,16 +1015,20 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         flash(`${issueKey} → ${transition.name}`, "ok");
         touchRecent(issueKey);
         await coalescedReload();
+        return true;
       } catch (e) {
         if (optimistic) {
           clearPending(issueKey);
           if (sourceColIdx !== undefined && sourceColIdx >= 0) {
-            setActiveCol(sourceColIdx);
-            setSwimCursor((cursor) => ({ ...cursor, col: sourceColIdx }));
+            setActiveColumn(sourceColIdx);
+            setSwimPosition({ ...swimCursorRef.current, col: sourceColIdx });
           }
         }
         if (pendingFocus.current?.key === issueKey) pendingFocus.current = null;
-        flash(errorMessage(e), "err");
+        const message = errorMessage(e);
+        if (opts.onError) opts.onError(message);
+        else flash(message, "err");
+        return false;
       } finally {
         if (!optimistic) markBusy(issueKey, false);
       }
@@ -800,22 +1044,31 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       clearPending,
       touchRecent,
       projectForIssue,
+      showModal,
+      setActiveColumn,
+      setSwimPosition,
     ],
   );
 
   const moveToColumn = useCallback(
-    async (targetColIdx: number, issueOverride?: Issue) => {
-      const issue = issueOverride ?? currentIssue;
+    async (
+      targetColIdx: number,
+      issueOverride?: Issue,
+      launchSeq?: number,
+      returnTo: DetailReturn | MovePickerReturn = { kind: "board" },
+      feedback?: {
+        onReady?: (transition: Transition) => void;
+        onError?: (message: string) => void;
+      },
+    ) => {
+      const issue = issueOverride ?? currentIssueNow();
       if (!issue || !conf) return;
       if (targetColIdx < 0 || targetColIdx >= conf.columns.length) return;
       // Per-card guard (not a global lock): a card already settling can't be
       // re-moved, but other cards move freely and concurrently. That's what
       // makes fast multi-card moves work without stacking transitions on one
       // card or racing its focus snap.
-      if (pendingKeys.has(issue.key)) {
-        flash(`${issue.key} is updating…`, "info");
-        return;
-      }
+      if (rejectPending(issue)) return;
       // markBusy covers the transition-lookup phase, before the optimistic
       // overlay exists; commitTransition's startPending takes over as the
       // pending signal the moment we POST.
@@ -823,9 +1076,12 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       const targetCol = conf.columns[targetColIdx]!;
       try {
         const trs = await getTransitions(cfg, issue.key);
+        if (launchSeq !== undefined && launchSeq !== modalLaunchSeq.current) return;
         const candidates = trs.filter((t) => targetCol.statusIds.includes(t.toStatusId));
         if (candidates.length === 0) {
-          flash(`no transition to ${targetCol.name}`, "err");
+          const message = `No transition to ${targetCol.name}.`;
+          if (feedback?.onError) feedback.onError(message);
+          else flash(message, "err");
           return;
         }
         // Moving a card to a column should feel like a drag-and-drop, not a
@@ -834,12 +1090,21 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         // fields screen so the move stays frictionless — and let
         // commitTransition surface the screen only if that's the only path.
         const chosen = candidates.find((t) => t.requiredFields.length === 0) ?? candidates[0]!;
+        feedback?.onReady?.(chosen);
         await commitTransition(issue.key, chosen, {
           targetColIdx,
           projectKey: issue.projectKey || projectForIssue(issue.key),
+          returnTo,
+          ...(returnTo.kind === "move-picker" && returnTo.drafts?.[chosen.id]
+            ? { initialValues: returnTo.drafts[chosen.id] }
+            : {}),
         });
       } catch (e) {
-        flash(errorMessage(e), "err");
+        if (launchSeq === undefined || launchSeq === modalLaunchSeq.current) {
+          const message = errorMessage(e);
+          if (feedback?.onError) feedback.onError(message);
+          else flash(message, "err");
+        }
       } finally {
         // Release the lookup-phase flag. On the POST path the overlay is now
         // the pending signal (dropped by reconcile); on the no-candidate,
@@ -848,7 +1113,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         markBusy(issue.key, false);
       }
     },
-    [currentIssue, conf, cfg, flash, commitTransition, markBusy, pendingKeys, projectForIssue],
+    [currentIssueNow, conf, cfg, flash, commitTransition, markBusy, projectForIssue, rejectPending],
   );
 
   /**
@@ -865,7 +1130,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     if (swimView) {
       const sc = findCursor(lanes, key);
       if (sc) {
-        setSwimCursor(sc);
+        setSwimPosition(sc);
         pendingFocus.current = null;
       }
       return;
@@ -874,41 +1139,41 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       const col = columns[ci]!;
       const ri = col.issues.findIndex((i) => i.key === key);
       if (ri !== -1) {
-        setActiveCol(ci);
+        setActiveColumn(ci);
         setActiveRowAt(ci, ri);
+        setSelectedIssueKey(key);
         pendingFocus.current = null;
         return;
       }
     }
-  }, [columns, lanes, swimView, setActiveRowAt]);
+  }, [columns, lanes, swimView, setActiveColumn, setActiveRowAt, setSwimPosition]);
 
   const doTransition = useCallback(
     async (direction: 1 | -1) => {
       if (!conf) return;
-      const targetColIdx = effectiveCol + direction;
+      const sourceCol = swimViewRef.current ? swimCursorRef.current.col : activeColRef.current;
+      const targetColIdx = sourceCol + direction;
       if (targetColIdx < 0 || targetColIdx >= conf.columns.length) {
-        flash("no column in that direction", "info");
+        flash("No column in that direction.", "info");
         return;
       }
       await moveToColumn(targetColIdx);
     },
-    [conf, effectiveCol, flash, moveToColumn],
+    [conf, flash, moveToColumn],
   );
 
-  const doEditSummary = useCallback(() => {
-    const issue = currentIssue;
-    if (!issue) return;
-    setModal({ kind: "title-edit", issueKey: issue.key, current: issue.summary });
-  }, [currentIssue]);
-
-  /**
-   * Lazy-hydrate the project's assignable users. Handed to `editInNeovim`
-   * so the editor's `@` completion menu can offer real teammates. Fetch
-   * failure isn't fatal — we just open the editor without the menu.
-   */
-  const ensureUsers = useCallback(
-    async (projectKey: string): Promise<JiraUser[]> => usersLoader(projectKey),
-    [usersLoader],
+  const doEditSummary = useCallback(
+    (issueOverride?: Issue) => {
+      const issue = issueOverride ?? currentIssueNow();
+      if (!issue) return;
+      showModal({
+        kind: "title-edit",
+        issueKey: issue.key,
+        original: issue.summary,
+        current: issue.summary,
+      });
+    },
+    [currentIssueNow, showModal],
   );
 
   // Pre-warm the assignable-users list as soon as the board's project is
@@ -916,69 +1181,149 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   // blocking on this fetch behind the "editing…" banner. Cached by project,
   // so the edit paths (board + detail modal) reuse it. Fire-and-forget.
   useEffect(() => {
-    if (conf?.projectKey) void ensureUsers(conf.projectKey);
-  }, [conf, ensureUsers]);
+    if (conf?.projectKey) void usersLoader(conf.projectKey);
+  }, [conf, usersLoader]);
 
-  const doEditDescription = useCallback(async () => {
-    const issue = currentIssue;
-    if (!issue) return;
-    setModal({ kind: "nvim" });
-    try {
-      const mentionUsers = await ensureUsers(issue.projectKey || projectForIssue(issue.key));
-      const raw = await editInNeovim(issue.description, `${issue.key}-desc.md`, { mentionUsers });
-      setModal({ kind: "none" });
-      if (raw.trim() === issue.description.trim()) {
-        flash("no change", "info");
+  const saveBoardDescription = useCallback(
+    async (issue: Issue, draft: string) => {
+      if (descriptionWrites.current.has(issue.key)) return;
+      descriptionWrites.current.add(issue.key);
+      try {
+        await updateDescription(cfg, issue.key, draft);
+        descriptionDrafts.current.delete(issue.key);
+        if (!activeRef.current) return;
+        flash(`${issue.key} description updated.`, "ok");
+        touchRecent(issue.key);
+        if (
+          modalRef.current.kind === "description-save" &&
+          modalRef.current.issue.key === issue.key &&
+          modalRef.current.draft === draft
+        )
+          closeModal();
+        await load();
+      } catch (error) {
+        if (!activeRef.current) return;
+        const message = `Description not saved: ${errorMessage(error)}. Your draft is kept.`;
+        if (
+          modalRef.current.kind === "description-save" &&
+          modalRef.current.issue.key === issue.key &&
+          modalRef.current.draft === draft
+        )
+          setModal({
+            kind: "description-save",
+            issue,
+            draft,
+            busy: false,
+            error: message,
+          });
+        else flash(message, "err");
+      } finally {
+        descriptionWrites.current.delete(issue.key);
+      }
+    },
+    [cfg, flash, touchRecent, closeModal, load],
+  );
+
+  const doEditDescription = useCallback(
+    async (issueOverride?: Issue) => {
+      const issue = issueOverride ?? currentIssueNow();
+      if (!issue) return;
+      showModal({ kind: "nvim" });
+      const launchSeq = modalLaunchSeq.current;
+      try {
+        const mention = await usersLoader(issue.projectKey || projectForIssue(issue.key));
+        if (launchSeq !== modalLaunchSeq.current) return;
+        if (mention.warning) {
+          setModal({ kind: "nvim", warning: mention.warning });
+          await waitForMentionWarningDisplay(mention);
+          if (launchSeq !== modalLaunchSeq.current) return;
+        }
+        const raw = await editInNeovim(
+          descriptionDrafts.current.get(issue.key) ?? issue.description,
+          `${issue.key}-desc.md`,
+          {
+            mentionUsers: mention.users,
+          },
+        );
+        if (launchSeq !== modalLaunchSeq.current) return;
+        if (mention.warning) flash(mention.warning, "info");
+        if (raw.trim() === issue.description.trim()) {
+          descriptionDrafts.current.delete(issue.key);
+          flash("No description change.", "info");
+          closeModal();
+          return;
+        }
+        descriptionDrafts.current.set(issue.key, raw);
+        showModal({ kind: "description-save", issue, draft: raw, busy: true });
+        void saveBoardDescription(issue, raw);
+      } catch (error) {
+        if (launchSeq !== modalLaunchSeq.current) return;
+        closeModal();
+        const retry = descriptionDrafts.current.has(issue.key)
+          ? " Press E to edit your draft."
+          : "";
+        flash(`Description not saved: ${errorMessage(error)}.${retry}`, "err");
+      }
+    },
+    [
+      currentIssueNow,
+      flash,
+      usersLoader,
+      projectForIssue,
+      showModal,
+      closeModal,
+      saveBoardDescription,
+    ],
+  );
+
+  const doAssignToMe = useCallback(
+    async (issueOverride?: Issue) => {
+      const issue = issueOverride ?? currentIssueNow();
+      if (!issue) {
+        flash("No issue selected.", "info");
         return;
       }
-      await updateDescription(cfg, issue.key, raw);
-      flash(`${issue.key} description updated`, "ok");
-      touchRecent(issue.key);
-      await load();
-    } catch (e) {
-      setModal({ kind: "none" });
-      flash(errorMessage(e), "err");
-    }
-  }, [currentIssue, cfg, flash, load, ensureUsers, touchRecent, projectForIssue]);
+      try {
+        await track(assignIssueToMe(cfg, issue.key));
+        flash(`${issue.key} assigned to you`, "ok");
+        touchRecent(issue.key);
+        await load();
+      } catch (e) {
+        flash(errorMessage(e), "err");
+      }
+    },
+    [currentIssueNow, cfg, flash, load, track, touchRecent],
+  );
 
-  const doAssignToMe = useCallback(async () => {
-    const issue = currentIssue;
-    if (!issue) {
-      flash("no issue selected", "info");
-      return;
-    }
-    try {
-      await track(assignIssueToMe(cfg, issue.key));
-      flash(`${issue.key} assigned to you`, "ok");
-      touchRecent(issue.key);
-      await load();
-    } catch (e) {
-      flash(errorMessage(e), "err");
-    }
-  }, [currentIssue, cfg, flash, load, track, touchRecent]);
-
-  const doFuzzyTransition = useCallback(async () => {
-    const issue = currentIssue;
-    if (!issue) {
-      flash("no issue selected", "info");
-      return;
-    }
-    try {
-      const trs = await track(getTransitions(cfg, issue.key));
-      if (trs.length === 0) {
-        flash("no transitions available", "info");
+  const doFuzzyTransition = useCallback(
+    async (issueOverride?: Issue) => {
+      const issue = issueOverride ?? currentIssueNow();
+      if (!issue) {
+        flash("No issue selected.", "info");
         return;
       }
-      setModal({
-        kind: "transition-picker",
-        transitions: trs,
-        issueKey: issue.key,
-        projectKey: issue.projectKey || projectForIssue(issue.key),
-      });
-    } catch (e) {
-      flash(errorMessage(e), "err");
-    }
-  }, [currentIssue, cfg, flash, track, projectForIssue]);
+      const launchSeq = ++modalLaunchSeq.current;
+      try {
+        const trs = await track(getTransitions(cfg, issue.key));
+        if (launchSeq !== modalLaunchSeq.current) return;
+        if (trs.length === 0) {
+          flash("No workflow transitions are available.", "info");
+          return;
+        }
+        showModal({
+          kind: "transition-picker",
+          transitions: trs,
+          issueKey: issue.key,
+          projectKey: issue.projectKey || projectForIssue(issue.key),
+          returnTo: { kind: "board" },
+        });
+      } catch (e) {
+        if (launchSeq !== modalLaunchSeq.current) return;
+        flash(errorMessage(e), "err");
+      }
+    },
+    [currentIssueNow, cfg, flash, track, projectForIssue, showModal],
+  );
 
   const doRerank = useCallback(
     async (direction: -1 | 1) => {
@@ -986,21 +1331,23 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       // view that's within the current lane's column; on the flat board it's
       // the active column. Reordering is global rank, so the neighbor's key
       // is all Jira needs.
-      const col = swimView ? lanes[swimCursor.lane]?.columns[swimCursor.col] : columns[activeCol];
-      const row = swimView ? swimCursor.row : (activeRows[activeCol] ?? 0);
+      const cursor = swimCursorRef.current;
+      const col = swimViewRef.current
+        ? lanes[cursor.lane]?.columns[cursor.col]
+        : columns[activeColRef.current];
+      const row = swimViewRef.current
+        ? cursor.row
+        : (activeRowsRef.current[activeColRef.current] ?? 0);
       if (!col) return;
       const issue = col.issues[row];
       if (!issue) return;
       const targetRow = row + direction;
       if (targetRow < 0 || targetRow >= col.issues.length) {
-        flash("already at the edge", "info");
+        flash("Already at the edge.", "info");
         return;
       }
       const neighbor = col.issues[targetRow]!;
-      if (pendingKeys.has(issue.key)) {
-        flash(`${issue.key} is updating…`, "info");
-        return;
-      }
+      if (rejectPending(issue)) return;
       markBusy(issue.key, true);
       try {
         await rankIssue(
@@ -1018,52 +1365,42 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         markBusy(issue.key, false);
       }
     },
-    [
-      swimView,
-      lanes,
-      swimCursor,
-      columns,
-      activeCol,
-      activeRows,
-      cfg,
-      flash,
-      coalescedReload,
-      pendingKeys,
-      markBusy,
-      touchRecent,
-    ],
+    [lanes, columns, cfg, flash, coalescedReload, markBusy, rejectPending, touchRecent],
   );
 
   const openDetailForKey = useCallback(
     (key: string, summary?: string) => {
       touchRecent(key, summary);
-      setModal({ kind: "detail", issueKey: key });
+      showModal({ kind: "detail", issueKey: key });
     },
-    [touchRecent],
+    [touchRecent, showModal],
   );
 
   const openDetail = useCallback(() => {
-    const issue = currentIssue;
+    const issue = currentIssueNow();
     if (!issue) {
-      flash("no issue selected", "info");
+      flash("No issue selected.", "info");
       return;
     }
     openDetailForKey(issue.key);
-  }, [currentIssue, flash, openDetailForKey]);
+  }, [currentIssueNow, flash, openDetailForKey]);
 
-  const openIssueInBrowser = useCallback(async () => {
-    const issue = currentIssue;
-    if (!issue) {
-      flash("no issue selected", "info");
-      return;
-    }
-    try {
-      await openInBrowser(`${cfg.server}/browse/${issue.key}`);
-      flash(`opened ${issue.key} in browser`, "ok");
-    } catch (e) {
-      flash(errorMessage(e), "err");
-    }
-  }, [currentIssue, cfg.server, flash]);
+  const openIssueInBrowser = useCallback(
+    async (issueOverride?: Issue) => {
+      const issue = issueOverride ?? currentIssueNow();
+      if (!issue) {
+        flash("No issue selected.", "info");
+        return;
+      }
+      try {
+        await openInBrowser(`${cfg.server}/browse/${issue.key}`);
+        flash(`opened ${issue.key} in browser`, "ok");
+      } catch (e) {
+        flash(errorMessage(e), "err");
+      }
+    },
+    [currentIssueNow, cfg.server, flash],
+  );
 
   const openBoardInBrowser = useCallback(async () => {
     if (!conf) return;
@@ -1110,19 +1447,28 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
 
   const startCreate = useCallback(async () => {
     if (!conf) return;
+    const launchSeq = ++modalLaunchSeq.current;
     try {
       if (!conf.projectKey) throw new Error("no project on this board — can't create issues here");
       const { types: allTypes, linkTypes } = await ensureMeta(conf.projectKey);
+      if (launchSeq !== modalLaunchSeq.current) return;
       const types = allTypes.filter((type) => !type.subtask);
       if (types.length === 0) {
-        flash("no creatable issue types", "err");
+        flash("No creatable issue types.", "err");
         return;
       }
-      setModal({ kind: "create", projectKey: conf.projectKey, types, linkTypes });
+      showModal({
+        kind: "create",
+        projectKey: conf.projectKey,
+        types,
+        linkTypes,
+        returnTo: { kind: "board" },
+      });
     } catch (e) {
+      if (launchSeq !== modalLaunchSeq.current) return;
       flash(errorMessage(e), "err");
     }
-  }, [conf, ensureMeta, flash]);
+  }, [conf, ensureMeta, flash, showModal]);
 
   /**
    * Quick-add is `c` minus the wizard — just a title, landing in whatever
@@ -1132,40 +1478,50 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
    */
   const startQuickAdd = useCallback(async () => {
     if (!conf) return;
+    const targetColIdx = swimViewRef.current ? swimCursorRef.current.col : activeColRef.current;
+    const launchSeq = ++modalLaunchSeq.current;
     try {
       if (!conf.projectKey) throw new Error("no project on this board — can't create issues here");
       const { types: allTypes, linkTypes } = await ensureMeta(conf.projectKey);
+      if (launchSeq !== modalLaunchSeq.current) return;
       const types = allTypes.filter((type) => !type.subtask);
       const defaultType = types[0];
       if (!defaultType) {
-        flash("no creatable issue types", "err");
+        flash("No creatable issue types.", "err");
         return;
       }
       const fields = await getCreateFields(cfg, conf.projectKey, defaultType.id);
+      if (launchSeq !== modalLaunchSeq.current) return;
       if (needsMoreThanTitle(fields)) {
-        setModal({
+        showModal({
           kind: "create",
           projectKey: conf.projectKey,
           types,
           linkTypes,
           initialType: defaultType,
+          returnTo: { kind: "board" },
         });
-        flash("this issue type has more required fields; opened full create", "info");
+        flash("This issue type has more required fields. Opened full create.", "info");
         return;
       }
-      setModal({ kind: "quick-add", colIdx: effectiveCol, type: defaultType, value: "" });
+      showModal({ kind: "quick-add", colIdx: targetColIdx, type: defaultType, value: "" });
     } catch (e) {
+      if (launchSeq !== modalLaunchSeq.current) return;
       flash(errorMessage(e), "err");
     }
-  }, [cfg, conf, ensureMeta, effectiveCol, flash]);
+  }, [cfg, conf, ensureMeta, flash, showModal]);
 
   const submitQuickAdd = useCallback(
     async (colIdx: number, type: IssueType, title: string) => {
       if (!conf) return;
+      if (modalSubmitPending.current) return;
       const trimmed = title.trim();
       if (!trimmed) {
-        flash("title empty, not created", "info");
-        closeModal();
+        setModal((current) =>
+          current.kind === "quick-add"
+            ? { ...current, error: "Title is required. Enter a title or press esc to cancel." }
+            : current,
+        );
         return;
       }
       const targetCol = conf.columns[colIdx];
@@ -1173,17 +1529,30 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         closeModal();
         return;
       }
-      closeModal();
+      setModal((current) =>
+        current.kind === "quick-add" ? { ...current, busy: true, error: undefined } : current,
+      );
+      modalSubmitPending.current = true;
       let created: { key: string };
       try {
         created = await createIssue(cfg, conf.projectKey, type.id, trimmed, "");
       } catch (e) {
-        flash(errorMessage(e), "err");
+        const reason = errorMessage(e);
+        setModal((current) =>
+          current.kind === "quick-add"
+            ? { ...current, busy: false, error: `Could not create issue: ${reason}` }
+            : current,
+        );
+        modalSubmitPending.current = false;
         return;
       }
 
-      setActiveCol(colIdx);
-      setSwimCursor((c) => ({ ...c, col: colIdx }));
+      modalSubmitPending.current = false;
+      closeModal();
+      const followupSeq = modalLaunchSeq.current;
+
+      setActiveColumn(colIdx);
+      setSwimPosition({ ...swimCursorRef.current, col: colIdx });
       pendingFocus.current = { key: created.key, afterVersion: boardDataVersion.current + 1 };
       touchRecent(created.key, trimmed);
 
@@ -1207,13 +1576,15 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
             if (hop.requiredFields.length > 0) {
               await load();
               flash(`created ${created.key}; complete required fields to move it`, "info");
-              setModal({
-                kind: "transition-screen",
-                transition: hop,
-                issueKey: created.key,
-                projectKey: conf.projectKey,
-                targetColIdx: colIdx,
-              });
+              if (followupSeq === modalLaunchSeq.current)
+                showModal({
+                  kind: "transition-screen",
+                  transition: hop,
+                  issueKey: created.key,
+                  projectKey: conf.projectKey,
+                  targetColIdx: colIdx,
+                  returnTo: { kind: "board" },
+                });
               return;
             }
             await transitionIssue(cfg, created.key, hop.id);
@@ -1227,37 +1598,43 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       }
       flash(
         landed
-          ? `created ${created.key} in ${targetCol.name}`
-          : `created ${created.key}${warning ? `; couldn't move: ${warning}` : ""}`,
-        landed ? "ok" : "info",
+          ? `Created ${created.key} in ${targetCol.name}.`
+          : `Created ${created.key}; follow-up failed${warning ? `: ${warning}` : "."}`,
+        landed ? "ok" : "err",
       );
       await load();
     },
-    [cfg, conf, flash, load, closeModal, touchRecent],
+    [cfg, conf, flash, load, closeModal, touchRecent, showModal, setActiveColumn, setSwimPosition],
   );
 
   // Nudge the cursor within the active column / across columns.
   const nudgeRow = useCallback(
     (delta: number) => {
-      setActiveRows((prev) => {
-        const arr = prev.slice();
-        const col = columns[activeCol];
-        if (!col) return arr;
-        arr[activeCol] = clamp(
-          (arr[activeCol] ?? 0) + delta,
-          0,
-          Math.max(0, col.issues.length - 1),
-        );
-        return arr;
-      });
+      const colIndex = activeColRef.current;
+      const col = columns[colIndex];
+      if (!col) return;
+      const row = clamp(
+        (activeRowsRef.current[colIndex] ?? 0) + delta,
+        0,
+        Math.max(0, col.issues.length - 1),
+      );
+      setActiveRowAt(colIndex, row);
+      setSelectedIssueKey(col.issues[row]?.key ?? null);
     },
-    [columns, activeCol],
+    [columns, setActiveRowAt],
   );
   const nudgeCol = useCallback(
     (delta: number) => {
-      setActiveCol((c) => clamp(c + delta, 0, Math.max(0, columns.length - 1)));
+      const col = clamp(activeColRef.current + delta, 0, Math.max(0, columns.length - 1));
+      const row = clamp(
+        activeRowsRef.current[col] ?? 0,
+        0,
+        Math.max(0, (columns[col]?.issues.length ?? 0) - 1),
+      );
+      setActiveColumn(col);
+      setSelectedIssueKey(columns[col]?.issues[row]?.key ?? null);
     },
-    [columns.length],
+    [columns, setActiveColumn],
   );
 
   // Swimlane cursor movement — delegates the spill-across-lanes logic to the
@@ -1265,20 +1642,31 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   // moves across columns, clamping the row into the new column.
   const swimMove = useCallback(
     (dRow: number, dCol: number) => {
-      setSwimCursor((c) => moveCursor(lanes, c, dRow, dCol));
+      const cursor = moveCursor(lanes, swimCursorRef.current, dRow, dCol);
+      setSwimPosition(cursor);
+      setSelectedIssueKey(lanes[cursor.lane]?.columns[cursor.col]?.issues[cursor.row]?.key ?? null);
     },
-    [lanes],
+    [lanes, setSwimPosition],
   );
 
   useInput(
     (input, key) => {
+      if (!conf) {
+        if (key.escape || input === "q" || (key.ctrl && input === "c")) return onExit();
+        if (loadError && input === "r") void load();
+        return;
+      }
       // Global
+      if (key.ctrl && input.toLowerCase() === "g") {
+        dismiss();
+        return;
+      }
       if (key.ctrl && input === "c") return onExit();
       if (input === "q") return onExit();
-      if (input === "?") return setModal({ kind: "help" });
+      if (input === "?") return showModal({ kind: "help" });
 
       // Navigation — swim view uses the lane cursor, flat board the columns.
-      if (swimView) {
+      if (swimViewRef.current) {
         if (key.leftArrow || input === "h") return swimMove(0, -1);
         if (key.rightArrow || input === "l") return swimMove(0, 1);
         if (key.upArrow || input === "k") return swimMove(-1, 0);
@@ -1292,12 +1680,19 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         if (key.upArrow || input === "k") return nudgeRow(-1);
         if (key.downArrow || input === "j") return nudgeRow(1);
         if (input === "g") {
-          setActiveRowAt(activeCol, 0);
+          const col = activeColRef.current;
+          setActiveRowAt(col, 0);
+          setSelectedIssueKey(columns[col]?.issues[0]?.key ?? null);
           return;
         }
         if (input === "G") {
-          const col = columns[activeCol];
-          if (col) setActiveRowAt(activeCol, Math.max(0, col.issues.length - 1));
+          const colIndex = activeColRef.current;
+          const col = columns[colIndex];
+          if (col) {
+            const row = Math.max(0, col.issues.length - 1);
+            setActiveRowAt(colIndex, row);
+            setSelectedIssueKey(col.issues[row]?.key ?? null);
+          }
           return;
         }
         if (key.pageUp) return nudgeRow(-cardsVisible);
@@ -1308,35 +1703,45 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       // (flat, handled above). snapToCard lands on a populated cell (preferring
       // the current column) so the cursor never strands on an empty cell in a
       // lane that doesn't have a card in that column.
-      if (swimView && input === "g") return setSwimCursor((c) => snapToCard(lanes, 0, c.col));
-      if (swimView && input === "G")
-        return setSwimCursor((c) => snapToCard(lanes, lanes.length - 1, c.col));
+      if (swimViewRef.current && input === "g") {
+        const cursor = snapToCard(lanes, 0, swimCursorRef.current.col);
+        setSwimPosition(cursor);
+        setSelectedIssueKey(
+          lanes[cursor.lane]?.columns[cursor.col]?.issues[cursor.row]?.key ?? null,
+        );
+        return;
+      }
+      if (swimViewRef.current && input === "G") {
+        const cursor = snapToCard(lanes, lanes.length - 1, swimCursorRef.current.col);
+        setSwimPosition(cursor);
+        setSelectedIssueKey(
+          lanes[cursor.lane]?.columns[cursor.col]?.issues[cursor.row]?.key ?? null,
+        );
+        return;
+      }
+
+      const targetIssue = currentIssueNow();
 
       // Block mutating actions on a card that's mid-update (a transition or
       // rerank in flight, or an optimistic move still settling). Read-only
-      // actions (view, yank, open, refresh) and navigation stay live so the
+      // actions (view, copy, open, refresh) and navigation stay live so the
       // user can look around while it settles.
-      if (currentIssue && pendingKeys.has(currentIssue.key)) {
-        const mutating =
-          key.return ||
-          input === "e" ||
-          input === "E" ||
-          input === "m" ||
-          input === "[" ||
-          input === "]" ||
-          input === "<" ||
-          input === ">" ||
-          input === "t" ||
-          input === "i";
-        if (mutating) {
-          flash(`${currentIssue.key} is updating…`, "info");
-          return;
-        }
-      }
+      const mutating =
+        key.return ||
+        input === "e" ||
+        input === "E" ||
+        input === "m" ||
+        input === "[" ||
+        input === "]" ||
+        input === "<" ||
+        input === ">" ||
+        input === "t" ||
+        input === "i";
+      if (mutating && targetIssue && rejectPending(targetIssue)) return;
 
       // Actions on current card
       if (key.return) {
-        if (currentIssue) setModal({ kind: "card-action" });
+        if (targetIssue) showModal({ kind: "card-action", issue: targetIssue });
         return;
       }
       if (input === "v") return void openDetail();
@@ -1344,8 +1749,8 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       if (input === "E") return void doEditDescription();
       if (input === "o") return void openIssueInBrowser();
       if (input === "m") {
-        if (!currentIssue) return flash("no issue selected", "info");
-        setModal({ kind: "move-picker", issue: currentIssue });
+        if (!targetIssue) return flash("No issue selected.", "info");
+        showModal({ kind: "move-picker", issue: targetIssue, returnTo: { kind: "board" } });
         return;
       }
       // Rerank uses [ / ] — plain brackets transmit reliably on every
@@ -1361,15 +1766,15 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       if (input === "t") return void doFuzzyTransition();
       if (input === "i") return void doAssignToMe();
       if (input === "y") {
-        if (!currentIssue) return flash("no issue selected", "info");
-        copyToClipboard(currentIssue.key)
-          .then(() => flash(`copied ${currentIssue.key}`, "ok"))
+        if (!targetIssue) return flash("No issue selected.", "info");
+        copyToClipboard(targetIssue.key)
+          .then(() => flash(`copied ${targetIssue.key}`, "ok"))
           .catch((e) => flash(errorMessage(e), "err"));
         return;
       }
       if (input === "Y") {
-        if (!currentIssue) return flash("no issue selected", "info");
-        const url = `${cfg.server}/browse/${currentIssue.key}`;
+        if (!targetIssue) return flash("No issue selected.", "info");
+        const url = `${cfg.server}/browse/${targetIssue.key}`;
         copyToClipboard(url)
           .then(() => flash(`copied URL`, "ok"))
           .catch((e) => flash(errorMessage(e), "err"));
@@ -1382,14 +1787,14 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       if (input === "a") return void startQuickAdd();
       if (input === "r") {
         void load();
-        flash("refreshing…", "info");
+        flash("Refreshing…", "info");
         return;
       }
 
       // Search + match cycling
       if (input === "/") {
         setSearchBuffer(query);
-        setModal({ kind: "search" });
+        showModal({ kind: "search" });
         return;
       }
       if (input === "n") return jumpToMatch(1);
@@ -1397,25 +1802,25 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
 
       // Quick-open finder: opens on recently-visited issues; typing searches
       // every project globally.
-      if (input === "R") return setModal({ kind: "quick-open" });
+      if (input === "R") return showModal({ kind: "quick-open" });
 
       // JQL
       if (input === "J") {
-        setModal({ kind: "jql" });
+        showModal({ kind: "jql" });
         return;
       }
 
       // Filters
       if (input === "f") {
-        setModal({ kind: "filter-menu" });
+        showModal({ kind: "filter-menu" });
         return;
       }
       if (input === "F") {
         if (activeFilterCount(filters) > 0) {
           setFilters(EMPTY_FILTERS);
-          flash("all filters cleared", "ok");
+          flash("All filters cleared.", "ok");
         } else {
-          flash("no filters active", "info");
+          flash("No filters active.", "info");
         }
         return;
       }
@@ -1424,24 +1829,28 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       // strategy) — otherwise there's nothing to group by.
       if (input === "s") {
         if (!hasSwimlanes) {
-          flash("no swimlanes configured on this board", "info");
+          flash("No swimlanes are configured on this board.", "info");
           return;
         }
-        setSwimView((v) => {
-          const next = !v;
-          if (next) {
-            // Entering swim view: seed the cursor on the current issue if it
-            // exists in a lane, else the first populated cell (snapToCard keeps
-            // us off an empty cell when lane 0 has no card in this column).
-            const seed = currentIssue ? findCursor(lanes, currentIssue.key) : null;
-            setSwimCursor(seed ?? snapToCard(lanes, 0, effectiveCol));
-            swimScrollRef.current = 0;
-          } else if (currentIssue) {
-            // Leaving swim view: carry the column back to the flat board.
-            setActiveCol(swimCursor.col);
+        const next = !swimViewRef.current;
+        const selected = currentIssueNow();
+        swimViewRef.current = next;
+        setSwimView(next);
+        if (next) {
+          const seed = selected ? findCursor(lanes, selected.key) : null;
+          setSwimPosition(seed ?? snapToCard(lanes, 0, activeColRef.current));
+          swimScrollRef.current = 0;
+        } else if (selected) {
+          for (let col = 0; col < columns.length; col++) {
+            const row = columns[col]!.issues.findIndex((issue) => issue.key === selected.key);
+            if (row >= 0) {
+              setActiveColumn(col);
+              setActiveRowAt(col, row);
+              setSelectedIssueKey(selected.key);
+              break;
+            }
           }
-          return next;
-        });
+        }
         return;
       }
     },
@@ -1457,7 +1866,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
      */
     if (loadError) {
       return (
-        <Box flexDirection="column" padding={1}>
+        <Box flexDirection="column" padding={1} width={termCols} height={termRows}>
           <Box>
             <Text color={theme.accent} bold>
               ifhj{" "}
@@ -1465,16 +1874,16 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
             <Text color={theme.muted}>— {board.name}</Text>
           </Box>
           <Box marginTop={1}>
-            <Text color={theme.error}>{loadError}</Text>
+            <ErrorMessage message={loadError} width={Math.max(1, termCols - 2)} rows={3} />
           </Box>
           <Box marginTop={1}>
-            <Text color={theme.muted}>press q to go back</Text>
+            <Text color={theme.muted}>r retry · esc/q boards</Text>
           </Box>
         </Box>
       );
     }
     return (
-      <Box flexDirection="column" padding={1}>
+      <Box flexDirection="column" padding={1} width={termCols} height={termRows}>
         <Box>
           <Text color={theme.accent} bold>
             ifhj{" "}
@@ -1482,64 +1891,238 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           <Text color={theme.muted}>— {board.name}</Text>
         </Box>
         <Box marginTop={1}>
-          <LoadingLine label="loading board…" />
+          <LoadingLine label="Loading board…" />
+        </Box>
+        <Box marginTop={1}>
+          <Text color={theme.muted}>esc/q boards</Text>
         </Box>
       </Box>
     );
   }
 
+  const detailKey = retainedDetailKey(modal);
+
+  const renderDetail = (issueKey: string, enabled: boolean) => (
+    <InputScope enabled={enabled}>
+      <Box display={enabled ? "flex" : "none"}>
+        <IssueDetailModal
+          cfg={cfg}
+          projectKey={projectForIssue(issueKey)}
+          issueKey={issueKey}
+          ensureUsers={usersLoader}
+          onLocalAction={() => {
+            modalLaunchSeq.current++;
+          }}
+          onClose={closeModal}
+          externalBusy={busy}
+          externalToasts={toasts}
+          onDismissExternalToasts={dismiss}
+          onMove={(issue) => {
+            showModal({
+              kind: "move-picker",
+              issue,
+              returnTo: { kind: "detail", issueKey },
+            });
+          }}
+          onTransition={async (projectKey) => {
+            const seq = ++modalLaunchSeq.current;
+            try {
+              const transitions = await track(getTransitions(cfg, issueKey));
+              if (
+                seq !== modalLaunchSeq.current ||
+                modalRef.current.kind !== "detail" ||
+                modalRef.current.issueKey !== issueKey
+              )
+                return;
+              if (transitions.length === 0) {
+                flash("No workflow transitions are available.", "info");
+                return;
+              }
+              showModal({
+                kind: "transition-picker",
+                transitions,
+                issueKey,
+                projectKey,
+                returnTo: { kind: "detail", issueKey },
+              });
+            } catch (error) {
+              if (seq === modalLaunchSeq.current) flash(errorMessage(error), "err");
+            }
+          }}
+          onCreateSubtask={(parent) => {
+            const seq = ++modalLaunchSeq.current;
+            void (async () => {
+              try {
+                const { types: allTypes, linkTypes } = await ensureMeta(parent.projectKey);
+                if (
+                  seq !== modalLaunchSeq.current ||
+                  modalRef.current.kind !== "detail" ||
+                  modalRef.current.issueKey !== issueKey
+                )
+                  return;
+                const types = allTypes.filter((type) => type.subtask);
+                if (types.length === 0) throw new Error("No subtask issue types in this project.");
+                showModal({
+                  kind: "create",
+                  projectKey: parent.projectKey,
+                  types,
+                  linkTypes,
+                  parent,
+                  returnTo: { kind: "detail", issueKey },
+                });
+              } catch (error) {
+                if (seq === modalLaunchSeq.current) flash(errorMessage(error), "err");
+              }
+            })();
+          }}
+          onRefresh={() => void load()}
+        />
+      </Box>
+    </InputScope>
+  );
+
+  const withRetainedDetail = (content: ReactNode, detailActive = false) => {
+    if (!detailKey) return content;
+    return (
+      <>
+        {renderDetail(detailKey, detailActive)}
+        {detailActive ? null : <>{content}</>}
+      </>
+    );
+  };
+
+  const renderMovePicker = (picker: MovePickerReturn, enabled: boolean) => {
+    const targetIssue = picker.issue;
+    const currentColIdx = conf.columns.findIndex((column) =>
+      column.statusIds.includes(targetIssue.statusId),
+    );
+    return (
+      <InputScope key={`move-${targetIssue.key}`} enabled={enabled}>
+        <Box display={enabled ? "flex" : "none"} flexDirection="column">
+          <FilterPicker
+            title={`Move ${targetIssue.key} to…`}
+            items={conf.columns.map((column, index) => ({
+              id: String(index),
+              label: column.name,
+            }))}
+            {...(currentColIdx >= 0 ? { currentId: String(currentColIdx) } : {})}
+            {...(picker.busy
+              ? { busy: true, busyLabel: `Loading transitions for ${targetIssue.key}…` }
+              : {})}
+            onCancel={() => restore(picker.returnTo)}
+            onPick={(id) => {
+              const targetIndex = Number(id);
+              const column = conf.columns[targetIndex];
+              if (!column) return;
+              if (column.statusIds.includes(targetIssue.statusId)) {
+                setModal({ ...picker, error: "Already in that column." });
+                return;
+              }
+              const launchSeq = ++modalLaunchSeq.current;
+              setModal({ ...picker, busy: true, error: undefined });
+              void moveToColumn(targetIndex, targetIssue, launchSeq, picker, {
+                onReady: (transition) => {
+                  if (transition.requiredFields.length === 0) closeModal();
+                },
+                onError: (message) => {
+                  setModal((current) =>
+                    current.kind === "move-picker"
+                      ? { ...current, busy: false, error: message }
+                      : current,
+                  );
+                },
+              });
+            }}
+          />
+          {picker.error ? (
+            <ErrorMessage message={picker.error} width={Math.max(1, termCols - 6)} rows={2} />
+          ) : null}
+        </Box>
+      </InputScope>
+    );
+  };
+
+  const renderTransitionPicker = (picker: TransitionPickerReturn, enabled: boolean) => (
+    <InputScope key={`transition-${picker.issueKey}`} enabled={enabled}>
+      <Box display={enabled ? "flex" : "none"}>
+        <ListPicker
+          title={`Transition ${picker.issueKey}`}
+          items={picker.transitions.map((transition) => ({
+            id: transition.id,
+            label: transition.name,
+          }))}
+          onCancel={() => restore(picker.returnTo)}
+          onPick={(id) => {
+            const transition = picker.transitions.find((candidate) => candidate.id === id);
+            if (!transition) return restore(picker.returnTo);
+            const targetIndex = conf.columns.findIndex((column) =>
+              column.statusIds.includes(transition.toStatusId),
+            );
+            if (transition.requiredFields.length === 0) closeModal();
+            void commitTransition(picker.issueKey, transition, {
+              projectKey: picker.projectKey,
+              returnTo: picker,
+              ...(picker.drafts?.[transition.id]
+                ? { initialValues: picker.drafts[transition.id] }
+                : {}),
+              ...(targetIndex !== -1 ? { targetColIdx: targetIndex } : {}),
+            });
+          }}
+        />
+      </Box>
+    </InputScope>
+  );
+
   // Modal overlays. Each branch is a discrete, full-screen-ish component.
-  if (modal.kind === "nvim") return <NvimBanner />;
+  if (modal.kind === "nvim") return <NvimBanner warning={modal.warning} />;
+  if (modal.kind === "description-save") {
+    return (
+      <DescriptionSaveModal
+        issueKey={modal.issue.key}
+        busy={modal.busy}
+        error={modal.error}
+        onRetry={() => {
+          if (descriptionWrites.current.has(modal.issue.key)) return;
+          setModal({ ...modal, busy: true, error: undefined });
+          void saveBoardDescription(modal.issue, modal.draft);
+        }}
+        onEdit={() => void doEditDescription(modal.issue)}
+        onCancel={closeModal}
+      />
+    );
+  }
   if (modal.kind === "help") return <HelpModal onClose={closeModal} />;
-  if (modal.kind === "card-action" && currentIssue) {
+  if (modal.kind === "card-action") {
+    const actionIssue = modal.issue;
     return (
       <ListPicker
-        title={`${currentIssue.key} · ${currentIssue.summary.slice(0, 60)}`}
+        title={`${actionIssue.key} · ${actionIssue.summary.slice(0, 60)}`}
         items={[
-          { id: "detail", label: "view details" },
-          { id: "title", label: "edit title" },
-          { id: "desc", label: `edit description (${editorLabel()})` },
-          { id: "transition", label: "transition to status…" },
-          { id: "move", label: "move to column…" },
-          { id: "assign-me", label: "assign to me" },
-          { id: "open", label: "open in browser" },
+          { id: "detail", label: "View details" },
+          { id: "title", label: "Edit title" },
+          { id: "desc", label: `Edit description (${editorLabel()})` },
+          { id: "transition", label: "Choose workflow transition…" },
+          { id: "move", label: "Move to column…" },
+          { id: "assign-me", label: "Assign to me" },
+          { id: "open", label: "Open in browser" },
         ]}
         onCancel={closeModal}
         onPick={(id) => {
           closeModal();
-          if (id === "detail") void openDetail();
-          else if (id === "title") void doEditSummary();
-          else if (id === "desc") void doEditDescription();
-          else if (id === "transition") void doFuzzyTransition();
-          else if (id === "move") setModal({ kind: "move-picker", issue: currentIssue });
-          else if (id === "assign-me") void doAssignToMe();
-          else if (id === "open") void openIssueInBrowser();
+          if (id === "detail") openDetailForKey(actionIssue.key);
+          else if (id === "title") void doEditSummary(actionIssue);
+          else if (id === "desc") void doEditDescription(actionIssue);
+          else if (id === "transition") void doFuzzyTransition(actionIssue);
+          else if (id === "move")
+            showModal({ kind: "move-picker", issue: actionIssue, returnTo: { kind: "board" } });
+          else if (id === "assign-me") void doAssignToMe(actionIssue);
+          else if (id === "open") void openIssueInBrowser(actionIssue);
         }}
       />
     );
   }
   if (modal.kind === "move-picker") {
-    const targetIssue = modal.issue;
-    const currentColIdx = conf.columns.findIndex((c) => c.statusIds.includes(targetIssue.statusId));
-    return (
-      <FilterPicker
-        title={`move ${targetIssue.key} to…`}
-        items={conf.columns.map((c, i) => ({ id: String(i), label: c.name }))}
-        {...(currentColIdx >= 0 ? { currentId: String(currentColIdx) } : {})}
-        onCancel={closeModal}
-        onPick={(id) => {
-          closeModal();
-          const idx = Number(id);
-          const col = conf.columns[idx];
-          if (!col) return;
-          if (col.statusIds.includes(targetIssue.statusId)) {
-            flash("already in that column", "info");
-            return;
-          }
-          void moveToColumn(idx, targetIssue);
-        }}
-      />
-    );
+    return withRetainedDetail(renderMovePicker(modal, true));
   }
   if (modal.kind === "quick-add") {
     const colName = conf.columns[modal.colIdx]?.name ?? "column";
@@ -1548,7 +2131,9 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         colName={colName}
         typeName={modal.type.name}
         value={modal.value}
-        onChange={(v) => setModal({ ...modal, value: v })}
+        busy={modal.busy}
+        error={modal.error}
+        onChange={(v) => setModal({ ...modal, value: v, error: undefined })}
         onSubmit={(val) => void submitQuickAdd(modal.colIdx, modal.type, val)}
         onCancel={closeModal}
       />
@@ -1560,22 +2145,44 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       <TitleEditModal
         issueKey={editKey}
         value={modal.current}
-        onChange={(v) => setModal({ ...modal, current: v })}
+        busy={modal.busy}
+        error={modal.error}
+        onChange={(v) => setModal({ ...modal, current: v, error: undefined })}
         onSubmit={async (val) => {
+          if (modalSubmitPending.current) return;
           const next = val.trim();
           if (!next) {
-            flash("summary empty, not saved", "info");
+            setModal({
+              ...modal,
+              error: "Title is required. Enter a title or press esc to cancel.",
+            });
+            return;
+          }
+          if (next === modal.original.trim()) {
+            flash("No title change.", "info");
             closeModal();
             return;
           }
-          closeModal();
+          setModal({ ...modal, busy: true, error: undefined });
+          modalSubmitPending.current = true;
           try {
             await updateSummary(cfg, editKey, next);
-            flash(`${editKey} title updated`, "ok");
+            modalSubmitPending.current = false;
+            closeModal();
+            flash(`${editKey} title updated.`, "ok");
             touchRecent(editKey);
             await load();
           } catch (e) {
-            flash(errorMessage(e), "err");
+            modalSubmitPending.current = false;
+            setModal((current) =>
+              current.kind === "title-edit" && current.issueKey === editKey
+                ? {
+                    ...current,
+                    busy: false,
+                    error: `Could not save title: ${errorMessage(e)}`,
+                  }
+                : current,
+            );
           }
         }}
         onCancel={closeModal}
@@ -1583,138 +2190,139 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     );
   }
   if (modal.kind === "detail") {
-    return (
-      <IssueDetailModal
-        cfg={cfg}
-        projectKey={projectForIssue(modal.issueKey)}
-        issueKey={modal.issueKey}
-        ensureUsers={ensureUsers}
-        onClose={closeModal}
-        onMove={(issue) => setModal({ kind: "move-picker", issue })}
-        onTransition={async (projectKey) => {
-          const key = modal.issueKey;
-          try {
-            const trs = await track(getTransitions(cfg, key));
-            if (trs.length === 0) {
-              flash("no transitions available", "info");
-              return;
-            }
-            setModal({ kind: "transition-picker", transitions: trs, issueKey: key, projectKey });
-          } catch (e) {
-            flash(errorMessage(e), "err");
-          }
-        }}
-        onCreateSubtask={(parent) => {
-          closeModal();
-          void (async () => {
-            try {
-              const { types: allTypes, linkTypes } = await ensureMeta(parent.projectKey);
-              const types = allTypes.filter((type) => type.subtask);
-              if (types.length === 0) throw new Error("no subtask issue types in this project");
-              setModal({ kind: "create", projectKey: parent.projectKey, types, linkTypes, parent });
-            } catch (e) {
-              flash(errorMessage(e), "err");
-            }
-          })();
-        }}
-        onRefresh={() => void load()}
-      />
-    );
+    return withRetainedDetail(null, true);
   }
   if (modal.kind === "transition-picker") {
-    const pickerKey = modal.issueKey;
-    const trs = modal.transitions;
-    return (
-      <ListPicker
-        title={`transition ${pickerKey}`}
-        items={trs.map((t) => ({ id: t.id, label: t.name }))}
-        onCancel={closeModal}
-        onPick={(id) => {
-          const tr = trs.find((t) => t.id === id);
-          if (!tr) {
-            closeModal();
-            return;
-          }
-          // Close this picker first so the gate's setModal (for a required-
-          // fields screen) isn't racing against us. If there's no screen,
-          // commitTransition runs through to POST with no modal up.
-          const targetIdx = conf.columns.findIndex((c) => c.statusIds.includes(tr.toStatusId));
-          closeModal();
-          void commitTransition(pickerKey, tr, {
-            projectKey: modal.projectKey,
-            ...(targetIdx !== -1 ? { targetColIdx: targetIdx } : {}),
-          });
-        }}
-      />
-    );
+    return withRetainedDetail(renderTransitionPicker(modal, true));
   }
   if (modal.kind === "transition-screen") {
     const screenKey = modal.issueKey;
     const screenTr = modal.transition;
     const screenTargetIdx = modal.targetColIdx;
-    return (
+    const parentLayer =
+      modal.returnTo.kind === "transition-picker"
+        ? renderTransitionPicker(modal.returnTo, false)
+        : modal.returnTo.kind === "move-picker"
+          ? renderMovePicker(modal.returnTo, false)
+          : null;
+    return withRetainedDetail([
+      parentLayer,
       <TransitionScreenModal
+        key={`transition-screen-${screenKey}-${screenTr.id}`}
         cfg={cfg}
         projectKey={modal.projectKey}
         issueKey={screenKey}
         transition={screenTr}
-        onCancel={closeModal}
+        {...(modal.initialValues ? { initialValues: modal.initialValues } : {})}
+        busy={modal.busy}
+        error={modal.error}
+        onEdit={() => {
+          setModal((current) =>
+            isTransitionScreen(current, screenKey, screenTr.id)
+              ? { ...current, error: undefined }
+              : current,
+          );
+        }}
+        onOpenIssue={() => {
+          void openInBrowser(`${cfg.server}/browse/${screenKey}`).catch((error) => {
+            setModal((current) =>
+              isTransitionScreen(current, screenKey, screenTr.id)
+                ? { ...current, error: errorMessage(error) }
+                : current,
+            );
+          });
+        }}
+        onCancel={(values) => {
+          const drafts = {
+            ...(modal.returnTo.kind === "transition-picker" || modal.returnTo.kind === "move-picker"
+              ? modal.returnTo.drafts
+              : {}),
+            [screenTr.id]: values ?? {},
+          };
+          if (modal.returnTo.kind === "transition-picker") restore({ ...modal.returnTo, drafts });
+          else if (modal.returnTo.kind === "move-picker")
+            restore({ ...modal.returnTo, busy: false, drafts });
+          else restore(modal.returnTo);
+        }}
         onSubmit={(fields) => {
-          closeModal();
+          if (modalSubmitPending.current) return;
+          modalSubmitPending.current = true;
+          setModal({ ...modal, busy: true, error: undefined });
           void commitTransition(screenKey, screenTr, {
             projectKey: modal.projectKey,
             fields,
+            onError: (message) => {
+              modalSubmitPending.current = false;
+              setModal((current) =>
+                isTransitionScreen(current, screenKey, screenTr.id)
+                  ? {
+                      ...current,
+                      busy: false,
+                      error: `Could not save transition: ${message}. Your values are kept.`,
+                    }
+                  : current,
+              );
+            },
             ...(screenTargetIdx !== undefined ? { targetColIdx: screenTargetIdx } : {}),
+          }).then((saved) => {
+            if (saved && isTransitionScreen(modalRef.current, screenKey, screenTr.id)) {
+              modalSubmitPending.current = false;
+              closeModal();
+            }
+            return undefined;
           });
         }}
-      />
-    );
+      />,
+    ]);
   }
   if (modal.kind === "filter-menu") {
     const count = activeFilterCount(filters);
     const items = [
-      { id: "assignee", label: `assignee${filters.assignee ? ` · ${filters.assignee}` : ""}` },
-      { id: "type", label: `issue type${filters.type ? ` · ${filters.type}` : ""}` },
-      { id: "sprint", label: `sprint${filters.sprint ? ` · ${filters.sprint}` : ""}` },
-      { id: "label", label: `label${filters.label ? ` · ${filters.label}` : ""}` },
-      { id: "epic", label: `epic${filters.epic ? ` · ${filters.epic}` : ""}` },
-      ...(count > 0 ? [{ id: "clear", label: "clear all filters" }] : []),
+      { id: "assignee", label: `Assignee${filters.assignee ? ` · ${filters.assignee}` : ""}` },
+      { id: "type", label: `Issue type${filters.type ? ` · ${filters.type}` : ""}` },
+      { id: "sprint", label: `Sprint${filters.sprint ? ` · ${filters.sprint}` : ""}` },
+      { id: "label", label: `Label${filters.label ? ` · ${filters.label}` : ""}` },
+      { id: "epic", label: `Epic${filters.epic ? ` · ${filters.epic}` : ""}` },
+      ...(count > 0 ? [{ id: "clear", label: "Clear all filters" }] : []),
     ];
     return (
-      <ListPicker
-        title={`filters${count > 0 ? ` (${count} active)` : ""}`}
-        items={items}
-        onPick={(id) => {
-          if (id === "clear") {
-            setFilters(EMPTY_FILTERS);
-            closeModal();
-            flash("all filters cleared", "ok");
-          } else if (id === "assignee") {
-            setModal({ kind: "filter-assignee", names: filterOptions.assignees });
-          } else if (id === "type") {
-            setModal({ kind: "filter-type", types: filterOptions.types });
-          } else if (id === "sprint") {
-            if (filterOptions.sprints.length === 0) {
-              flash("no sprints found", "info");
-              return;
+      <Box flexDirection="column" width={termCols} height={termRows}>
+        <ListPicker
+          title={`Filters${count > 0 ? ` (${count} active)` : ""}`}
+          items={items}
+          onPick={(id) => {
+            if (id === "clear") {
+              setFilters(EMPTY_FILTERS);
+              closeModal();
+              flash("All filters cleared.", "ok");
+            } else if (id === "assignee") {
+              showModal({ kind: "filter-assignee", names: filterOptions.assignees });
+            } else if (id === "type") {
+              showModal({ kind: "filter-type", types: filterOptions.types });
+            } else if (id === "sprint") {
+              if (filterOptions.sprints.length === 0) {
+                flash("No sprints found.", "info");
+                return;
+              }
+              showModal({ kind: "filter-sprint", sprints: filterOptions.sprints });
+            } else if (id === "label") {
+              if (filterOptions.labels.length === 0) {
+                flash("No labels found.", "info");
+                return;
+              }
+              showModal({ kind: "filter-label", labels: filterOptions.labels });
+            } else if (id === "epic") {
+              if (filterOptions.epics.length === 0) {
+                flash("No epics found.", "info");
+                return;
+              }
+              showModal({ kind: "filter-epic", epics: filterOptions.epics });
             }
-            setModal({ kind: "filter-sprint", sprints: filterOptions.sprints });
-          } else if (id === "label") {
-            if (filterOptions.labels.length === 0) {
-              flash("no labels found", "info");
-              return;
-            }
-            setModal({ kind: "filter-label", labels: filterOptions.labels });
-          } else if (id === "epic") {
-            if (filterOptions.epics.length === 0) {
-              flash("no epics found", "info");
-              return;
-            }
-            setModal({ kind: "filter-epic", epics: filterOptions.epics });
-          }
-        }}
-        onCancel={closeModal}
-      />
+          }}
+          onCancel={closeModal}
+        />
+        <ToastStack toasts={toasts} maxWidth={termCols} onDismiss={dismiss} />
+      </Box>
     );
   }
   if (
@@ -1753,7 +2361,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           closeModal();
           flash(`${spec.label} filter cleared`, "ok");
         }}
-        onCancel={() => setModal({ kind: "filter-menu" })}
+        onCancel={() => showModal({ kind: "filter-menu" })}
       />
     );
   }
@@ -1783,7 +2391,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     );
   }
   if (modal.kind === "create") {
-    return (
+    return withRetainedDetail(
       <CreateWizard
         cfg={cfg}
         projectKey={modal.projectKey}
@@ -1791,12 +2399,15 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         linkTypes={modal.linkTypes}
         initialType={modal.initialType}
         defaultParent={modal.parent}
-        ensureUsers={ensureUsers}
-        onCancel={closeModal}
+        ensureUsers={usersLoader}
+        onCancel={() => restore(modal.returnTo)}
         onDone={({ key, title, linkSummary, warning }) => {
-          const headline = `created ${key}: ${title}`;
+          const headline = `Created ${key}: ${title}`;
           const linked = linkSummary ? `${headline} · ${linkSummary}` : headline;
-          flash(warning ? `${linked}; ${warning}` : linked, warning ? "info" : "ok");
+          flash(
+            warning ? `${linked}; follow-up failed: ${warning}` : linked,
+            warning ? "err" : "ok",
+          );
           pendingFocus.current = { key, afterVersion: boardDataVersion.current + 1 };
           // Clean creates open detail. Partial success stays on the board so
           // its warning is visible; both paths reload and focus the new card.
@@ -1809,7 +2420,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         onError={(msg) => {
           flash(msg, "err");
         }}
-      />
+      />,
     );
   }
 
@@ -1920,8 +2531,17 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         onSearchCancel={() => {
           closeModal();
         }}
+        emptyMessage={
+          issues.length === 0
+            ? "No issues on this board."
+            : filteredIssues.length === 0
+              ? "No issues match the active filters."
+              : columns.length === 0
+                ? "No board columns available."
+                : undefined
+        }
       />
-      <ToastStack toasts={toasts} maxWidth={termCols} />
+      <ToastStack toasts={toasts} maxWidth={termCols} onDismiss={dismiss} />
     </Box>
   );
 }

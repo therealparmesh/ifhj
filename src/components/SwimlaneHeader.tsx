@@ -47,7 +47,7 @@ export function SwimlaneHeader({
             justifyContent="space-between"
           >
             <Text color={isActive ? theme.accent : theme.fgDim} bold>
-              {truncate(col.name.toUpperCase(), Math.max(4, colWidth - Bun.stringWidth(stats) - 1))}
+              {truncate(col.name, Math.max(4, colWidth - Bun.stringWidth(stats) - 1))}
             </Text>
             <Text color={overWip ? theme.error : theme.muted} bold={overWip}>
               {stats}

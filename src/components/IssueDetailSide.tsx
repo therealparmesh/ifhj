@@ -1,8 +1,11 @@
 import { Box, Text } from "ink";
 import { useState } from "react";
 
+import { useDimensions } from "../hooks";
 import { theme } from "../ui";
+import { ErrorMessage } from "./ErrorMessage";
 import { Hint } from "./Hint";
+import { LoadingLine } from "./LoadingLine";
 import { TextInput } from "./TextInput";
 
 /**
@@ -18,14 +21,28 @@ export function InlineFieldInput({
   placeholder = "issue title",
   onCancel,
   onSubmit,
+  validate,
+  submitLabel = "save",
+  busy = false,
+  error,
+  onChange,
+  busyLabel = "Saving…",
 }: {
   field: string;
   initial: string;
   placeholder?: string;
   onCancel: () => void;
   onSubmit: (value: string) => void;
+  validate?: (value: string) => string | null;
+  submitLabel?: string;
+  busy?: boolean;
+  error?: string | null | undefined;
+  onChange?: (() => void) | undefined;
+  busyLabel?: string;
 }) {
+  const { cols } = useDimensions();
   const [value, setValue] = useState(initial);
+  const [validationError, setValidationError] = useState<string | null>(null);
   return (
     <Box flexDirection="column" padding={2} borderStyle="round" borderColor={theme.accent}>
       <Text color={theme.accent} bold>
@@ -36,14 +53,34 @@ export function InlineFieldInput({
         <TextInput
           value={value}
           placeholder={placeholder}
-          onChange={setValue}
-          onSubmit={onSubmit}
+          width={Math.max(1, cols - 8)}
+          onChange={(next) => {
+            setValue(next);
+            setValidationError(null);
+            onChange?.();
+          }}
+          onSubmit={(next) => {
+            const nextError = validate?.(next) ?? null;
+            setValidationError(nextError);
+            if (!nextError) onSubmit(next);
+          }}
           onCancel={onCancel}
+          isActive={!busy}
         />
       </Box>
+      {validationError || error ? (
+        <ErrorMessage message={validationError ?? error!} width={Math.max(1, cols - 6)} />
+      ) : null}
+      {busy ? <LoadingLine label={busyLabel} /> : null}
       <Box marginTop={1}>
-        <Hint k="⏎" label="save" />
-        <Hint k="esc" label="cancel" />
+        {busy ? (
+          <Text color={theme.muted}>Please wait for the save to finish.</Text>
+        ) : (
+          <>
+            <Hint k="⏎" label={submitLabel} />
+            <Hint k="esc" label="cancel" />
+          </>
+        )}
       </Box>
     </Box>
   );

@@ -71,6 +71,48 @@ test("unchanged-query submission keeps the current cursor", async () => {
   app.unmount();
 });
 
+test("rapid Down and Enter select the new board before a render", async () => {
+  globalThis.fetch = (async () =>
+    boardResponse([board(1, "Alpha"), board(2, "Beta")])) as unknown as typeof fetch;
+  const picked: Board[] = [];
+  const { app, terminal } = mount(
+    { server: "https://rapid.invalid", authHeader: "Basic test" },
+    (value) => picked.push(value),
+  );
+  await waitFor(() => terminal.output().includes("Beta"), "board list");
+  terminal.stdin.write("\u001b[B");
+  terminal.stdin.emit("readable");
+  terminal.stdin.write("\r");
+  terminal.stdin.emit("readable");
+  await waitFor(() => picked.length === 1, "rapid board selection");
+  expect(picked[0]?.name).toBe("Beta");
+  app.unmount();
+});
+
+test("query then Down and Enter before render select the second filtered board", async () => {
+  globalThis.fetch = (async () =>
+    boardResponse([
+      board(1, "Alpha"),
+      board(2, "Beta One"),
+      board(3, "Beta Two"),
+    ])) as unknown as typeof fetch;
+  const picked: Board[] = [];
+  const { app, terminal } = mount(
+    { server: "https://query-rapid.invalid", authHeader: "Basic test" },
+    (value) => picked.push(value),
+  );
+  await waitFor(() => terminal.output().includes("Beta Two"), "board list");
+  terminal.stdin.write("Beta");
+  terminal.stdin.emit("readable");
+  terminal.stdin.write("\u001b[B");
+  terminal.stdin.emit("readable");
+  terminal.stdin.write("\r");
+  terminal.stdin.emit("readable");
+  await waitFor(() => picked.length === 1, "query navigation selection");
+  expect(picked[0]?.name).toBe("Beta Two");
+  app.unmount();
+});
+
 test("config changes hide old boards and errors before the new request settles", async () => {
   const nextBoards = deferred<Response>();
   const recoveredBoards = deferred<Response>();

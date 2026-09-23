@@ -1,8 +1,9 @@
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import { useState } from "react";
 
 import { editorLabel } from "../editor";
 import { useDimensions } from "../hooks";
+import { useInput } from "../input";
 import { clamp, theme } from "../ui";
 
 // Resolved editor name ("Neovim" / "Vim") interpolated into the edit hints so
@@ -10,13 +11,13 @@ import { clamp, theme } from "../ui";
 const ED = editorLabel();
 
 const BOARD_BINDINGS: { keys: string; desc: string }[] = [
-  { keys: "← → h l", desc: "move between columns" },
-  { keys: "↑ ↓ j k", desc: "move within column (spills across lanes in swim view)" },
+  { keys: "Left/Right or h/l", desc: "move between columns" },
+  { keys: "Up/Down or j/k", desc: "move within column (spills across lanes in swim view)" },
   { keys: "g / G", desc: "top / bottom (first / last lane in swim view)" },
-  { keys: "PgUp PgDn", desc: "page within column" },
-  { keys: "⏎", desc: "card action menu (edit / move / transition)" },
+  { keys: "Page Up/Page Down", desc: "page within column" },
+  { keys: "Enter", desc: "card action menu (edit / move / transition)" },
   { keys: "v", desc: "view full issue details" },
-  { keys: "t", desc: "transition to any status (fuzzy)" },
+  { keys: "t", desc: "choose an available workflow transition" },
   { keys: "m", desc: "move card to any column (picker)" },
   { keys: "< >", desc: "move card to prev / next column" },
   { keys: "[ ]", desc: "rerank card up / down within column" },
@@ -25,24 +26,25 @@ const BOARD_BINDINGS: { keys: string; desc: string }[] = [
   { keys: "E", desc: `edit description (${ED})` },
   { keys: "c", desc: "create issue" },
   { keys: "a", desc: "quick add to current column" },
-  { keys: "y / Y", desc: "yank issue key / URL to clipboard" },
+  { keys: "y / Y", desc: "copy issue key / URL to clipboard" },
   { keys: "o / O", desc: "open current card / board in browser" },
-  { keys: "/", desc: "search" },
+  { keys: "/", desc: "highlight by key, title, or assignee" },
   { keys: "n / N", desc: "next / prev match" },
   { keys: "f / F", desc: "filter menu / clear all filters" },
   { keys: "s", desc: "toggle swimlane view (grouped lanes)" },
   { keys: "R", desc: "quick open — recents, or type to search all issues" },
   { keys: "J", desc: "JQL query view" },
   { keys: "r", desc: "refresh" },
+  { keys: "Ctrl+G", desc: "dismiss notifications" },
   { keys: "q", desc: "back to board picker" },
 ];
 
 const DETAIL_BINDINGS: { keys: string; desc: string }[] = [
-  { keys: "tab", desc: "switch pane (body ↔ fields)" },
-  { keys: "↑ ↓ j k", desc: "scroll body / move field cursor" },
+  { keys: "Tab", desc: "switch pane (body ↔ fields)" },
+  { keys: "Up/Down or j/k", desc: "scroll body / move field cursor" },
   { keys: "g / G", desc: "top / bottom" },
-  { keys: "PgUp PgDn", desc: "page scroll" },
-  { keys: "⏎", desc: "edit focused field or open comment" },
+  { keys: "Page Up/Page Down", desc: "page scroll" },
+  { keys: "Enter", desc: "edit focused field or open comment" },
   { keys: "x", desc: "clear optional field" },
   { keys: "[ ]", desc: "prev / next comment" },
   { keys: "c", desc: `add comment (${ED})` },
@@ -52,10 +54,11 @@ const DETAIL_BINDINGS: { keys: string; desc: string }[] = [
   { keys: "t", desc: "transition to status" },
   { keys: "m", desc: "move to column" },
   { keys: "w", desc: "toggle watch / unwatch" },
-  { keys: "y / Y", desc: "yank issue key / URL" },
+  { keys: "y / Y", desc: "copy issue key / URL" },
   { keys: "o", desc: "open in browser" },
   { keys: "r", desc: "refresh" },
-  { keys: "esc / q", desc: "close" },
+  { keys: "Ctrl+G", desc: "dismiss notifications" },
+  { keys: "Esc / q", desc: "close" },
 ];
 
 const BINDINGS = [
@@ -102,7 +105,7 @@ export function HelpModal({ onClose }: { onClose: () => void }) {
     >
       <Box justifyContent="space-between">
         <Text color={theme.accent} bold wrap="truncate">
-          help · {currentSection}
+          Help · {currentSection}
         </Text>
         <Text color={theme.muted}>
           {offset + 1}-{Math.min(offset + windowHeight, displayRows.length)}/{displayRows.length}
@@ -127,10 +130,10 @@ export function HelpModal({ onClose }: { onClose: () => void }) {
       </Box>
       <Box flexDirection="column">
         <Text color={theme.muted} wrap="truncate">
-          ↑↓/jk nav · PgUp/PgDn page
+          Arrow keys/j/k navigate · Page Up/Page Down page
         </Text>
         <Text color={theme.muted} wrap="truncate">
-          Home/End jump · esc/q/?/⏎ close
+          Home/End jump · Esc/q/?/Enter close
         </Text>
       </Box>
     </Box>
