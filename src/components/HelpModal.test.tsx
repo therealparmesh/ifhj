@@ -84,8 +84,16 @@ test("windows every binding with page, endpoint, and resize navigation", async (
   terminal.clearOutput();
   await sendInput(app, terminal.stdin, "\x1b[6~");
   expectBounded(terminal.output(), 80, 24);
+  expect(frame(terminal.output())).toContain("Timeline Esc");
+  expect(frame(terminal.output())).toContain("Timeline Left/Right or h/l");
+
+  terminal.clearOutput();
+  await sendInput(app, terminal.stdin, "\x1b[6~");
+  expectBounded(terminal.output(), 80, 24);
   expect(frame(terminal.output())).toContain("detail view");
 
+  terminal.clearOutput();
+  await sendInput(app, terminal.stdin, "\x1b[5~");
   terminal.clearOutput();
   await sendInput(app, terminal.stdin, "\x1b[5~");
   expectBounded(terminal.output(), 80, 24);
@@ -98,7 +106,7 @@ test("windows every binding with page, endpoint, and resize navigation", async (
   await nextTurn();
   await app.waitUntilRenderFlush();
   expectBounded(terminal.output(), 80, 40);
-  expect(frame(terminal.output())).toContain("detail view");
+  expect(frame(terminal.output())).toContain("Timeline Left/Right or h/l");
 
   terminal.clearOutput();
   await sendInput(app, terminal.stdin, "\x1b[F");
@@ -120,7 +128,8 @@ test("windows every binding with page, endpoint, and resize navigation", async (
   terminal.clearOutput();
   await sendInput(app, terminal.stdin, "\x1b[H");
   expectBounded(terminal.output(), 40, 24);
-  expect(frame(terminal.output())).toContain("move between");
+  expect(frame(terminal.output())).toContain("move");
+  expect(frame(terminal.output())).toContain("between");
   expect(frame(terminal.output())).toContain("columns");
   expect(frame(terminal.output())).toContain("swim");
 

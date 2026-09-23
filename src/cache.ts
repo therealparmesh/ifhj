@@ -7,7 +7,7 @@ import type { JiraConfig } from "./config";
 import type { BoardConfig, Issue } from "./jira";
 
 type CacheIdentity = {
-  version: 1;
+  version: 1 | 2;
   server: string;
   authHash: string;
   boardId: number;
@@ -78,9 +78,17 @@ function isIssue(value: unknown): value is Issue {
   if (typeof value["id"] !== "number" || !Number.isFinite(value["id"])) return false;
   if (!Array.isArray(value["labels"]) || value["labels"].some((label) => typeof label !== "string"))
     return false;
-  const optionalStrings = ["assignee", "priority", "epicKey", "sprintName"];
+  const optionalStrings = ["assignee", "priority", "epicKey", "sprintName", "startDate", "dueDate"];
   if (optionalStrings.some((key) => value[key] !== undefined && typeof value[key] !== "string"))
     return false;
+  if (
+    value["startDateState"] !== undefined &&
+    value["startDateState"] !== "unavailable" &&
+    value["startDateState"] !== "ambiguous" &&
+    value["startDateState"] !== "invalid"
+  )
+    return false;
+  if (value["dueDateState"] !== undefined && value["dueDateState"] !== "invalid") return false;
   return value["storyPoints"] === undefined || typeof value["storyPoints"] === "number";
 }
 
@@ -90,13 +98,18 @@ function isRecentIssue(value: unknown): value is RecentIssue {
   );
 }
 
-function identity(cfg: JiraConfig, boardId: number): CacheIdentity {
-  return { version: 1, server: cfg.server, authHash: shortHash(cfg.authHeader), boardId };
+function identity(cfg: JiraConfig, boardId: number, version: 1 | 2): CacheIdentity {
+  return { version, server: cfg.server, authHash: shortHash(cfg.authHeader), boardId };
 }
 
-function hasIdentity(data: Record<string, unknown>, cfg: JiraConfig, boardId: number): boolean {
+function hasIdentity(
+  data: Record<string, unknown>,
+  cfg: JiraConfig,
+  boardId: number,
+  version: 1 | 2,
+): boolean {
   return (
-    data["version"] === 1 &&
+    data["version"] === version &&
     data["server"] === cfg.server &&
     data["authHash"] === shortHash(cfg.authHeader) &&
     data["boardId"] === boardId
@@ -152,7 +165,7 @@ export async function readBoardCache(
   const data = await readJson(cachePath(cfg, boardId));
   if (
     !isRecord(data) ||
-    !hasIdentity(data, cfg, boardId) ||
+    !hasIdentity(data, cfg, boardId, 2) ||
     !isBoardConfig(data["config"]) ||
     !Array.isArray(data["issues"]) ||
     !data["issues"].every(isIssue)
@@ -167,14 +180,14 @@ export async function writeBoardCache(
   config: BoardConfig,
   issues: Issue[],
 ): Promise<void> {
-  return writeJson(cachePath(cfg, boardId), { ...identity(cfg, boardId), config, issues });
+  return writeJson(cachePath(cfg, boardId), { ...identity(cfg, boardId, 2), config, issues });
 }
 
 export async function readRecents(cfg: JiraConfig, boardId: number): Promise<RecentIssue[]> {
   const data = await readJson(cachePath(cfg, boardId, true));
   if (
     !isRecord(data) ||
-    !hasIdentity(data, cfg, boardId) ||
+    !hasIdentity(data, cfg, boardId, 1) ||
     !Array.isArray(data["recents"]) ||
     !data["recents"].every(isRecentIssue)
   )
@@ -187,5 +200,5 @@ export async function writeRecents(
   boardId: number,
   recents: RecentIssue[],
 ): Promise<void> {
-  return writeJson(cachePath(cfg, boardId, true), { ...identity(cfg, boardId), recents });
+  return writeJson(cachePath(cfg, boardId, true), { ...identity(cfg, boardId, 1), recents });
 }

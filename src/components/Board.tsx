@@ -57,6 +57,17 @@ import {
   reconcileCursor,
   snapToCard,
 } from "../swimlanes";
+import {
+  type TimelineCalendar,
+  type TimelineZoom,
+  buildTimelineRows,
+  focusTimelineRow,
+  initialTimelineDay,
+  localToday,
+  panTimeline,
+  timelineLayout,
+  zoomTimeline,
+} from "../timeline";
 import { clamp, copyToClipboard, errorMessage, openInBrowser, stickyScroll, theme } from "../ui";
 import { BoardHeader } from "./BoardHeader";
 import { createBoardUsersLoader, waitForMentionWarningDisplay } from "./boardUsers";
@@ -78,6 +89,7 @@ import { QuickAddModal } from "./QuickAddModal";
 import { QuickOpen } from "./QuickOpen";
 import { SwimlaneGrid } from "./SwimlaneGrid";
 import { SwimlaneHeader } from "./SwimlaneHeader";
+import { Timeline } from "./Timeline";
 import { TitleEditModal } from "./TitleEditModal";
 import { ToastStack, toastRowCount, useToasts } from "./Toasts";
 import { TransitionScreenModal } from "./TransitionScreenModal";
@@ -106,6 +118,7 @@ type TransitionPickerReturn = {
   issueKey: string;
   projectKey: string;
   returnTo: DetailReturn;
+  focusGeneration: number;
   drafts?: Record<string, Record<string, EditableFieldValue>> | undefined;
 };
 type Modal =
@@ -123,6 +136,7 @@ type Modal =
       targetColIdx?: number;
       returnTo: DetailReturn | TransitionPickerReturn | MovePickerReturn;
       initialValues?: Record<string, EditableFieldValue> | undefined;
+      focusGeneration?: number | undefined;
       busy?: boolean | undefined;
       error?: string | undefined;
     }
@@ -311,12 +325,23 @@ function findMatches(columns: LaneColumn[], query: string): CellRef[] {
   return matches;
 }
 
+function findTimelineMatches(rows: ReturnType<typeof buildTimelineRows>, query: string): string[] {
+  const normalized = query.trim().toLowerCase();
+  return normalized
+    ? rows.filter((row) => issueMatches(row.issue, normalized)).map((row) => row.issue.key)
+    : [];
+}
+
 export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   const { cols: termCols, rows: termRows } = useDimensions();
 
   // Server state
   const [conf, setConf] = useState<BoardConfig | null>(null);
   const [issues, setIssues] = useState<Issue[]>([]);
+  const [boardSource, setBoardSource] = useState<"none" | "cache" | "fresh">("none");
+  const [boardRefreshStatus, setBoardRefreshStatus] = useState<
+    "idle" | "loading" | "failed" | "ready"
+  >("idle");
   const [swimlanes, setSwimlanes] = useState<BoardSwimlanes | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -326,6 +351,9 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   const [activeCol, setActiveCol] = useState(0);
   const [activeRows, setActiveRows] = useState<number[]>([]);
   const [selectedIssueKey, setSelectedIssueKey] = useState<string | null>(null);
+  const selectedIssueKeyRef = useRef(selectedIssueKey);
+  const selectionGeneration = useRef(0);
+  selectedIssueKeyRef.current = selectedIssueKey;
   const activeColRef = useRef(activeCol);
   const activeRowsRef = useRef(activeRows);
   activeColRef.current = activeCol;
@@ -342,6 +370,42 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   swimViewRef.current = swimView;
   swimCursorRef.current = swimCursor;
   const swimScrollRef = useRef(0);
+
+  const [timelineView, setTimelineView] = useState(false);
+  const timelineViewRef = useRef(timelineView);
+  timelineViewRef.current = timelineView;
+  const [timelineZoom, setTimelineZoom] = useState<TimelineZoom>("weeks");
+  const timelineZoomRef = useRef(timelineZoom);
+  timelineZoomRef.current = timelineZoom;
+  const [timelineCalendar, setTimelineCalendar] = useState<TimelineCalendar>(() => ({
+    center: localToday(new Date()),
+    preferredMonthDay: null,
+  }));
+  const timelineCalendarRef = useRef(timelineCalendar);
+  timelineCalendarRef.current = timelineCalendar;
+  const timelineInitialized = useRef(false);
+  const timelineInitSource = useRef<"none" | "cache" | "fresh">("none");
+  const timelineTouched = useRef(false);
+  const timelineScrollRef = useRef(0);
+  const timelineIndexRef = useRef(0);
+  const [today, setToday] = useState(() => localToday(new Date()));
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>;
+    const schedule = () => {
+      const now = new Date();
+      const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+      timer = setTimeout(
+        () => {
+          setToday(localToday(new Date()));
+          schedule();
+        },
+        Math.max(1_000, next.getTime() - now.getTime() + 1_000),
+      );
+    };
+    schedule();
+    return () => clearTimeout(timer);
+  }, []);
 
   // UI state
   const { toasts, flash, dismiss } = useToasts();
@@ -377,7 +441,12 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   // First load is fatal; reload failures just flash a toast.
   const hasLoadedOnce = useRef(false);
   // After a transition, follow the moved card to its new column on reload.
-  const pendingFocus = useRef<{ key: string; afterVersion: number } | null>(null);
+  const pendingFocus = useRef<{
+    key: string;
+    afterVersion: number;
+    generation?: number;
+    force?: boolean;
+  } | null>(null);
   const boardDataVersion = useRef(0);
   const [recents, setRecents] = useState<RecentIssue[]>([]);
   const recentsTouched = useRef(false);
@@ -494,6 +563,19 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     activeRowsRef.current = arr;
     setActiveRows(arr);
   }, []);
+  const setSelectedKey = useCallback((key: string | null) => {
+    selectedIssueKeyRef.current = key;
+    setSelectedIssueKey(key);
+  }, []);
+  const markSelectionIntent = useCallback(() => ++selectionGeneration.current, []);
+  const queuePendingFocus = useCallback(
+    (request: { key: string; afterVersion: number; generation: number; force?: boolean }) => {
+      if (request.generation !== selectionGeneration.current) return;
+      if (pendingFocus.current?.force && !request.force) return;
+      pendingFocus.current = request;
+    },
+    [],
+  );
   const showModal = useCallback((next: Modal) => {
     modalLaunchSeq.current++;
     setModal(next);
@@ -527,6 +609,15 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       return pm && pm.to !== i.statusId ? { ...i, statusId: pm.to } : i;
     });
   }, [filteredIssues, pendingMove]);
+  const timelineRows = useMemo(() => buildTimelineRows(displayIssues), [displayIssues]);
+  const setTimelineSelection = useCallback(
+    (index: number) => {
+      const next = clamp(index, 0, Math.max(0, timelineRows.length - 1));
+      timelineIndexRef.current = next;
+      setSelectedKey(timelineRows[next]?.issue.key ?? null);
+    },
+    [timelineRows, setSelectedKey],
+  );
   const columns = useMemo(
     () => (conf ? buildColumns(conf.columns, displayIssues) : []),
     [conf, displayIssues],
@@ -573,10 +664,11 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     };
   }, [issues]);
 
-  const applyBoardData = useCallback((c: BoardConfig, is: Issue[]) => {
+  const applyBoardData = useCallback((c: BoardConfig, is: Issue[], source: "cache" | "fresh") => {
     boardDataVersion.current++;
     setConf(c);
     setIssues(is);
+    setBoardSource(source);
     const rows = c.columns.map((_, i) => activeRowsRef.current[i] ?? 0);
     activeRowsRef.current = rows;
     setActiveRows(rows);
@@ -618,11 +710,12 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     const seq = ++loadSeq.current;
     const isCurrent = () => activeRef.current && seq === loadSeq.current;
     setLoadError(null);
+    setBoardRefreshStatus("loading");
     if (!hasLoadedOnce.current) {
       const cached = await readBoardCache(cfg, board.id);
       if (!isCurrent()) return;
       if (cached) {
-        applyBoardData(cached.config, cached.issues);
+        applyBoardData(cached.config, cached.issues, "cache");
         hasLoadedOnce.current = true;
       }
     }
@@ -636,7 +729,8 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           if (!isCurrent()) return;
           const is = await getBoardIssues(cfg, board.id, c.estimationFieldId);
           if (!isCurrent()) return;
-          applyBoardData(c, is);
+          applyBoardData(c, is, "fresh");
+          setBoardRefreshStatus("ready");
           hasLoadedOnce.current = true;
           void writeBoardCache(cfg, board.id, c, is);
           // Swimlane layout comes from a separate (internal) endpoint and needs
@@ -651,6 +745,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     } catch (e) {
       if (!isCurrent()) return;
       const msg = errorMessage(e);
+      setBoardRefreshStatus("failed");
       if (hasLoadedOnce.current) flash(msg, "err");
       else setLoadError(msg);
     }
@@ -732,11 +827,17 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     const q = liveQuery.trim().toLowerCase();
     return new Set(filteredIssues.filter((i) => issueMatches(i, q)).map((i) => i.key));
   }, [filteredIssues, liveQuery]);
+  const timelineMatchKeys = useMemo(
+    () => findTimelineMatches(timelineRows, liveQuery),
+    [timelineRows, liveQuery],
+  );
+  const timelineMatchSet = useMemo(() => new Set(timelineMatchKeys), [timelineMatchKeys]);
 
   // Without this clamp the footer reads "4/2" after matches shrink.
   useEffect(() => {
-    if (matchIdx >= matches.length) setMatchIdx(0);
-  }, [matches, matchIdx]);
+    const count = timelineView ? timelineMatchKeys.length : matches.length;
+    if (matchIdx >= count) setMatchIdx(0);
+  }, [matches, timelineMatchKeys.length, timelineView, matchIdx]);
 
   // Move whichever cursor is live to a matched flat cell. In swim view we
   // resolve the matched issue's key to its lane position (matches are indexed
@@ -749,19 +850,20 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         const sc = key ? findCursor(lanes, key) : null;
         if (sc) {
           setSwimPosition(sc);
-          setSelectedIssueKey(key ?? null);
+          setSelectedKey(key ?? null);
         }
         return;
       }
       setActiveColumn(m.col);
       setActiveRowAt(m.col, m.row);
-      setSelectedIssueKey(columns[m.col]?.issues[m.row]?.key ?? null);
+      setSelectedKey(columns[m.col]?.issues[m.row]?.key ?? null);
     },
-    [columns, lanes, setActiveColumn, setActiveRowAt, setSwimPosition],
+    [columns, lanes, setActiveColumn, setActiveRowAt, setSwimPosition, setSelectedKey],
   );
 
   const commitQuery = useCallback(
     (q: string) => {
+      const submittedTimelineMatches = findTimelineMatches(timelineRows, q);
       const submittedMatches = findMatches(columns, q);
       queryRef.current = q;
       setQuery(q);
@@ -769,19 +871,63 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       setMatchIdx(0);
       if (!q.trim()) return;
       const first = submittedMatches[0];
-      if (first) focusMatch(first);
-      else flash("No matches.", "info");
+      if (timelineViewRef.current && submittedTimelineMatches[0]) {
+        markSelectionIntent();
+        setTimelineSelection(
+          timelineRows.findIndex((row) => row.issue.key === submittedTimelineMatches[0]),
+        );
+      } else if (first) {
+        markSelectionIntent();
+        focusMatch(first);
+      } else flash("No matches.", "info");
     },
-    [columns, flash, focusMatch],
+    [columns, timelineRows, flash, focusMatch, setTimelineSelection, markSelectionIntent],
   );
 
   const jumpToMatch = useCallback(
     (delta: number) => {
+      if (timelineViewRef.current) {
+        const normalized = queryRef.current.trim();
+        const currentMatches = findTimelineMatches(timelineRows, normalized);
+        if (currentMatches.length === 0) {
+          flash(normalized ? "No matches." : "No active highlight.", "info");
+          return;
+        }
+        markSelectionIntent();
+        const current = currentMatches.indexOf(selectedIssueKeyRef.current ?? "");
+        let next: number;
+        if (current >= 0) {
+          next =
+            (((current + delta) % currentMatches.length) + currentMatches.length) %
+            currentMatches.length;
+        } else {
+          const selectedRow = timelineRows.findIndex(
+            (row) => row.issue.key === selectedIssueKeyRef.current,
+          );
+          const directional = currentMatches
+            .map((key, index) => ({
+              index,
+              row: timelineRows.findIndex((item) => item.issue.key === key),
+            }))
+            .filter((match) => (delta > 0 ? match.row > selectedRow : match.row < selectedRow));
+          next =
+            delta > 0
+              ? (directional[0]?.index ?? 0)
+              : (directional.at(-1)?.index ?? currentMatches.length - 1);
+        }
+        matchIdxRef.current = next;
+        setMatchIdx(next);
+        setTimelineSelection(
+          timelineRows.findIndex((row) => row.issue.key === currentMatches[next]),
+        );
+        return;
+      }
       const currentMatches = findMatches(columns, queryRef.current);
       if (currentMatches.length === 0) {
         flash(queryRef.current.trim() ? "No matches." : "No active highlight.", "info");
         return;
       }
+      markSelectionIntent();
       const next =
         (((matchIdxRef.current + delta) % currentMatches.length) + currentMatches.length) %
         currentMatches.length;
@@ -789,7 +935,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       setMatchIdx(next);
       focusMatch(currentMatches[next]!);
     },
-    [columns, flash, focusMatch],
+    [columns, timelineRows, flash, focusMatch, setTimelineSelection, markSelectionIntent],
   );
 
   // Layout math — columns beyond `maxColumns` require ←/→ paging. Header +
@@ -804,8 +950,9 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     hasSwimlanes,
     swimActive: swimView,
     query,
-    matches: matches.length,
+    matches: timelineView ? timelineMatchKeys.length : matches.length,
     matchIdx,
+    timelineActive: timelineView,
   });
   const toastRows = toastRowCount(toasts, termCols, true);
   const columnHeight = Math.max(9, termRows - 3 - footerRows - toastRows);
@@ -818,6 +965,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   // swim view pages by this, not `cardsVisible` (which is a flat rich-card
   // count and would under-page badly).
   const swimVisibleRows = Math.max(3, columnHeight - 2);
+  const timelineVisibleRows = Math.max(1, columnHeight - 7);
 
   const gap = 1;
   const arrowChannel = 2;
@@ -881,6 +1029,9 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   };
 
   const currentIssue: Issue | null = useMemo(() => {
+    if (timelineView) {
+      return timelineRows.find((row) => row.issue.key === selectedIssueKey)?.issue ?? null;
+    }
     if (swimView) {
       const lane = lanes[swimCursor.lane];
       return lane?.columns[swimCursor.col]?.issues[swimCursor.row] ?? null;
@@ -888,23 +1039,40 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     const col = columns[activeCol];
     if (!col) return null;
     return col.issues[activeRows[activeCol] ?? 0] ?? null;
-  }, [swimView, lanes, swimCursor, columns, activeCol, activeRows]);
+  }, [
+    timelineView,
+    timelineRows,
+    selectedIssueKey,
+    swimView,
+    lanes,
+    swimCursor,
+    columns,
+    activeCol,
+    activeRows,
+  ]);
   const currentIssueNow = useCallback((): Issue | null => {
+    if (timelineViewRef.current) {
+      return (
+        timelineRows.find((row) => row.issue.key === selectedIssueKeyRef.current)?.issue ?? null
+      );
+    }
     if (swimViewRef.current) {
       const cursor = swimCursorRef.current;
       return lanes[cursor.lane]?.columns[cursor.col]?.issues[cursor.row] ?? null;
     }
     const col = activeColRef.current;
     return columns[col]?.issues[activeRowsRef.current[col] ?? 0] ?? null;
-  }, [columns, lanes]);
+  }, [columns, lanes, timelineRows]);
 
   useLayoutEffect(() => {
     if (displayIssues.length === 0) {
-      setSelectedIssueKey(null);
+      setSelectedKey(null);
       return;
     }
     if (selectedIssueKey) {
-      if (swimViewRef.current) {
+      if (timelineViewRef.current) {
+        if (timelineRows.some((row) => row.issue.key === selectedIssueKey)) return;
+      } else if (swimViewRef.current) {
         const cursor = findCursor(lanes, selectedIssueKey);
         if (cursor) {
           setSwimPosition(cursor);
@@ -921,7 +1089,8 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         }
       }
     }
-    if (currentIssue) setSelectedIssueKey(currentIssue.key);
+    if (currentIssue) setSelectedKey(currentIssue.key);
+    else if (timelineViewRef.current) setTimelineSelection(timelineIndexRef.current);
   }, [
     columns,
     lanes,
@@ -929,9 +1098,12 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     swimView,
     selectedIssueKey,
     currentIssue,
+    timelineRows,
     setActiveColumn,
     setActiveRowAt,
     setSwimPosition,
+    setSelectedKey,
+    setTimelineSelection,
   ]);
 
   const projectForIssue = useCallback(
@@ -961,9 +1133,11 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         projectKey?: string;
         returnTo?: DetailReturn | TransitionPickerReturn | MovePickerReturn;
         initialValues?: Record<string, EditableFieldValue>;
+        focusGeneration?: number;
         onError?: (message: string) => void;
       } = {},
     ): Promise<boolean> => {
+      const focusGeneration = opts.focusGeneration ?? selectionGeneration.current;
       if (transition.requiredFields.length > 0 && !opts.fields) {
         showModal({
           kind: "transition-screen",
@@ -972,13 +1146,14 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           projectKey: opts.projectKey || projectForIssue(issueKey),
           returnTo: opts.returnTo ?? { kind: "board" },
           initialValues: opts.initialValues,
+          focusGeneration,
           ...(opts.targetColIdx !== undefined ? { targetColIdx: opts.targetColIdx } : {}),
         });
         return false;
       }
       // Optimistic overlay: the card jumps to the target status immediately
-      // (rendered in "pending" style via pendingKeys) and the cursor follows
-      // it there, so the move feels instant. `from` is the card's current
+      // (rendered in "pending" style via pendingKeys). The cursor follows only
+      // if no later navigation superseded this focus intent. `from` is the card's current
       // status — kept so reconcile can tell the write landed even if a workflow
       // post-function redirects the card to a status other than the predicted
       // target. Overlay only when the move is a real, on-board reposition:
@@ -1004,14 +1179,20 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       } else {
         markBusy(issueKey, true);
       }
-      if (opts.targetColIdx !== undefined) {
+      // A lookup can finish after the user selects another issue. Keep the
+      // write target, but do not move the visual cursor in that case.
+      if (opts.targetColIdx !== undefined && focusGeneration === selectionGeneration.current) {
         setActiveColumn(opts.targetColIdx);
         setSwimPosition({ ...swimCursorRef.current, col: opts.targetColIdx });
-        setSelectedIssueKey(issueKey);
+        setSelectedKey(issueKey);
       }
       try {
         await transitionIssue(cfg, issueKey, transition.id, opts.fields);
-        pendingFocus.current = { key: issueKey, afterVersion: boardDataVersion.current + 1 };
+        queuePendingFocus({
+          key: issueKey,
+          afterVersion: boardDataVersion.current + 1,
+          generation: focusGeneration,
+        });
         flash(`${issueKey} → ${transition.name}`, "ok");
         touchRecent(issueKey);
         await coalescedReload();
@@ -1019,7 +1200,11 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       } catch (e) {
         if (optimistic) {
           clearPending(issueKey);
-          if (sourceColIdx !== undefined && sourceColIdx >= 0) {
+          if (
+            focusGeneration === selectionGeneration.current &&
+            sourceColIdx !== undefined &&
+            sourceColIdx >= 0
+          ) {
             setActiveColumn(sourceColIdx);
             setSwimPosition({ ...swimCursorRef.current, col: sourceColIdx });
           }
@@ -1047,6 +1232,8 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       showModal,
       setActiveColumn,
       setSwimPosition,
+      setSelectedKey,
+      queuePendingFocus,
     ],
   );
 
@@ -1069,6 +1256,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       // makes fast multi-card moves work without stacking transitions on one
       // card or racing its focus snap.
       if (rejectPending(issue)) return;
+      const focusGeneration = selectionGeneration.current;
       // markBusy covers the transition-lookup phase, before the optimistic
       // overlay exists; commitTransition's startPending takes over as the
       // pending signal the moment we POST.
@@ -1095,6 +1283,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           targetColIdx,
           projectKey: issue.projectKey || projectForIssue(issue.key),
           returnTo,
+          focusGeneration,
           ...(returnTo.kind === "move-picker" && returnTo.drafts?.[chosen.id]
             ? { initialValues: returnTo.drafts[chosen.id] }
             : {}),
@@ -1117,16 +1306,25 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   );
 
   /**
-   * After a reload, snap the cursor to wherever the tracked card ended up —
-   * activeRows for the flat board, and the {lane,col,row} cursor for the
-   * swimlane view (a transition can move a card between lanes too). Only
-   * clear the marker once we actually find the card — pre-reload column
-   * changes (e.g. toggling a filter mid-flight) shouldn't consume it.
+   * Follow a completed mutation only if no later user navigation superseded
+   * that intent. Timeline consumes confirmed requests even when the issue left
+   * its rows, so a hidden column cannot retain stale focus. Flat and swimlane
+   * views keep their existing find-and-follow behavior.
    */
   useEffect(() => {
     const request = pendingFocus.current;
     if (!request || boardDataVersion.current < request.afterVersion) return;
+    if (request.generation !== selectionGeneration.current) {
+      pendingFocus.current = null;
+      return;
+    }
     const { key } = request;
+    if (timelineView) {
+      const index = timelineRows.findIndex((row) => row.issue.key === key);
+      if (index >= 0) setTimelineSelection(index);
+      pendingFocus.current = null;
+      return;
+    }
     if (swimView) {
       const sc = findCursor(lanes, key);
       if (sc) {
@@ -1141,12 +1339,23 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       if (ri !== -1) {
         setActiveColumn(ci);
         setActiveRowAt(ci, ri);
-        setSelectedIssueKey(key);
+        setSelectedKey(key);
         pendingFocus.current = null;
         return;
       }
     }
-  }, [columns, lanes, swimView, setActiveColumn, setActiveRowAt, setSwimPosition]);
+  }, [
+    columns,
+    lanes,
+    timelineRows,
+    timelineView,
+    swimView,
+    setActiveColumn,
+    setActiveRowAt,
+    setSwimPosition,
+    setSelectedKey,
+    setTimelineSelection,
+  ]);
 
   const doTransition = useCallback(
     async (direction: 1 | -1) => {
@@ -1303,6 +1512,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         return;
       }
       const launchSeq = ++modalLaunchSeq.current;
+      const focusGeneration = selectionGeneration.current;
       try {
         const trs = await track(getTransitions(cfg, issue.key));
         if (launchSeq !== modalLaunchSeq.current) return;
@@ -1316,6 +1526,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           issueKey: issue.key,
           projectKey: issue.projectKey || projectForIssue(issue.key),
           returnTo: { kind: "board" },
+          focusGeneration,
         });
       } catch (e) {
         if (launchSeq !== modalLaunchSeq.current) return;
@@ -1348,6 +1559,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       }
       const neighbor = col.issues[targetRow]!;
       if (rejectPending(issue)) return;
+      const focusGeneration = selectionGeneration.current;
       markBusy(issue.key, true);
       try {
         await rankIssue(
@@ -1355,7 +1567,11 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           issue.key,
           direction === -1 ? { before: neighbor.key } : { after: neighbor.key },
         );
-        pendingFocus.current = { key: issue.key, afterVersion: boardDataVersion.current + 1 };
+        queuePendingFocus({
+          key: issue.key,
+          afterVersion: boardDataVersion.current + 1,
+          generation: focusGeneration,
+        });
         flash(`${issue.key} reranked ${direction === -1 ? "up" : "down"}`, "ok");
         touchRecent(issue.key);
         await coalescedReload();
@@ -1365,7 +1581,17 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         markBusy(issue.key, false);
       }
     },
-    [lanes, columns, cfg, flash, coalescedReload, markBusy, rejectPending, touchRecent],
+    [
+      lanes,
+      columns,
+      cfg,
+      flash,
+      coalescedReload,
+      markBusy,
+      rejectPending,
+      touchRecent,
+      queuePendingFocus,
+    ],
   );
 
   const openDetailForKey = useCallback(
@@ -1553,7 +1779,13 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
 
       setActiveColumn(colIdx);
       setSwimPosition({ ...swimCursorRef.current, col: colIdx });
-      pendingFocus.current = { key: created.key, afterVersion: boardDataVersion.current + 1 };
+      const creationGeneration = markSelectionIntent();
+      queuePendingFocus({
+        key: created.key,
+        afterVersion: boardDataVersion.current + 1,
+        generation: creationGeneration,
+        force: true,
+      });
       touchRecent(created.key, trimmed);
 
       let landed = false;
@@ -1604,7 +1836,19 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       );
       await load();
     },
-    [cfg, conf, flash, load, closeModal, touchRecent, showModal, setActiveColumn, setSwimPosition],
+    [
+      cfg,
+      conf,
+      flash,
+      load,
+      closeModal,
+      touchRecent,
+      showModal,
+      setActiveColumn,
+      setSwimPosition,
+      markSelectionIntent,
+      queuePendingFocus,
+    ],
   );
 
   // Nudge the cursor within the active column / across columns.
@@ -1613,18 +1857,20 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       const colIndex = activeColRef.current;
       const col = columns[colIndex];
       if (!col) return;
+      markSelectionIntent();
       const row = clamp(
         (activeRowsRef.current[colIndex] ?? 0) + delta,
         0,
         Math.max(0, col.issues.length - 1),
       );
       setActiveRowAt(colIndex, row);
-      setSelectedIssueKey(col.issues[row]?.key ?? null);
+      setSelectedKey(col.issues[row]?.key ?? null);
     },
-    [columns, setActiveRowAt],
+    [columns, setActiveRowAt, setSelectedKey, markSelectionIntent],
   );
   const nudgeCol = useCallback(
     (delta: number) => {
+      markSelectionIntent();
       const col = clamp(activeColRef.current + delta, 0, Math.max(0, columns.length - 1));
       const row = clamp(
         activeRowsRef.current[col] ?? 0,
@@ -1632,9 +1878,9 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         Math.max(0, (columns[col]?.issues.length ?? 0) - 1),
       );
       setActiveColumn(col);
-      setSelectedIssueKey(columns[col]?.issues[row]?.key ?? null);
+      setSelectedKey(columns[col]?.issues[row]?.key ?? null);
     },
-    [columns, setActiveColumn],
+    [columns, setActiveColumn, setSelectedKey, markSelectionIntent],
   );
 
   // Swimlane cursor movement — delegates the spill-across-lanes logic to the
@@ -1642,12 +1888,119 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
   // moves across columns, clamping the row into the new column.
   const swimMove = useCallback(
     (dRow: number, dCol: number) => {
+      markSelectionIntent();
       const cursor = moveCursor(lanes, swimCursorRef.current, dRow, dCol);
       setSwimPosition(cursor);
-      setSelectedIssueKey(lanes[cursor.lane]?.columns[cursor.col]?.issues[cursor.row]?.key ?? null);
+      setSelectedKey(lanes[cursor.lane]?.columns[cursor.col]?.issues[cursor.row]?.key ?? null);
     },
-    [lanes, setSwimPosition],
+    [lanes, setSwimPosition, setSelectedKey, markSelectionIntent],
   );
+
+  const timelineMove = useCallback(
+    (delta: number) => {
+      if (timelineRows.length === 0) return;
+      markSelectionIntent();
+      const current = timelineRows.findIndex(
+        (row) => row.issue.key === selectedIssueKeyRef.current,
+      );
+      const next = clamp((current < 0 ? 0 : current) + delta, 0, timelineRows.length - 1);
+      setTimelineSelection(next);
+    },
+    [timelineRows, setTimelineSelection, markSelectionIntent],
+  );
+  const setTimelineCalendarValue = useCallback((calendar: TimelineCalendar) => {
+    timelineCalendarRef.current = calendar;
+    setTimelineCalendar(calendar);
+  }, []);
+  const setTimelineDay = useCallback(
+    (day: number) => {
+      setTimelineCalendarValue({ center: day, preferredMonthDay: null });
+    },
+    [setTimelineCalendarValue],
+  );
+  const changeTimelineZoom = useCallback(
+    (direction: -1 | 1) => {
+      const levels: TimelineZoom[] = ["days", "weeks", "months"];
+      const current = levels.indexOf(timelineZoomRef.current);
+      const next = levels[clamp(current + direction, 0, levels.length - 1)]!;
+      setTimelineCalendarValue(
+        zoomTimeline(
+          timelineCalendarRef.current,
+          timelineZoomRef.current,
+          Math.max(1, termCols - 2),
+        ),
+      );
+      timelineZoomRef.current = next;
+      setTimelineZoom(next);
+    },
+    [termCols, setTimelineCalendarValue],
+  );
+
+  useEffect(() => {
+    if (!timelineView || timelineRows.length === 0) return;
+    if (!timelineInitialized.current) {
+      if (!timelineTouched.current)
+        setTimelineDay(initialTimelineDay(timelineRows, selectedIssueKeyRef.current, today));
+      timelineInitialized.current = true;
+      timelineInitSource.current = boardSource;
+      return;
+    }
+    if (boardSource === "fresh" && timelineInitSource.current === "cache") {
+      if (!timelineTouched.current)
+        setTimelineDay(initialTimelineDay(timelineRows, selectedIssueKeyRef.current, today));
+      timelineInitSource.current = "fresh";
+    }
+  }, [timelineView, timelineRows, today, boardSource, setTimelineDay]);
+
+  const toggleTimelineView = useCallback(() => {
+    const selectedBefore = currentIssueNow();
+    markSelectionIntent();
+    const next = !timelineViewRef.current;
+    if (!next) {
+      const selected = selectedIssueKeyRef.current;
+      if (selected && swimViewRef.current) {
+        const cursor = findCursor(lanes, selected);
+        if (cursor) setSwimPosition(cursor);
+      } else if (selected) {
+        for (let col = 0; col < columns.length; col++) {
+          const row = columns[col]!.issues.findIndex((issue) => issue.key === selected);
+          if (row >= 0) {
+            setActiveColumn(col);
+            setActiveRowAt(col, row);
+            break;
+          }
+        }
+      }
+    }
+    timelineViewRef.current = next;
+    setTimelineView(next);
+    if (next) {
+      const selectedIndex = selectedBefore
+        ? timelineRows.findIndex((row) => row.issue.key === selectedBefore.key)
+        : -1;
+      setTimelineSelection(selectedIndex >= 0 ? selectedIndex : timelineIndexRef.current);
+      if (!timelineInitialized.current && timelineRows.length > 0) {
+        if (!timelineTouched.current)
+          setTimelineDay(initialTimelineDay(timelineRows, selectedBefore?.key ?? null, today));
+        timelineInitialized.current = true;
+        timelineInitSource.current = boardSource;
+        timelineScrollRef.current = 0;
+      }
+    }
+  }, [
+    currentIssueNow,
+    markSelectionIntent,
+    lanes,
+    columns,
+    timelineRows,
+    today,
+    boardSource,
+    setSwimPosition,
+    setActiveColumn,
+    setActiveRowAt,
+    setTimelineSelection,
+    setTimelineDay,
+  ]);
 
   useInput(
     (input, key) => {
@@ -1664,9 +2017,68 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       if (key.ctrl && input === "c") return onExit();
       if (input === "q") return onExit();
       if (input === "?") return showModal({ kind: "help" });
+      if (key.escape && timelineViewRef.current) return toggleTimelineView();
+      if (input === "T") return toggleTimelineView();
 
-      // Navigation — swim view uses the lane cursor, flat board the columns.
-      if (swimViewRef.current) {
+      // Timeline has row navigation and an independent horizontal calendar.
+      if (timelineViewRef.current) {
+        if (key.leftArrow || input === "h") {
+          timelineTouched.current = true;
+          return setTimelineCalendarValue(
+            panTimeline(
+              timelineCalendarRef.current,
+              timelineZoomRef.current,
+              -1,
+              timelineLayout(Math.max(1, termCols - 2), timelineZoomRef.current).bucketCount,
+            ),
+          );
+        }
+        if (key.rightArrow || input === "l") {
+          timelineTouched.current = true;
+          return setTimelineCalendarValue(
+            panTimeline(
+              timelineCalendarRef.current,
+              timelineZoomRef.current,
+              1,
+              timelineLayout(Math.max(1, termCols - 2), timelineZoomRef.current).bucketCount,
+            ),
+          );
+        }
+        if (key.upArrow || input === "k") return timelineMove(-1);
+        if (key.downArrow || input === "j") return timelineMove(1);
+        if (key.pageUp) return timelineMove(-timelineVisibleRows);
+        if (key.pageDown) return timelineMove(timelineVisibleRows);
+        if (input === "g") {
+          markSelectionIntent();
+          return setTimelineSelection(0);
+        }
+        if (input === "G") {
+          markSelectionIntent();
+          return setTimelineSelection(timelineRows.length - 1);
+        }
+        if (input === "+" || input === "=") {
+          timelineTouched.current = true;
+          return changeTimelineZoom(-1);
+        }
+        if (input === "-") {
+          timelineTouched.current = true;
+          return changeTimelineZoom(1);
+        }
+        if (input === "0") {
+          timelineTouched.current = true;
+          return setTimelineDay(today);
+        }
+        if (input === ".") {
+          timelineTouched.current = true;
+          const row = timelineRows.find(
+            (candidate) => candidate.issue.key === selectedIssueKeyRef.current,
+          );
+          const focus = row ? focusTimelineRow(row, today) : null;
+          if (focus !== null) setTimelineDay(focus);
+          else flash(`${row?.issue.key ?? "Selected issue"} has no usable Timeline date.`, "info");
+          return;
+        }
+      } else if (swimViewRef.current) {
         if (key.leftArrow || input === "h") return swimMove(0, -1);
         if (key.rightArrow || input === "l") return swimMove(0, 1);
         if (key.upArrow || input === "k") return swimMove(-1, 0);
@@ -1680,18 +2092,20 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         if (key.upArrow || input === "k") return nudgeRow(-1);
         if (key.downArrow || input === "j") return nudgeRow(1);
         if (input === "g") {
+          markSelectionIntent();
           const col = activeColRef.current;
           setActiveRowAt(col, 0);
-          setSelectedIssueKey(columns[col]?.issues[0]?.key ?? null);
+          setSelectedKey(columns[col]?.issues[0]?.key ?? null);
           return;
         }
         if (input === "G") {
+          markSelectionIntent();
           const colIndex = activeColRef.current;
           const col = columns[colIndex];
           if (col) {
             const row = Math.max(0, col.issues.length - 1);
             setActiveRowAt(colIndex, row);
-            setSelectedIssueKey(col.issues[row]?.key ?? null);
+            setSelectedKey(col.issues[row]?.key ?? null);
           }
           return;
         }
@@ -1704,23 +2118,31 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       // the current column) so the cursor never strands on an empty cell in a
       // lane that doesn't have a card in that column.
       if (swimViewRef.current && input === "g") {
+        markSelectionIntent();
         const cursor = snapToCard(lanes, 0, swimCursorRef.current.col);
         setSwimPosition(cursor);
-        setSelectedIssueKey(
-          lanes[cursor.lane]?.columns[cursor.col]?.issues[cursor.row]?.key ?? null,
-        );
+        setSelectedKey(lanes[cursor.lane]?.columns[cursor.col]?.issues[cursor.row]?.key ?? null);
         return;
       }
       if (swimViewRef.current && input === "G") {
+        markSelectionIntent();
         const cursor = snapToCard(lanes, lanes.length - 1, swimCursorRef.current.col);
         setSwimPosition(cursor);
-        setSelectedIssueKey(
-          lanes[cursor.lane]?.columns[cursor.col]?.issues[cursor.row]?.key ?? null,
-        );
+        setSelectedKey(lanes[cursor.lane]?.columns[cursor.col]?.issues[cursor.row]?.key ?? null);
         return;
       }
 
       const targetIssue = currentIssueNow();
+
+      if (timelineViewRef.current && ["a", "[", "]", "<", ">"].includes(input)) {
+        flash(
+          input === "a"
+            ? "Quick add needs a column. Press T to return to the board."
+            : "Column move and rank keys are disabled in Timeline. Press T for the board.",
+          "info",
+        );
+        return;
+      }
 
       // Block mutating actions on a card that's mid-update (a transition or
       // rerank in flight, or an optimistic move still settling). Read-only
@@ -1817,6 +2239,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       }
       if (input === "F") {
         if (activeFilterCount(filters) > 0) {
+          markSelectionIntent();
           setFilters(EMPTY_FILTERS);
           flash("All filters cleared.", "ok");
         } else {
@@ -1828,10 +2251,27 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
       // board actually defines swimlanes (custom JQL lanes or a field
       // strategy) — otherwise there's nothing to group by.
       if (input === "s") {
+        if (timelineViewRef.current) {
+          if (!hasSwimlanes) {
+            flash("No swimlanes are configured. Press T to return to the board.", "info");
+            return;
+          }
+          markSelectionIntent();
+          const selected = currentIssueNow();
+          timelineViewRef.current = false;
+          setTimelineView(false);
+          swimViewRef.current = true;
+          setSwimView(true);
+          const seed = selected ? findCursor(lanes, selected.key) : null;
+          setSwimPosition(seed ?? snapToCard(lanes, 0, activeColRef.current));
+          swimScrollRef.current = 0;
+          return;
+        }
         if (!hasSwimlanes) {
           flash("No swimlanes are configured on this board.", "info");
           return;
         }
+        markSelectionIntent();
         const next = !swimViewRef.current;
         const selected = currentIssueNow();
         swimViewRef.current = next;
@@ -1846,7 +2286,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
             if (row >= 0) {
               setActiveColumn(col);
               setActiveRowAt(col, row);
-              setSelectedIssueKey(selected.key);
+              setSelectedKey(selected.key);
               break;
             }
           }
@@ -1926,6 +2366,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           }}
           onTransition={async (projectKey) => {
             const seq = ++modalLaunchSeq.current;
+            const focusGeneration = selectionGeneration.current;
             try {
               const transitions = await track(getTransitions(cfg, issueKey));
               if (
@@ -1944,6 +2385,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
                 issueKey,
                 projectKey,
                 returnTo: { kind: "detail", issueKey },
+                focusGeneration,
               });
             } catch (error) {
               if (seq === modalLaunchSeq.current) flash(errorMessage(error), "err");
@@ -2062,6 +2504,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
             void commitTransition(picker.issueKey, transition, {
               projectKey: picker.projectKey,
               returnTo: picker,
+              focusGeneration: picker.focusGeneration,
               ...(picker.drafts?.[transition.id]
                 ? { initialValues: picker.drafts[transition.id] }
                 : {}),
@@ -2251,6 +2694,9 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           void commitTransition(screenKey, screenTr, {
             projectKey: modal.projectKey,
             fields,
+            ...(modal.focusGeneration !== undefined
+              ? { focusGeneration: modal.focusGeneration }
+              : {}),
             onError: (message) => {
               modalSubmitPending.current = false;
               setModal((current) =>
@@ -2292,6 +2738,7 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
           items={items}
           onPick={(id) => {
             if (id === "clear") {
+              markSelectionIntent();
               setFilters(EMPTY_FILTERS);
               closeModal();
               flash("All filters cleared.", "ok");
@@ -2352,11 +2799,13 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         items={spec.items}
         currentId={filters[spec.key]}
         onPick={(id) => {
+          markSelectionIntent();
           setFilters((f) => ({ ...f, [spec.key]: id }));
           closeModal();
           flash(`${spec.label}: ${id}`, "ok");
         }}
         onClear={() => {
+          markSelectionIntent();
           setFilters((f) => ({ ...f, [spec.key]: null }));
           closeModal();
           flash(`${spec.label} filter cleared`, "ok");
@@ -2408,7 +2857,13 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
             warning ? `${linked}; follow-up failed: ${warning}` : linked,
             warning ? "err" : "ok",
           );
-          pendingFocus.current = { key, afterVersion: boardDataVersion.current + 1 };
+          const creationGeneration = markSelectionIntent();
+          queuePendingFocus({
+            key,
+            afterVersion: boardDataVersion.current + 1,
+            generation: creationGeneration,
+            force: true,
+          });
           // Clean creates open detail. Partial success stays on the board so
           // its warning is visible; both paths reload and focus the new card.
           void load();
@@ -2430,6 +2885,39 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
     Math.floor((gridWidth - gap * (visibleColCount - 1)) / Math.max(1, visibleColCount)),
   );
   const visibleCols = columns.slice(colWindowStart, colWindowEnd);
+  const foundTimelineIndex = timelineRows.findIndex((row) => row.issue.key === selectedIssueKey);
+  if (foundTimelineIndex >= 0) timelineIndexRef.current = foundTimelineIndex;
+  const timelineSelectedIndex =
+    foundTimelineIndex >= 0
+      ? foundTimelineIndex
+      : clamp(timelineIndexRef.current, 0, Math.max(0, timelineRows.length - 1));
+  const layoutSupported = termCols >= 80 && termRows >= 24;
+  const timelineScroll = layoutSupported
+    ? stickyScroll(
+        timelineRows.length,
+        timelineVisibleRows,
+        timelineSelectedIndex,
+        timelineScrollRef.current,
+      )
+    : timelineScrollRef.current;
+  if (layoutSupported) timelineScrollRef.current = timelineScroll;
+  const timelineCurrentRow = timelineRows.find((row) => row.issue.key === selectedIssueKey);
+  const visibleMatchCount = timelineView ? timelineMatchKeys.length : matches.length;
+  const datesConfirmed = boardSource === "fresh";
+  const timelineNotice =
+    boardSource === "cache"
+      ? boardRefreshStatus === "failed"
+        ? "Cached dates are unconfirmed; fresh refresh failed. Press r to retry."
+        : "Cached board data; date absence is unconfirmed while fresh data loads."
+      : issues.length === 0
+        ? "No issues on this board."
+        : filteredIssues.length === 0
+          ? "No issues match the active filters."
+          : filteredIssues.some((issue) => issue.startDateState === "unavailable")
+            ? "Start date metadata is unavailable; known Due dates are still shown."
+            : timelineRows.every((row) => row.group === "unscheduled")
+              ? "All filtered issues are unscheduled."
+              : "Timeline does not edit dates; press v to edit available date fields.";
 
   return (
     <Box flexDirection="column" width={termCols} height={termRows}>
@@ -2443,17 +2931,38 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         colIndex={effectiveCol}
         colCount={columns.length}
         filterCount={activeFilterCount(filters)}
-        {...(swimView ? { swimlaneLabel: swimlaneStrategyLabel(swimlanes?.strategy) } : {})}
+        {...(swimView && !timelineView
+          ? { swimlaneLabel: swimlaneStrategyLabel(swimlanes?.strategy) }
+          : {})}
+        timelineActive={timelineView}
         query={modal.kind === "search" ? "" : query}
-        matches={matches.length}
+        matches={visibleMatchCount}
         matchIdx={matchIdx}
+        termCols={termCols}
       />
 
       <Box paddingX={1}>
         <ProgressBar width={Math.max(1, termCols - 2)} active={busy} />
       </Box>
 
-      {swimView ? (
+      {timelineView ? (
+        <Box paddingX={1} height={columnHeight}>
+          <Timeline
+            rows={timelineRows}
+            selectedKey={selectedIssueKey}
+            center={timelineCalendar.center}
+            zoom={timelineZoom}
+            today={today}
+            width={Math.max(1, termCols - 2)}
+            height={columnHeight}
+            scroll={timelineScroll}
+            matches={timelineMatchSet}
+            pendingKeys={pendingKeys}
+            datesConfirmed={datesConfirmed}
+            notice={timelineNotice}
+          />
+        </Box>
+      ) : swimView ? (
         <Box flexDirection="column" height={columnHeight}>
           <Box flexDirection="row">
             <PagingArrow direction="left" active={hasColsLeft} />
@@ -2517,11 +3026,12 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         termCols={termCols}
         mode={modal.kind === "search" ? "search" : "normal"}
         query={query}
-        matches={matches.length}
+        matches={visibleMatchCount}
         matchIdx={matchIdx}
         filterCount={activeFilterCount(filters)}
         hasSwimlanes={hasSwimlanes}
         swimActive={swimView}
+        timelineActive={timelineView}
         searchBuffer={searchBuffer}
         onSearchChange={setSearchBuffer}
         onSearchSubmit={(q) => {
@@ -2531,6 +3041,13 @@ export function BoardView({ cfg, board, maxColumns, onExit }: Props) {
         onSearchCancel={() => {
           closeModal();
         }}
+        dateSummary={
+          timelineView && timelineCurrentRow
+            ? !datesConfirmed && timelineCurrentRow.group === "unscheduled"
+              ? "Dates are unconfirmed in cached board data."
+              : timelineCurrentRow.label
+            : undefined
+        }
         emptyMessage={
           issues.length === 0
             ? "No issues on this board."

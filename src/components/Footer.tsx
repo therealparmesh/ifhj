@@ -1,6 +1,7 @@
 import { Box, Text } from "ink";
 
 import type { Issue } from "../jira";
+import { normalizeText } from "../text";
 import { fg, theme, truncate, typeColor } from "../ui";
 import { Hint } from "./Hint";
 import { TextInput } from "./TextInput";
@@ -17,19 +18,61 @@ type FooterProps = {
   hasSwimlanes: boolean;
   /** Swimlane view currently active → label the toggle "flat" instead. */
   swimActive: boolean;
+  timelineActive: boolean;
   searchBuffer: string;
   onSearchChange: (v: string) => void;
   onSearchSubmit: (v: string) => void;
   onSearchCancel: () => void;
   emptyMessage?: string | undefined;
+  dateSummary?: string | undefined;
 };
 
 type FooterHintState = Pick<
   FooterProps,
-  "filterCount" | "hasSwimlanes" | "swimActive" | "query" | "matches" | "matchIdx"
+  | "filterCount"
+  | "hasSwimlanes"
+  | "swimActive"
+  | "timelineActive"
+  | "query"
+  | "matches"
+  | "matchIdx"
 > & { hasIssue: boolean };
 
 function normalHints(state: FooterHintState): { k: string; label: string }[] {
+  if (state.timelineActive) {
+    return [
+      { k: "↑↓/jk", label: "rows" },
+      { k: "←→/hl", label: "pan" },
+      { k: "+/-", label: "zoom" },
+      { k: "0/.", label: "today/issue" },
+      ...(state.hasIssue
+        ? [
+            { k: "⏎", label: "actions" },
+            { k: "v", label: "view" },
+            { k: "t", label: "transition" },
+            { k: "m", label: "move" },
+          ]
+        : []),
+      { k: "esc/T", label: "board" },
+      { k: "/", label: "highlight" },
+      ...(state.query
+        ? [
+            {
+              k: "n N",
+              label: state.matches === 0 ? "no matches" : `${state.matchIdx + 1}/${state.matches}`,
+            },
+          ]
+        : []),
+      { k: "f", label: "filter" },
+      ...(state.filterCount > 0 ? [{ k: "F", label: "clear filters" }] : []),
+      ...(state.hasSwimlanes ? [{ k: "s", label: "swimlanes" }] : []),
+      { k: "c", label: "create" },
+      { k: "R", label: "quick open" },
+      { k: "r", label: "refresh" },
+      { k: "?", label: "help" },
+      { k: "q", label: "boards" },
+    ];
+  }
   return [
     { k: "↑↓←→/hjkl", label: "nav" },
     ...(state.hasIssue
@@ -61,6 +104,7 @@ function normalHints(state: FooterHintState): { k: string; label: string }[] {
     ...(state.hasSwimlanes
       ? [{ k: "s", label: state.swimActive ? "flat view" : "swimlanes" }]
       : []),
+    { k: "T", label: "timeline" },
     { k: "R", label: "quick open" },
     { k: "r", label: "refresh" },
     { k: "?", label: "help" },
@@ -85,7 +129,7 @@ export function footerRowCount(
     }
     used += itemWidth;
   }
-  return 2 + lines;
+  return 2 + lines + (state.timelineActive && state.hasIssue ? 1 : 0);
 }
 
 export function Footer({
@@ -98,12 +142,26 @@ export function Footer({
   filterCount,
   hasSwimlanes,
   swimActive,
+  timelineActive,
   searchBuffer,
   onSearchChange,
   onSearchSubmit,
   onSearchCancel,
   emptyMessage,
+  dateSummary,
 }: FooterProps) {
+  const contentWidth = Math.max(1, termCols - 2);
+  const keyText = currentIssue
+    ? truncate(normalizeText(currentIssue.key), Math.min(18, contentWidth))
+    : "";
+  const typeText = currentIssue
+    ? truncate(normalizeText(currentIssue.issueType), Math.min(24, contentWidth))
+    : "";
+  const titleWidth = Math.max(
+    1,
+    contentWidth - Bun.stringWidth(keyText) - Bun.stringWidth(typeText) - 6,
+  );
+  const titleText = currentIssue ? truncate(normalizeText(currentIssue.summary), titleWidth) : "";
   return (
     <Box flexDirection="column" paddingX={1}>
       <Box>
@@ -111,29 +169,24 @@ export function Footer({
       </Box>
 
       {currentIssue ? (
-        <Box>
+        <Box width={contentWidth}>
           <Text color={theme.accent} bold>
-            {currentIssue.key}
+            {keyText}
           </Text>
           <Text color={theme.muted}> · </Text>
-          <Text color={typeColor(currentIssue.issueType)}>{currentIssue.issueType}</Text>
+          <Text color={typeColor(currentIssue.issueType)}>{typeText}</Text>
           <Text color={theme.muted}> · </Text>
-          <Text {...fg(theme.fg)}>
-            {truncate(
-              currentIssue.summary,
-              Math.max(
-                0,
-                termCols -
-                  Bun.stringWidth(currentIssue.key) -
-                  Bun.stringWidth(currentIssue.issueType) -
-                  8,
-              ),
-            )}
-          </Text>
+          <Text {...fg(theme.fg)}>{titleText}</Text>
         </Box>
       ) : (
         <Text color={theme.muted}>{emptyMessage ?? "No issue selected."}</Text>
       )}
+
+      {mode === "normal" && currentIssue && dateSummary ? (
+        <Text color={theme.muted} wrap="truncate">
+          {truncate(normalizeText(dateSummary), Math.max(1, termCols - 2))}
+        </Text>
+      ) : null}
 
       {mode === "search" ? (
         <Box flexDirection="column">
@@ -173,6 +226,7 @@ export function Footer({
             filterCount,
             hasSwimlanes,
             swimActive,
+            timelineActive,
             query,
             matches,
             matchIdx,

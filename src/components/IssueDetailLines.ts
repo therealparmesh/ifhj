@@ -1,5 +1,5 @@
 import type { IssueDetail } from "../jira";
-import { theme, truncate } from "../ui";
+import { normalizeMessage, theme, truncate } from "../ui";
 
 type DetailLine = {
   text: string;
@@ -9,6 +9,8 @@ type DetailLine = {
   /** Flag lines inside fenced code blocks; render with a dim bg so they
    *  read as a block rather than prose. */
   codeBg?: boolean;
+  /** Title text is plain even when it contains Markdown fence characters. */
+  plainTitle?: boolean;
 };
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
@@ -26,17 +28,27 @@ export function formatShortDate(iso: string | undefined): string {
  * tags each line with its comment index so the detail modal can jump
  * between comments with `[` / `]`.
  */
-export function renderDetailLines(detail: IssueDetail, mainWidth: number): DetailLine[] {
+export function renderDetailLines(
+  detail: IssueDetail,
+  mainWidth: number,
+  compactTitleWidth = Number.POSITIVE_INFINITY,
+): DetailLine[] {
   const out: DetailLine[] = [];
   const push = (
     text: string,
     color: string | undefined = theme.fg,
     bold = false,
     commentIdx?: number,
-  ) => out.push({ text, color, bold, commentIdx });
-  const pushLine = (text: string, color: string | undefined = theme.fg, commentIdx?: number) => {
+    plainTitle = false,
+  ) => out.push({ text, color, bold, commentIdx, ...(plainTitle ? { plainTitle: true } : {}) });
+  const pushLine = (
+    text: string,
+    color: string | undefined = theme.fg,
+    commentIdx?: number,
+    plainTitle = false,
+  ) => {
     if (text.length === 0) {
-      push("", color, false, commentIdx);
+      push("", color, false, commentIdx, plainTitle);
       return;
     }
     let line = "";
@@ -44,20 +56,26 @@ export function renderDetailLines(detail: IssueDetail, mainWidth: number): Detai
     for (const { segment } of new Intl.Segmenter().segment(text)) {
       const segmentWidth = Bun.stringWidth(segment);
       if (line && width + segmentWidth > mainWidth) {
-        push(line, color, false, commentIdx);
+        push(line, color, false, commentIdx, plainTitle);
         line = "";
         width = 0;
       }
       line += segment;
       width += segmentWidth;
     }
-    if (line) push(line, color, false, commentIdx);
+    if (line) push(line, color, false, commentIdx, plainTitle);
   };
   const pushSection = (label: string) => {
     push("");
     push(label, theme.accent, true);
     push("─".repeat(Math.min(mainWidth, label.length + 6)), theme.divider);
   };
+
+  const title = normalizeMessage(detail.summary);
+  if (Bun.stringWidth(title) > compactTitleWidth) {
+    pushSection("Full title");
+    pushLine(title, theme.fg, undefined, true);
+  }
 
   pushSection("Description");
   for (const ln of (detail.description || "—").split(/\n/)) pushLine(ln);
@@ -96,7 +114,7 @@ export function renderDetailLines(detail: IssueDetail, mainWidth: number): Detai
   // (inverse when focused), so mixing codeBg in would compound awkwardly.
   let inCode = false;
   for (const ln of out) {
-    if (ln.bold === true) continue;
+    if (ln.bold === true || ln.plainTitle) continue;
     if (ln.text.trimStart().startsWith("```")) {
       inCode = !inCode;
       ln.codeBg = true;

@@ -31,12 +31,22 @@ const BOARD_BINDINGS: { keys: string; desc: string }[] = [
   { keys: "/", desc: "highlight by key, title, or assignee" },
   { keys: "n / N", desc: "next / prev match" },
   { keys: "f / F", desc: "filter menu / clear all filters" },
+  { keys: "T / Timeline Esc", desc: "T toggles Timeline; Esc is a Timeline-only back alias" },
   { keys: "s", desc: "toggle swimlane view (grouped lanes)" },
   { keys: "R", desc: "quick open — recents, or type to search all issues" },
   { keys: "J", desc: "JQL query view" },
   { keys: "r", desc: "refresh" },
   { keys: "Ctrl+G", desc: "dismiss notifications" },
   { keys: "q", desc: "back to board picker" },
+  { keys: "Timeline Left/Right or h/l", desc: "pan one calendar bucket" },
+  { keys: "Timeline Up/Down or j/k", desc: "select the previous / next issue row" },
+  { keys: "Timeline PgUp/PgDn, g/G", desc: "page rows / select first or last" },
+  { keys: "Timeline + or =", desc: "zoom in: Months to Weeks to Days" },
+  { keys: "Timeline -", desc: "zoom out: Days to Weeks to Months" },
+  { keys: "Timeline 0", desc: "center the local Today date" },
+  { keys: "Timeline .", desc: "focus the selected issue's usable dates" },
+  { keys: "Timeline s", desc: "enter configured swimlanes, or show return guidance" },
+  { keys: "Timeline a [ ] < >", desc: "disabled; return to the board for column-only changes" },
 ];
 
 const DETAIL_BINDINGS: { keys: string; desc: string }[] = [

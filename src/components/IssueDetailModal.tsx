@@ -30,6 +30,7 @@ import {
   copyToClipboard,
   errorMessage,
   fg,
+  normalizeMessage,
   openInBrowser,
   stickyScroll,
   theme,
@@ -325,6 +326,7 @@ export function IssueDetailModal({
   const visibleToasts = boundedToasts([...externalToasts, ...toasts]);
   const sideWidth = Math.min(Math.max(26, Math.floor(innerWidth * 0.34)), innerWidth - 30);
   const mainWidth = innerWidth - sideWidth;
+  const compactTitleWidth = Math.max(1, innerWidth - 4);
   // The fixed rows + body fill the modal box exactly, so the body yields a
   // row per visible toast — otherwise the ToastStack (last child) overflows the
   // fixed-height box and Ink clips it, and toasts never appear in the modal.
@@ -334,8 +336,8 @@ export function IssueDetailModal({
   );
 
   const mainLines = useMemo(
-    () => (detail ? renderDetailLines(detail, Math.max(1, mainWidth - 2)) : []),
-    [detail, mainWidth],
+    () => (detail ? renderDetailLines(detail, Math.max(1, mainWidth - 2), compactTitleWidth) : []),
+    [detail, mainWidth, compactTitleWidth],
   );
   const issueProjectKey = detail?.projectKey || projectKey || issueKey.split("-")[0] || "";
 
@@ -1005,7 +1007,7 @@ export function IssueDetailModal({
       </Box>
       <Box paddingX={1}>
         <Text {...fg(theme.fg)} bold>
-          {truncate(detail.summary, innerWidth - 4)}
+          {truncate(normalizeMessage(detail.summary), compactTitleWidth)}
         </Text>
       </Box>
       {/* The header divider doubles as the background-load progress line —

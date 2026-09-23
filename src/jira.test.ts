@@ -98,22 +98,52 @@ describe("Jira pagination", () => {
 
   test("does not stop board issues when Jira caps a page below the requested size", async () => {
     const starts: number[] = [];
+    const requested: string[][] = [];
     globalThis.fetch = (async (input) => {
       const url = new URL(String(input));
-      if (url.pathname === "/rest/api/3/field") return json([]);
+      if (url.pathname === "/rest/api/3/field") {
+        return json([
+          { id: "customfield_31", name: "Start date", schema: { type: "date" } },
+          {
+            id: "customfield_32",
+            schema: { custom: "com.pyxis.greenhopper.jira:jsw-story-points" },
+          },
+        ]);
+      }
       const start = Number(url.searchParams.get("startAt"));
       starts.push(start);
+      requested.push((url.searchParams.get("fields") ?? "").split(","));
+      const first = rawIssue(1) as any;
+      first.fields.customfield_31 = "2026-01-01";
+      first.fields.duedate = "2026-01-05";
+      first.fields.customfield_32 = 1;
+      const boundary = rawIssue(2) as any;
+      boundary.fields.customfield_31 = start === 0 ? "2026-01-02" : "wrong-duplicate-value";
+      boundary.fields.customfield_32 = 2;
+      const later = rawIssue(3) as any;
+      later.fields.customfield_31 = "raw-later-page-date";
+      later.fields.duedate = "2026-01-07";
+      later.fields.customfield_32 = 3;
       return json({
         startAt: start,
         maxResults: 2,
-        total: 3,
-        issues: start === 0 ? [rawIssue(1), rawIssue(2)] : [rawIssue(3)],
+        total: 4,
+        issues: start === 0 ? [first, boundary] : [boundary, later],
       });
     }) as typeof fetch;
 
     const issues = await getBoardIssues(cfg("board-issues"), 10);
     expect(starts).toEqual([0, 2]);
+    expect(requested[1]).toEqual(expect.arrayContaining(["duedate", "customfield_31"]));
     expect(issues.map((issue) => issue.key)).toEqual(["PROJ-1", "PROJ-2", "PROJ-3"]);
+    expect(issues.map((issue) => issue.statusName)).toEqual(["To Do", "To Do", "To Do"]);
+    expect(issues.map((issue) => issue.storyPoints)).toEqual([1, 2, 3]);
+    expect(issues.map((issue) => issue.startDate)).toEqual([
+      "2026-01-01",
+      "2026-01-02",
+      "raw-later-page-date",
+    ]);
+    expect(issues[2]?.dueDate).toBe("2026-01-07");
   });
 
   test("normalizes a board with no project location to an empty project key", async () => {
@@ -284,6 +314,7 @@ describe("Jira pagination", () => {
 describe("Jira field metadata", () => {
   test("coalesces concurrent discovery requests", async () => {
     let fieldCalls = 0;
+    const requestedFields: string[][] = [];
     const fields = deferred<Response>();
     globalThis.fetch = (async (input) => {
       const url = new URL(String(input));
@@ -292,7 +323,11 @@ describe("Jira field metadata", () => {
         return fields.promise;
       }
       if (url.pathname.endsWith("/issue")) {
-        return json({ startAt: 0, maxResults: 100, total: 0, issues: [] });
+        requestedFields.push((url.searchParams.get("fields") ?? "").split(","));
+        const issue = rawIssue(1) as any;
+        issue.fields.created = "2025-12-01T00:00:00.000Z";
+        issue.fields.duedate = "2026-01-10";
+        return json({ isLast: true, issues: [issue] });
       }
       throw new Error(`unexpected request: ${url}`);
     }) as typeof fetch;
@@ -301,35 +336,107 @@ describe("Jira field metadata", () => {
     const requests = Promise.all([getBoardIssues(config, 1), getBoardIssues(config, 2)]);
     expect(fieldCalls).toBe(1);
     fields.resolve(json([]));
-    await requests;
+    const results = await requests;
+    expect(results.map(([issue]) => issue?.dueDate)).toEqual(["2026-01-10", "2026-01-10"]);
+    expect(results.every(([issue]) => issue?.updated === "2026-01-01T00:00:00.000Z")).toBe(true);
+    expect(results.every(([issue]) => !issue?.startDate && !issue?.startDateState)).toBe(true);
+    expect(requestedFields.every((requested) => !requested.includes("created"))).toBe(true);
   });
 
   test("shares fallback across a concurrent failure and retries later", async () => {
     let fieldCalls = 0;
+    const requestedFields: string[][] = [];
     globalThis.fetch = (async (input) => {
       const url = new URL(String(input));
       if (url.pathname === "/rest/api/3/field") {
         fieldCalls++;
-        return fieldCalls === 1 ? new Response("temporary", { status: 503 }) : json([]);
+        return fieldCalls === 1
+          ? new Response("temporary", { status: 503 })
+          : json([
+              { id: "customfield_902", name: "Start date", schema: { type: "date" } },
+              {
+                id: "customfield_903",
+                schema: { custom: "com.pyxis.greenhopper.jira:gh-epic-link" },
+              },
+              {
+                id: "customfield_904",
+                schema: { custom: "com.pyxis.greenhopper.jira:gh-sprint" },
+              },
+              {
+                id: "customfield_905",
+                schema: { custom: "com.pyxis.greenhopper.jira:jsw-story-points" },
+              },
+            ]);
       }
       if (url.pathname.endsWith("/issue")) {
-        return json({ startAt: 0, maxResults: 100, total: 0, issues: [] });
+        const requested = (url.searchParams.get("fields") ?? "").split(",");
+        requestedFields.push(requested);
+        const issue = rawIssue(1) as any;
+        issue.fields.duedate = url.pathname.includes("/board/2/") ? false : "2026-02-10";
+        if (requested.includes("customfield_902")) {
+          issue.fields.customfield_902 = "2026-02-01";
+          issue.fields.customfield_903 = "EPIC-NEW";
+          issue.fields.customfield_904 = [{ state: "active", name: "Discovered sprint" }];
+          issue.fields.customfield_905 = 13;
+        } else {
+          issue.fields.customfield_10014 = "EPIC-FALLBACK";
+          issue.fields.customfield_10020 = [{ state: "active", name: "Fallback sprint" }];
+          issue.fields.customfield_10016 = 8;
+        }
+        return json({
+          isLast: true,
+          issues: [issue],
+        });
       }
       throw new Error(`unexpected request: ${url}`);
     }) as typeof fetch;
 
     const config = cfg("field-retry");
-    const concurrent = await Promise.allSettled([
-      getBoardIssues(config, 1),
-      getBoardIssues(config, 2),
-    ]);
-    expect(concurrent).toEqual([
-      { status: "fulfilled", value: [] },
-      { status: "fulfilled", value: [] },
-    ]);
+    const concurrent = await Promise.all([getBoardIssues(config, 1), getBoardIssues(config, 2)]);
     expect(fieldCalls).toBe(1);
-    await getBoardIssues(config, 1);
+    for (const [issue] of concurrent) {
+      expect(issue).toMatchObject({
+        statusName: "To Do",
+        startDateState: "unavailable",
+        epicKey: "EPIC-FALLBACK",
+        sprintName: "Fallback sprint",
+        storyPoints: 8,
+      });
+    }
+    expect(concurrent[0]?.[0]).toMatchObject({ dueDate: "2026-02-10" });
+    expect(concurrent[1]?.[0]).toMatchObject({ dueDateState: "invalid" });
+    expect(concurrent[1]?.[0]).not.toHaveProperty("dueDate");
+    expect(
+      requestedFields
+        .slice(0, 2)
+        .every(
+          (requested) =>
+            requested.includes("customfield_10014") &&
+            requested.includes("customfield_10020") &&
+            requested.includes("customfield_10016") &&
+            requested.includes("duedate") &&
+            !requested.includes("customfield_902"),
+        ),
+    ).toBe(true);
+    const [retried] = await getBoardIssues(config, 1);
     expect(fieldCalls).toBe(2);
+    expect(requestedFields[2]).toEqual(
+      expect.arrayContaining([
+        "customfield_902",
+        "customfield_903",
+        "customfield_904",
+        "customfield_905",
+      ]),
+    );
+    expect(retried).toMatchObject({
+      statusName: "To Do",
+      startDate: "2026-02-01",
+      dueDate: "2026-02-10",
+      epicKey: "EPIC-NEW",
+      sprintName: "Discovered sprint",
+      storyPoints: 13,
+    });
+    expect("startDateState" in retried!).toBe(false);
   });
 
   test("does not cache a malformed discovery response", async () => {
@@ -350,6 +457,59 @@ describe("Jira field metadata", () => {
     await getBoardIssues(config, 1);
     await getBoardIssues(config, 1);
     expect(fieldCalls).toBe(2);
+  });
+
+  test("isolates discovered start fields by credential and server", async () => {
+    const fieldCalls: string[] = [];
+    const requested = new Map<string, string[]>();
+    const candidates: Record<string, { id: string; date: string }> = {
+      "same.example.test\0Basic alice": { id: "customfield_801", date: "2026-08-01" },
+      "same.example.test\0Basic bob": { id: "customfield_802", date: "2026-08-02" },
+      "other.example.test\0Basic alice": { id: "customfield_803", date: "2026-08-03" },
+    };
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(String(input));
+      const auth = new Headers(init?.headers).get("Authorization") ?? "";
+      const identity = `${url.host}\0${auth}`;
+      const candidate = candidates[identity];
+      if (!candidate) throw new Error(`unexpected identity: ${identity}`);
+      if (url.pathname === "/rest/api/3/field") {
+        fieldCalls.push(identity);
+        return json([{ id: candidate.id, name: "Start date", schema: { type: "date" } }]);
+      }
+      if (url.pathname.endsWith("/issue")) {
+        const fields = (url.searchParams.get("fields") ?? "").split(",");
+        requested.set(identity, fields);
+        const issue = rawIssue(1) as any;
+        issue.fields[candidate.id] = candidate.date;
+        return json({ isLast: true, issues: [issue] });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }) as typeof fetch;
+
+    const alice = { server: "https://same.example.test", authHeader: "Basic alice" };
+    const bob = { server: "https://same.example.test", authHeader: "Basic bob" };
+    const other = { server: "https://other.example.test", authHeader: "Basic alice" };
+    const results = await Promise.all([
+      getBoardIssues(alice, 1),
+      getBoardIssues(bob, 1),
+      getBoardIssues(other, 1),
+    ]);
+
+    expect(fieldCalls.toSorted()).toEqual(Object.keys(candidates).toSorted());
+    expect(results.map(([issue]) => issue?.startDate)).toEqual([
+      "2026-08-01",
+      "2026-08-02",
+      "2026-08-03",
+    ]);
+    for (const [identity, candidate] of Object.entries(candidates)) {
+      expect(requested.get(identity)).toContain(candidate.id);
+      expect(
+        Object.values(candidates)
+          .filter((otherCandidate) => otherCandidate.id !== candidate.id)
+          .every((otherCandidate) => !requested.get(identity)?.includes(otherCandidate.id)),
+      ).toBe(true);
+    }
   });
 
   test("does not expose ADF textarea fields as plain strings", async () => {
@@ -472,6 +632,251 @@ describe("Jira field metadata", () => {
     expect(body.fields.parent).toEqual({ key: "PROJ-1" });
     expect(body.fields.customfield_1).toBe(0);
     expect(body.fields.description).toEqual(expect.objectContaining({ type: "doc", version: 1 }));
+  });
+});
+
+describe("Jira timeline dates", () => {
+  test("requests only exact date candidates and preserves raw board date strings", async () => {
+    let requestedFields: string[] = [];
+    globalThis.fetch = (async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/rest/api/3/field") {
+        return json([
+          {
+            id: "customfield_501",
+            name: "  START DATE ",
+            schema: {
+              type: "date",
+              custom: "com.atlassian.jira.plugin.system.customfieldtypes:datepicker",
+            },
+          },
+          {
+            id: "customfield_11708",
+            name: "Start date (DO NOT USE)",
+            schema: {
+              type: "date",
+              custom: "com.atlassian.jira.plugin.system.customfieldtypes:datepicker",
+            },
+          },
+          {
+            id: "customfield_11073",
+            name: "Legacy Start date",
+            schema: {
+              type: "date",
+              custom: "com.atlassian.jira.plugin.system.customfieldtypes:datepicker",
+            },
+          },
+          {
+            id: "customfield_502",
+            name: "Target start/end date",
+            schema: {
+              type: "date",
+              custom: "com.atlassian.jira.plugin.system.customfieldtypes:datepicker",
+            },
+          },
+          {
+            id: "customfield_503",
+            name: "Start date",
+            schema: {
+              type: "string",
+              custom: "com.atlassian.jira.plugin.system.customfieldtypes:datepicker",
+            },
+          },
+        ]);
+      }
+      if (url.pathname === "/rest/agile/1.0/board/1/issue") {
+        requestedFields = (url.searchParams.get("fields") ?? "").split(",");
+        const item = rawIssue(1) as any;
+        item.fields.customfield_501 = "not-a-calendar-date";
+        item.fields.customfield_11708 = "2026-07-01";
+        item.fields.customfield_11073 = "2026-07-02";
+        item.fields.customfield_502 = "2026-07-03";
+        item.fields.customfield_503 = "2026-07-04";
+        item.fields.duedate = "2026-14-40";
+        return json({ isLast: true, issues: [item] });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }) as typeof fetch;
+
+    const [issue] = await getBoardIssues(cfg("timeline-fields"), 1);
+    expect(requestedFields).toContain("duedate");
+    expect(requestedFields).toContain("customfield_501");
+    expect(requestedFields).not.toContain("customfield_11708");
+    expect(requestedFields).not.toContain("customfield_11073");
+    expect(requestedFields).not.toContain("customfield_502");
+    expect(requestedFields).not.toContain("customfield_503");
+    expect(issue).toMatchObject({
+      startDate: "not-a-calendar-date",
+      dueDate: "2026-14-40",
+    });
+  });
+
+  test("maps agreed, conflicting, absent, and wrong-type date endpoints", async () => {
+    let requestedFields: string[] = [];
+    globalThis.fetch = (async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/rest/api/3/field") {
+        return json([
+          { id: "customfield_601", name: "Start date", schema: { type: "date" } },
+          { id: "customfield_602", name: "start DATE", schema: { type: "date" } },
+          { id: "customfield_603", name: " Start date ", schema: { type: "date" } },
+        ]);
+      }
+      if (url.pathname.endsWith("/issue")) {
+        requestedFields = (url.searchParams.get("fields") ?? "").split(",");
+        const agreed = rawIssue(1) as any;
+        agreed.fields.customfield_601 = "2026-04-01";
+        agreed.fields.customfield_602 = "2026-04-01";
+        const conflicting = rawIssue(2) as any;
+        conflicting.fields.customfield_601 = "2026-04-01";
+        conflicting.fields.customfield_602 = "2026-04-02";
+        const empty = rawIssue(3) as any;
+        empty.fields.customfield_601 = "";
+        empty.fields.customfield_602 = null;
+        empty.fields.customfield_603 = "   ";
+        empty.fields.duedate = null;
+        const wrongTypes = [
+          ["zero", 0],
+          ["false", false],
+          ["object", { value: "2026-04-03" }],
+          ["array", []],
+        ] as const;
+        const invalidStarts = wrongTypes.map(([name, value], index) => {
+          const issue = rawIssue(10 + index) as any;
+          issue.fields.customfield_601 = `first-${name}-start`;
+          issue.fields.customfield_602 = value;
+          if (name === "object") issue.fields.customfield_603 = "conflicting-object-start";
+          issue.fields.duedate = `raw-due-${name}`;
+          return issue;
+        });
+        const invalidDues = wrongTypes.map(([name, value], index) => {
+          const issue = rawIssue(20 + index) as any;
+          issue.fields.customfield_601 = `raw-start-${name}`;
+          issue.fields.duedate = value;
+          return issue;
+        });
+        return json({
+          isLast: true,
+          issues: [agreed, conflicting, empty, ...invalidStarts, ...invalidDues],
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }) as typeof fetch;
+
+    const issues = await getBoardIssues(cfg("timeline-duplicates"), 1);
+    expect(requestedFields).toEqual(
+      expect.arrayContaining(["customfield_601", "customfield_602", "customfield_603"]),
+    );
+    expect(issues[0]).toMatchObject({ startDate: "2026-04-01" });
+    expect(issues[1]).toMatchObject({ startDateState: "ambiguous" });
+    expect(issues[1]).not.toHaveProperty("startDate");
+    expect(issues[2]).not.toHaveProperty("dueDate");
+    expect(issues[2]).not.toHaveProperty("startDate");
+    expect(issues[2]).not.toHaveProperty("startDateState");
+    expect(issues[2]).not.toHaveProperty("dueDateState");
+    expect(issues.slice(3, 7)).toMatchObject([
+      { startDateState: "invalid", dueDate: "raw-due-zero" },
+      { startDateState: "invalid", dueDate: "raw-due-false" },
+      { startDateState: "invalid", dueDate: "raw-due-object" },
+      { startDateState: "invalid", dueDate: "raw-due-array" },
+    ]);
+    for (const issue of issues.slice(3, 7)) expect(issue).not.toHaveProperty("startDate");
+    expect(issues.slice(7, 11)).toMatchObject([
+      { startDate: "raw-start-zero", dueDateState: "invalid" },
+      { startDate: "raw-start-false", dueDateState: "invalid" },
+      { startDate: "raw-start-object", dueDateState: "invalid" },
+      { startDate: "raw-start-array", dueDateState: "invalid" },
+    ]);
+    for (const issue of issues.slice(7, 11)) expect(issue).not.toHaveProperty("dueDate");
+  });
+
+  test("uses one discovery result and the same date boundaries for board and detail", async () => {
+    let fieldCalls = 0;
+    const detailFields: string[] = [];
+    globalThis.fetch = (async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/rest/api/3/field") {
+        fieldCalls++;
+        return json([
+          { id: "customfield_701", name: "Start date", schema: { type: "date" } },
+          { id: "customfield_702", name: "START DATE", schema: { type: "date" } },
+        ]);
+      }
+      if (url.pathname === "/rest/agile/1.0/board/1/issue") {
+        const valid = rawIssue(1) as any;
+        valid.fields.customfield_701 = "raw-start-value";
+        valid.fields.customfield_702 = "raw-start-value";
+        valid.fields.duedate = "raw-due-value";
+        const ambiguous = rawIssue(2) as any;
+        ambiguous.fields.customfield_701 = "2026-05-01";
+        ambiguous.fields.customfield_702 = "2026-05-02";
+        ambiguous.fields.duedate = "not-a-calendar-date";
+        const invalid = rawIssue(3) as any;
+        invalid.fields.customfield_701 = { value: "2026-05-03" };
+        invalid.fields.customfield_702 = null;
+        invalid.fields.duedate = 17;
+        return json({ isLast: true, issues: [valid, ambiguous, invalid] });
+      }
+      const issueMatch = url.pathname.match(/^\/rest\/api\/3\/issue\/(PROJ-[123])$/);
+      if (issueMatch) {
+        const key = issueMatch[1]!;
+        detailFields.push(url.searchParams.get("fields") ?? "");
+        const item = rawDetailIssue(key) as any;
+        if (key === "PROJ-1") {
+          item.fields.customfield_701 = "raw-start-value";
+          item.fields.customfield_702 = "raw-start-value";
+          item.fields.duedate = "raw-due-value";
+        } else if (key === "PROJ-2") {
+          item.fields.customfield_701 = "2026-05-01";
+          item.fields.customfield_702 = "2026-05-02";
+          item.fields.duedate = "not-a-calendar-date";
+        } else {
+          item.fields.customfield_701 = { value: "2026-05-03" };
+          item.fields.customfield_702 = null;
+          item.fields.duedate = 17;
+        }
+        return json(item);
+      }
+      if (url.pathname.endsWith("/comment")) return json({ comments: [] });
+      if (url.pathname.endsWith("/editmeta")) return json({ fields: {} });
+      throw new Error(`unexpected request: ${url}`);
+    }) as typeof fetch;
+
+    const config = cfg("timeline-parity");
+    const boardIssues = await getBoardIssues(config, 1);
+    const detail = await getIssueDetail(config, "PROJ-1");
+    const ambiguous = await getIssueDetail(config, "PROJ-2");
+    const invalid = await getIssueDetail(config, "PROJ-3");
+    expect(boardIssues[0]).toMatchObject({
+      startDate: "raw-start-value",
+      dueDate: "raw-due-value",
+    });
+    expect(boardIssues[1]).toMatchObject({
+      dueDate: "not-a-calendar-date",
+      startDateState: "ambiguous",
+    });
+    expect(boardIssues[1]).not.toHaveProperty("startDate");
+    expect(boardIssues[2]).toMatchObject({
+      startDateState: "invalid",
+      dueDateState: "invalid",
+    });
+    expect(boardIssues[2]).not.toHaveProperty("startDate");
+    expect(boardIssues[2]).not.toHaveProperty("dueDate");
+    expect(detail).toMatchObject({ startDate: "raw-start-value", dueDate: "raw-due-value" });
+    expect(ambiguous).toMatchObject({
+      dueDate: "not-a-calendar-date",
+      startDateState: "ambiguous",
+    });
+    expect(ambiguous).not.toHaveProperty("startDate");
+    expect(invalid).toMatchObject({ startDateState: "invalid", dueDateState: "invalid" });
+    expect(invalid).not.toHaveProperty("startDate");
+    expect(invalid).not.toHaveProperty("dueDate");
+    expect(detailFields).toEqual([
+      "*all,-attachment,-comment,-worklog",
+      "*all,-attachment,-comment,-worklog",
+      "*all,-attachment,-comment,-worklog",
+    ]);
+    expect(fieldCalls).toBe(1);
   });
 });
 

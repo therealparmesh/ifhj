@@ -48,6 +48,7 @@ function headers(display: "points" | "time") {
         query=""
         matches={0}
         matchIdx={0}
+        termCols={120}
       />
       <ColumnView
         column={{

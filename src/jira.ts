@@ -12,14 +12,19 @@ export const JQL_SEARCH_LIMIT = 50;
  * prefer to *discover* the real ids (see `resolveFieldIds`); these defaults
  * cover the vast majority and keep the app working if `/field` is unreachable.
  */
-const DEFAULT_FIELD_IDS: FieldIds = {
+const DEFAULT_FIELD_IDS = {
   epicLink: "customfield_10014",
   sprint: "customfield_10020",
   storyPoints: "customfield_10016",
 };
 
-/** The three agile fields whose ids vary by tenant, resolved per server. */
-type FieldIds = { epicLink: string; sprint: string; storyPoints: string };
+type FieldIds = {
+  epicLink: string;
+  sprint: string;
+  storyPoints: string;
+  startDate: string[];
+  startDateUnavailable: boolean;
+};
 
 /**
  * Resolved field ids are stable for the life of a credential, so cache them
@@ -28,12 +33,12 @@ type FieldIds = { epicLink: string; sprint: string; storyPoints: string };
 const fieldIdCache = new Map<string, Promise<FieldIds>>();
 
 /**
- * Discover the epic-link, sprint, and story-points field ids for this tenant.
- * The numeric `customfield_NNNNN` differs per instance, but Jira's `schema.custom`
- * plugin identifier is invariant — so we match on that. Story points has no
- * single stable key on classic projects (it's a generic float), so we match
- * the team-managed `jsw-story-points` and otherwise keep the default. Any
- * failure falls back wholesale to `DEFAULT_FIELD_IDS`; nothing here is fatal.
+ * Discover the agile and timeline field ids for this tenant. Agile plugin ids
+ * identify epic link, sprint, and team-managed story points; their existing
+ * defaults keep board data usable after a discovery failure. Start date uses
+ * an exact trimmed name and a date schema because the datepicker plugin is
+ * generic. A failure marks start date unavailable and evicts this promise so
+ * the next operation retries discovery.
  */
 async function resolveFieldIds(cfg: JiraConfig): Promise<FieldIds> {
   const cacheKey = `${cfg.server}\0${cfg.authHeader}`;
@@ -46,10 +51,21 @@ async function resolveFieldIds(cfg: JiraConfig): Promise<FieldIds> {
     const fields: any[] = data;
     const byCustom = (key: string) =>
       fields.find((f) => (f?.schema?.custom ?? "").endsWith(key))?.id;
+    const startDate = fields
+      .filter(
+        (field) =>
+          typeof field?.id === "string" &&
+          typeof field?.name === "string" &&
+          field.name.trim().toLowerCase() === "start date" &&
+          field?.schema?.type === "date",
+      )
+      .map((field) => field.id as string);
     return {
       epicLink: byCustom("gh-epic-link") ?? DEFAULT_FIELD_IDS.epicLink,
       sprint: byCustom("gh-sprint") ?? DEFAULT_FIELD_IDS.sprint,
       storyPoints: byCustom("jsw-story-points") ?? DEFAULT_FIELD_IDS.storyPoints,
+      startDate: [...new Set(startDate)],
+      startDateUnavailable: false,
     };
   })();
   let pending: Promise<FieldIds>;
@@ -57,7 +73,7 @@ async function resolveFieldIds(cfg: JiraConfig): Promise<FieldIds> {
     // Failure handling belongs to the shared promise so every concurrent
     // caller gets the fallback. Eviction lets a later operation retry.
     if (fieldIdCache.get(cacheKey) === pending) fieldIdCache.delete(cacheKey);
-    return { ...DEFAULT_FIELD_IDS };
+    return { ...DEFAULT_FIELD_IDS, startDate: [], startDateUnavailable: true };
   });
   fieldIdCache.set(cacheKey, pending);
   return pending;
@@ -143,6 +159,10 @@ export type Issue = {
   labels: string[];
   sprintName?: string;
   storyPoints?: number;
+  startDate?: string;
+  dueDate?: string;
+  startDateState?: "unavailable" | "ambiguous" | "invalid";
+  dueDateState?: "invalid";
 };
 
 export type Transition = {
@@ -263,7 +283,6 @@ export type IssueDetail = Issue & {
   reporter?: string;
   components: string[];
   fixVersions: string[];
-  dueDate?: string;
   created: string;
   parentKey?: string;
   subtasks: { key: string; summary: string; statusName: string }[];
@@ -280,6 +299,37 @@ export type IssueDetail = Issue & {
    *  with the current value for standard fields (assignee, priority, etc). */
   rawFields: Record<string, any>;
 };
+
+type IssueDates = Pick<Issue, "startDate" | "dueDate" | "startDateState" | "dueDateState">;
+
+function extractIssueDates(fields: Record<string, any>, fieldIds: FieldIds): IssueDates {
+  const dates: IssueDates = {};
+  const dueDate = fields["duedate"];
+  if (typeof dueDate === "string") {
+    if (dueDate.trim()) dates.dueDate = dueDate;
+  } else if (dueDate !== null && dueDate !== undefined) {
+    dates.dueDateState = "invalid";
+  }
+  if (fieldIds.startDateUnavailable) {
+    dates.startDateState = "unavailable";
+    return dates;
+  }
+
+  const populated = new Set<string>();
+  for (const id of fieldIds.startDate) {
+    const value = fields[id];
+    if (typeof value === "string") {
+      if (value.trim()) populated.add(value);
+    } else if (value !== null && value !== undefined) {
+      dates.startDateState = "invalid";
+      return dates;
+    }
+  }
+  const values = [...populated];
+  if (values.length === 1) dates.startDate = values[0]!;
+  else if (values.length > 1) dates.startDateState = "ambiguous";
+  return dates;
+}
 
 function normalizeText(value: string): string {
   return value
@@ -561,9 +611,11 @@ export async function getBoardIssues(
     "description",
     "labels",
     "project",
+    "duedate",
     cf.epicLink,
     cf.sprint,
     estimateField,
+    ...cf.startDate,
     "parent",
   ].join(",");
   const all: Issue[] = [];
@@ -604,6 +656,7 @@ export async function getBoardIssues(
         projectKey: String(f.project?.key ?? it.key?.split("-")[0] ?? ""),
         subtask: Boolean(f.issuetype?.subtask),
         labels: Array.isArray(f.labels) ? f.labels : [],
+        ...extractIssueDates(f, cf),
       };
       if (f.assignee?.displayName) issue.assignee = f.assignee.displayName;
       if (f.priority?.name) issue.priority = f.priority.name;
@@ -741,6 +794,7 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
     rawFields: f,
     customFields,
     editmeta,
+    ...extractIssueDates(f, cf),
   };
   if (f.assignee?.displayName) detail.assignee = f.assignee.displayName;
   if (f.priority?.name) detail.priority = f.priority.name;
@@ -748,7 +802,6 @@ export async function getIssueDetail(cfg: JiraConfig, issueKey: string): Promise
   if (epic) detail.epicKey = epic;
   if (f.reporter?.displayName) detail.reporter = f.reporter.displayName;
   if (typeof f[cf.storyPoints] === "number") detail.storyPoints = f[cf.storyPoints];
-  if (f.duedate) detail.dueDate = f.duedate;
   if (f.parent?.key) detail.parentKey = f.parent.key;
   if (editmetaError !== undefined) detail.editmetaError = editmetaError;
   return detail;

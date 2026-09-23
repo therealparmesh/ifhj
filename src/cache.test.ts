@@ -203,6 +203,111 @@ describe("board cache", () => {
     });
   });
 
+  test("invalidates board v1 while retaining recents v1", async () => {
+    const result = await runCacheCase(
+      "versions",
+      `
+        const { readdir, writeFile } = await import("node:fs/promises");
+        const { join } = await import("node:path");
+        const cfg = jiraConfig("Basic versions");
+        await cache.writeBoardCache(cfg, 1, config, [issue(1)]);
+        await cache.writeRecents(cfg, 1, [{ key: "PROJ-1", summary: "One" }]);
+        const dir = join(process.env.HOME, ".cache", "ifhj");
+        const boardFile = (await readdir(dir)).find((name) => !name.includes("recents"));
+        const boardPath = join(dir, boardFile);
+        const boardPayload = JSON.parse(await Bun.file(boardPath).text());
+        const writtenBoardVersion = boardPayload.version;
+        boardPayload.version = 1;
+        await writeFile(boardPath, JSON.stringify(boardPayload));
+        const recentFile = (await readdir(dir)).find((name) => name.includes("recents"));
+        const recentPayload = JSON.parse(await Bun.file(join(dir, recentFile)).text());
+        console.log(JSON.stringify({
+          writtenBoardVersion,
+          oldBoard: await cache.readBoardCache(cfg, 1),
+          recentVersion: recentPayload.version,
+          recents: await cache.readRecents(cfg, 1),
+        }));
+      `,
+    );
+    expect(result).toEqual({
+      writtenBoardVersion: 2,
+      oldBoard: null,
+      recentVersion: 1,
+      recents: [{ key: "PROJ-1", summary: "One" }],
+    });
+  });
+
+  test("validates optional timeline date fields", async () => {
+    const result = await runCacheCase(
+      "timeline-fields",
+      `
+        const { readdir, writeFile } = await import("node:fs/promises");
+        const { join } = await import("node:path");
+        const cfg = jiraConfig("Basic timeline-fields");
+        const invalidStates = {
+          ...issue(1),
+          startDateState: "invalid",
+          dueDateState: "invalid",
+        };
+        await cache.writeBoardCache(cfg, 1, config, [
+          invalidStates,
+          {
+            ...issue(2),
+            startDate: "not-a-calendar-date",
+            dueDate: "2026-14-40",
+          },
+          { ...issue(3), startDateState: "unavailable" },
+          { ...issue(4), startDateState: "ambiguous" },
+        ]);
+        const dir = join(process.env.HOME, ".cache", "ifhj");
+        const file = (await readdir(dir)).find((name) => !name.includes("recents"));
+        const path = join(dir, file);
+        const payload = JSON.parse(await Bun.file(path).text());
+        const valid = await cache.readBoardCache(cfg, 1);
+        const invalid = {};
+        for (const [name, field, value] of [
+          ["startDateType", "startDate", 123],
+          ["dueDateType", "dueDate", { value: "2026-01-01" }],
+          ["startStateEnum", "startDateState", "unknown"],
+          ["startStateType", "startDateState", false],
+          ["dueStateEnum", "dueDateState", "ambiguous"],
+          ["dueStateType", "dueDateState", 0],
+        ]) {
+          payload.issues[0] = { ...invalidStates, [field]: value };
+          await writeFile(path, JSON.stringify(payload));
+          invalid[name] = await cache.readBoardCache(cfg, 1);
+        }
+        console.log(JSON.stringify({
+          invalidStates: valid.issues[0],
+          rawDates: valid.issues[1],
+          unavailable: valid.issues[2].startDateState,
+          ambiguous: valid.issues[3].startDateState,
+          invalid,
+        }));
+      `,
+    );
+    expect(result).toMatchObject({
+      invalidStates: {
+        startDateState: "invalid",
+        dueDateState: "invalid",
+      },
+      rawDates: {
+        startDate: "not-a-calendar-date",
+        dueDate: "2026-14-40",
+      },
+      unavailable: "unavailable",
+      ambiguous: "ambiguous",
+      invalid: {
+        startDateType: null,
+        dueDateType: null,
+        startStateEnum: null,
+        startStateType: null,
+        dueStateEnum: null,
+        dueStateType: null,
+      },
+    });
+  });
+
   test("missing and failed writes are non-fatal and a later write recovers", async () => {
     const result = await runCacheCase(
       "io-failure",

@@ -414,7 +414,7 @@ test("a touch waits for the initial recents read and preserves saved entries", a
   expect(result).toEqual({ before: ["OLD-1"], after: ["PROJ-1", "OLD-1"] });
 });
 
-test("overlapping moves keep independent locks and a failure cannot clear successful focus", async () => {
+test("overlapping moves keep independent locks and later navigation owns focus", async () => {
   const result = await runBoardCase(
     "moves",
     `
@@ -519,7 +519,7 @@ test("overlapping moves keep independent locks and a failure cannot clear succes
   expect(result).toEqual({
     transitionGets: 2,
     getsWhileLocked: 2,
-    opened: "PROJ-1",
+    opened: "PROJ-2",
     boardIssueCalls: 3,
     assignPuts: 0,
   });

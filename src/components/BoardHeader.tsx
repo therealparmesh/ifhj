@@ -1,11 +1,9 @@
 import { Box, Text } from "ink";
 
-import { type EstimateDisplay, formatEstimate, theme } from "../ui";
+import { normalizeText } from "../text";
+import { type EstimateDisplay, formatEstimate, theme, truncate } from "../ui";
 
-/**
- * Top-of-screen status line: board name, project, issue count, active
- * column, assignee filter badge, and a committed-search summary on the right.
- */
+/** One bounded board status row. */
 export function BoardHeader({
   boardName,
   projectKey,
@@ -17,76 +15,63 @@ export function BoardHeader({
   colCount,
   filterCount,
   swimlaneLabel,
+  timelineActive,
   query,
   matches,
   matchIdx,
+  termCols,
 }: {
   boardName: string;
   projectKey: string;
   visibleIssueCount: number;
   totalIssueCount: number;
-  /** Sum of configured estimates across currently-visible issues. Hidden when 0. */
   visiblePointSum: number;
   estimateDisplay: EstimateDisplay;
   colIndex: number;
   colCount: number;
   filterCount: number;
-  /** When the swimlane view is active, the grouping's label (e.g. "custom",
-   *  "assignee"). Absent/empty ⇒ flat board, no badge. */
   swimlaneLabel?: string;
+  timelineActive?: boolean;
   query: string;
   matches: number;
   matchIdx: number;
+  termCols: number;
 }) {
-  const estimateText = formatEstimate(visiblePointSum, estimateDisplay);
+  const estimate =
+    visiblePointSum > 0 ? ` · ${formatEstimate(visiblePointSum, estimateDisplay)}` : "";
+  const count = `${visibleIssueCount}${filterCount > 0 ? `/${totalIssueCount}` : ""} issues`;
+  const filters = filterCount > 0 ? ` · ${filterCount} filter${filterCount === 1 ? "" : "s"}` : "";
+  const view = timelineActive
+    ? "Timeline"
+    : swimlaneLabel
+      ? `${swimlaneLabel} lanes`
+      : colCount > 0
+        ? `col ${colIndex + 1}/${colCount}`
+        : "board";
+  const left = normalizeText(
+    `${view} · ${count}${filters}${estimate} · ${boardName}${projectKey ? ` · ${projectKey}` : ""}`,
+  );
+  const match = matches === 0 ? "no matches" : `${matchIdx + 1}/${matches}`;
+  const right = query ? `${match} · /${normalizeText(query)}` : "? help";
+  const width = Math.max(1, termCols - 2);
+  const rightWidth = Math.min(Math.floor(width * 0.4), Bun.stringWidth(right));
+  const leftWidth = Math.max(1, width - rightWidth - (rightWidth > 0 ? 1 : 0));
+
   return (
-    <Box paddingX={1} justifyContent="space-between">
-      <Box>
-        <Text color={theme.accent} bold>
-          ▎{boardName}
-        </Text>
-        {projectKey ? <Text color={theme.muted}> · {projectKey}</Text> : null}
-        <Text color={theme.muted}>
+    <Box paddingX={1} width={termCols}>
+      <Text color={theme.accent} bold wrap="truncate">
+        {pad(truncate(`▎${left}`, leftWidth), leftWidth)}
+      </Text>
+      {rightWidth > 0 ? (
+        <Text color={query ? theme.warning : theme.muted} wrap="truncate">
           {" "}
-          · {visibleIssueCount}
-          {filterCount > 0 ? ` / ${totalIssueCount}` : ""} issues
+          {truncate(right, rightWidth)}
         </Text>
-        {visiblePointSum > 0 ? <Text color={theme.muted}> · {estimateText}</Text> : null}
-        {colCount > 0 ? (
-          <Text color={theme.muted}>
-            {"  "}
-            col {colIndex + 1}/{colCount}
-          </Text>
-        ) : null}
-        {filterCount > 0 ? (
-          <>
-            <Text color={theme.muted}>{"  "}</Text>
-            <Text color={theme.info}>
-              {filterCount} filter{filterCount > 1 ? "s" : ""}
-            </Text>
-            <Text color={theme.muted}> (F clear)</Text>
-          </>
-        ) : null}
-        {swimlaneLabel ? (
-          <>
-            <Text color={theme.muted}>{"  "}</Text>
-            <Text color={theme.accentAlt}>≡ {swimlaneLabel} lanes</Text>
-          </>
-        ) : null}
-      </Box>
-      <Box>
-        {query ? (
-          <>
-            <Text color={theme.warning}>/{query}</Text>
-            <Text color={theme.muted}>
-              {"  "}
-              {matches === 0 ? "no matches" : `${matchIdx + 1}/${matches}`}
-            </Text>
-          </>
-        ) : (
-          <Text color={theme.muted}>? help</Text>
-        )}
-      </Box>
+      ) : null}
     </Box>
   );
+}
+
+function pad(value: string, width: number): string {
+  return value + " ".repeat(Math.max(0, width - Bun.stringWidth(value)));
 }

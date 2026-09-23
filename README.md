@@ -126,6 +126,7 @@ Pickers and required-field screens scroll to keep the selected row and controls 
 | `n` / `N`       | next / prev search match                           |
 | `f`             | filter menu (assignee, type, sprint, label, epic)  |
 | `s`             | toggle swimlane view (grouped lanes)               |
+| `T`             | toggle Timeline view                               |
 | `F`             | clear all filters                                  |
 | `R`             | quick open — recents, or type to search all issues |
 | `J`             | JQL query view                                     |
@@ -175,6 +176,33 @@ From a loaded issue, `C` creates a subtask in that issue's project. Boards witho
 ### Swimlanes
 
 When a board defines swimlanes, `s` groups it into horizontal lanes. Custom (JQL) lanes come from the board's own config, evaluated server-side; assignee, epic, issue-type, and parent lanes are grouped locally. Cards render one per line so several lanes fit on screen at once.
+
+### Timeline
+
+Press `T` from the flat board or swimlanes to open Timeline. Press `T` or `Esc` in the main Timeline to return to the same board representation. Esc on a flat or swimlane board does not open Timeline. Timeline uses the active board filters and highlight query. It keeps dated, undated, invalid, and off-window issues visible. Jira date-only values use UTC-day arithmetic, while Today uses your local calendar date.
+
+A valid Start date through Due date is an inclusive range. A single known date is a point. Reversed ranges and invalid dates are not changed or guessed. If Start date metadata is unavailable or conflicting, Timeline says so instead of confirming that the issue is unscheduled. Valid scheduled rows sort by their first date, then issue key. All date-diagnostic rows follow, including rows that can still plot one known endpoint. Diagnostic rows with a usable endpoint sort by that date, then diagnostics without a usable endpoint sort by issue key. Confirmed Unscheduled rows are last and sort by issue key.
+
+The ruler uses `S` for a Start-only point, `D` for a Due-only point, `=` for an inclusive range, `<` or `>` for clipped dates, `!` for a date problem, and `~` for an updating issue. `?` means Unscheduled after fresh data or unconfirmed while cached data waits for refresh. Today has its own `^` ruler marker.
+
+The first Timeline window uses the selected issue when it has a usable date. For an interval, it uses Today when Today is inside the interval, or the nearest endpoint otherwise. If the selected issue has no usable date, Timeline chooses the nearest trustworthy interval or point. This includes a known Due date when Start metadata is unavailable or ambiguous. Cached rows with no dates remain unconfirmed until the fresh board load completes.
+
+Month panning remembers the preferred day, so January 31 can move through February and return to January 31. Day or week pan, `0`, and `.` start a new date anchor. Wrong-typed Jira values appear as `Invalid Start date` or `Invalid Due date`; a trustworthy opposite endpoint remains plotted.
+
+| Key             | Timeline action                               |
+| --------------- | --------------------------------------------- |
+| `← → h l`       | pan one calendar bucket                       |
+| `↑ ↓ j k`       | select previous / next issue                  |
+| `g` / `G`       | first / last issue                            |
+| `PgUp` / `PgDn` | page issue rows                               |
+| `+` / `=` / `-` | zoom in / out through Days, Weeks, and Months |
+| `0`             | center Today                                  |
+| `.`             | center the selected issue's usable date       |
+| `Esc` / `T`     | return to the previous board representation   |
+| `s`             | enter configured swimlanes                    |
+| `v` / `Enter`   | issue detail / action menu                    |
+
+The normal issue actions, filters, highlight navigation, create, refresh, quick open, JQL, browser, copy, and notification keys continue to target the current Timeline issue. Quick add, rank, and direct previous/next-column keys (`a`, `[ ]`, `< >`) are disabled because Timeline has no current column. Timeline does not drag, reschedule, or write dates. Press `v` to edit available date fields in issue details.
 
 ### Quick open
 
